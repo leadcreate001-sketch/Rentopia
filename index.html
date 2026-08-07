@@ -5158,7 +5158,7 @@ function showTitle(hasSave) {
       }
       .ttl-primary {
         position: absolute; left: 50%; bottom: calc(23% + env(safe-area-inset-bottom, 0px));
-        transform: translateX(-50%); width: min(86vw, 420px); height: 64px; border-radius: 999px;
+        transform: translateX(-50%); width: calc(min(78vw, 340px) * 0.75 + 48px); height: 45px; border-radius: 999px;
         background: linear-gradient(180deg, #3b82f6, #1d4ed8); border: 1px solid rgba(255,255,255,0.45);
         box-shadow: 0 8px 24px rgba(30,64,175,0.5), inset 0 1px 0 rgba(255,255,255,0.6);
         backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
@@ -5177,15 +5177,15 @@ function showTitle(hasSave) {
       }
       .ttl-ic-row {
         position: absolute; left: 50%; bottom: calc(6% + env(safe-area-inset-bottom, 0px));
-        transform: translateX(-50%); width: min(92vw, 460px); display: flex; justify-content: space-around;
+        transform: translateX(-50%); width: min(78vw, 340px); display: flex; justify-content: space-around;
       }
       .ttl-ic { display: flex; flex-direction: column; align-items: center; gap: 4px; background: none; border: none; padding: 0; }
       .ttl-ic-circle {
-        width: 56px; height: 56px; border-radius: 999px; background: rgba(255,255,255,0.92); border: 2px solid #d4af37;
+        width: 48px; height: 48px; border-radius: 999px; background: rgba(255,255,255,0.92); border: 2px solid #d4af37;
         display: flex; align-items: center; justify-content: center; color: #1e3a5f; box-shadow: 0 2px 10px rgba(0,0,0,0.25);
       }
-      .ttl-ic-circle svg { width: 26px; height: 26px; }
-      .ttl-ic-label { font-size: 11px; color: rgba(255,255,255,0.92); text-shadow: 0 1px 3px rgba(2,6,23,0.9), 0 0 6px rgba(2,6,23,0.6); }
+      .ttl-ic-circle svg { width: 22px; height: 22px; }
+      .ttl-ic-label { font-size: 10px; color: rgba(255,255,255,0.92); text-shadow: 0 1px 3px rgba(2,6,23,0.9), 0 0 6px rgba(2,6,23,0.6); }
       .ttl-ic.is-disabled .ttl-ic-circle { opacity: 0.45; }
       .ttl-bg-photo { object-fit: cover; object-position: center bottom; }
       @media (min-aspect-ratio: 1/1) {
@@ -5195,9 +5195,6 @@ function showTitle(hasSave) {
            フォントを落として隙間ぎりぎりでも重ならないようにする（§3「要素が重ならないことを最優先」）。 */
         .ttl-primary-caption { bottom: calc(32% + env(safe-area-inset-bottom, 0px) - 11px); font-size: 10px; line-height: 1; }
         .ttl-ic-row { bottom: calc(6% + env(safe-area-inset-bottom, 0px)); }
-        .ttl-ic-circle { width: 48px; height: 48px; }
-        .ttl-ic-circle svg { width: 22px; height: 22px; }
-        .ttl-ic-label { font-size: 10px; }
         /* 横長はcover+bottom基準だと全幅表示になり、右手前のタワーが実寸のまま
            大きく写り込んでボタンと衝突する。中央寄りのクロップに切り替えて回避する
            （上部の空が削れるのは許容: ユーザー指示）。 */
