@@ -5129,7 +5129,7 @@ function showTitle(hasSave) {
   })();
 
   const bgLayer = `<div class="absolute inset-0" style="background:linear-gradient(180deg,#bfe4f8 0%,#e6f4fb 45%,#fbe8c8 100%);"></div>${ttlBgArtSvg()}` +
-    (TITLE_BG_SRC ? `<img src="${TITLE_BG_SRC}" alt="" class="absolute inset-0 w-full h-full" style="object-fit:cover;object-position:center bottom;" onerror="this.remove()">` : '');
+    (TITLE_BG_SRC ? `<img src="${TITLE_BG_SRC}" alt="" class="absolute inset-0 w-full h-full ttl-bg-photo" onerror="this.remove()">` : '');
 
   // 背景の被せ（スクリム）は、写真とフォールバックで真逆の要求になるため出し分ける。
   // 写真: 空が明るく、ロゴ画像の文字は濃紺。上を暗くすると逆にロゴが読めなくなる
@@ -5137,7 +5137,7 @@ function showTitle(hasSave) {
   // フォールバック: ロゴが金色の文字なので、従来どおり上部を暗くしないと沈む。
   // 下部はどちらもUIが乗るので暗く落とす（丸アイコン・ラベルの可読性を優先）。
   const scrim = TITLE_BG_SRC
-    ? 'linear-gradient(180deg, rgba(2,6,23,0) 0%, rgba(2,6,23,0) 44%, rgba(11,18,32,0.42) 62%, rgba(11,18,32,0.84) 80%, rgba(11,18,32,0.95) 100%)'
+    ? 'linear-gradient(180deg, rgba(2,6,23,0) 0%, rgba(2,6,23,0) 55%, rgba(11,18,32,0.18) 70%, rgba(11,18,32,0.38) 85%, rgba(11,18,32,0.55) 100%)'
     : 'linear-gradient(180deg, rgba(2,6,23,0.6) 0%, rgba(2,6,23,0.05) 20%, rgba(2,6,23,0.22) 50%, rgba(11,18,32,0.88) 72%, rgba(11,18,32,0.98) 100%)';
 
   const logoInner = TITLE_LOGO_SRC
@@ -5157,7 +5157,7 @@ function showTitle(hasSave) {
         50%      { box-shadow: 0 8px 34px rgba(30,64,175,0.78), inset 0 1px 0 rgba(255,255,255,0.6); }
       }
       .ttl-primary {
-        position: absolute; left: 50%; bottom: calc(18% + env(safe-area-inset-bottom, 0px));
+        position: absolute; left: 50%; bottom: calc(23% + env(safe-area-inset-bottom, 0px));
         transform: translateX(-50%); width: min(86vw, 420px); height: 64px; border-radius: 999px;
         background: linear-gradient(180deg, #3b82f6, #1d4ed8); border: 1px solid rgba(255,255,255,0.45);
         box-shadow: 0 8px 24px rgba(30,64,175,0.5), inset 0 1px 0 rgba(255,255,255,0.6);
@@ -5171,8 +5171,9 @@ function showTitle(hasSave) {
         animation: ttlSweep 3.2s ease-in-out infinite;
       }
       .ttl-primary-caption {
-        position: absolute; left: 50%; bottom: calc(18% + env(safe-area-inset-bottom, 0px) - 18px);
-        transform: translateX(-50%); font-size: 11px; line-height: 1.3; color: rgba(255,255,255,0.7); white-space: nowrap;
+        position: absolute; left: 50%; bottom: calc(23% + env(safe-area-inset-bottom, 0px) - 18px);
+        transform: translateX(-50%); font-size: 11px; line-height: 1.3; color: rgba(255,255,255,0.85); white-space: nowrap;
+        text-shadow: 0 1px 3px rgba(2,6,23,0.9), 0 0 6px rgba(2,6,23,0.6);
       }
       .ttl-ic-row {
         position: absolute; left: 50%; bottom: calc(6% + env(safe-area-inset-bottom, 0px));
@@ -5184,25 +5185,30 @@ function showTitle(hasSave) {
         display: flex; align-items: center; justify-content: center; color: #1e3a5f; box-shadow: 0 2px 10px rgba(0,0,0,0.25);
       }
       .ttl-ic-circle svg { width: 26px; height: 26px; }
-      .ttl-ic-label { font-size: 11px; color: rgba(255,255,255,0.92); text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+      .ttl-ic-label { font-size: 11px; color: rgba(255,255,255,0.92); text-shadow: 0 1px 3px rgba(2,6,23,0.9), 0 0 6px rgba(2,6,23,0.6); }
       .ttl-ic.is-disabled .ttl-ic-circle { opacity: 0.45; }
+      .ttl-bg-photo { object-fit: cover; object-position: center bottom; }
       @media (min-aspect-ratio: 1/1) {
         .ttl-logo-wrap { max-height: 26vh !important; }
-        .ttl-primary { bottom: calc(16% + env(safe-area-inset-bottom, 0px)); }
+        .ttl-primary { bottom: calc(32% + env(safe-area-inset-bottom, 0px)); }
         /* 横長は大ボタンと丸アイコン列の間隔が縦長より詰まるため、キャプションは
            フォントを落として隙間ぎりぎりでも重ならないようにする（§3「要素が重ならないことを最優先」）。 */
-        .ttl-primary-caption { bottom: calc(16% + env(safe-area-inset-bottom, 0px) - 11px); font-size: 10px; line-height: 1; }
+        .ttl-primary-caption { bottom: calc(32% + env(safe-area-inset-bottom, 0px) - 11px); font-size: 10px; line-height: 1; }
         .ttl-ic-row { bottom: calc(6% + env(safe-area-inset-bottom, 0px)); }
         .ttl-ic-circle { width: 48px; height: 48px; }
         .ttl-ic-circle svg { width: 22px; height: 22px; }
         .ttl-ic-label { font-size: 10px; }
+        /* 横長はcover+bottom基準だと全幅表示になり、右手前のタワーが実寸のまま
+           大きく写り込んでボタンと衝突する。中央寄りのクロップに切り替えて回避する
+           （上部の空が削れるのは許容: ユーザー指示）。 */
+        .ttl-bg-photo { object-position: center 65%; }
       }
     </style>
     ${bgLayer}
     <!-- v-title.2: 72%より下（大ボタン〜丸アイコン列の帯）はほぼ無地の濃紺(#0b1220相当)に沈めて、
          背景アートの継ぎ目やUIとの衝突を隠しつつコントラストを上げる。 -->
     <div class="absolute inset-0" style="background:${scrim};"></div>
-    <div class="absolute left-1/2" style="top:6%; width:min(80vw,460px); max-width:90vw; transform:translateX(-50%);">
+    <div class="absolute left-1/2" style="top:13%; width:min(80vw,460px); max-width:90vw; transform:translateX(-50%);">
       <div class="ttl-logo-wrap" style="max-height:22vh; display:flex; align-items:center; justify-content:center;">${logoInner}</div>
       <!-- 白11pxを明るい青空に置くとコントラスト比2.97しか出ないため、影で輪郭を作って読ませる。
            空全体を暗くする（スクリムを足す）とロゴの濃紺が沈むので、影だけで解決する。 -->
