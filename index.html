@@ -2685,13 +2685,13 @@ const safeNet = (s) => netWorth({ ...s, properties: s.properties || [] });
 export const REGIONS = {
   main: {
     key: 'main', label: '国内', icon: '🏙️', ready: true, unlock: null,
-    lat: -0.05, lon: 0, radius: 1.15,
+    lat: -0.05, lon: 0, radius: 1.30,
     desc: '君が大家を始めた土地。中心は都心、外へ行くほど地方になる。',
   },
   newbuild: {
     key: 'newbuild', label: '新築', icon: '🏗️', ready: false,
     gate: '入場条件：土地建築プレイヤー限定',
-    lat: 0.05, lon: 1.81, radius: 0.6, roadTo: 'main',
+    lat: 0.05, lon: 1.99, radius: 0.68, roadTo: 'main',
     desc: '土地の取得から設計プランニングまで、理想の収益物件をゼロからプロデュースできる開発特区です。',
     unlock: { mode: 'or', conds: [
       { key: 'props',    label: '所有物件', need: 3,           fmt: 'count', cur: s => (s.properties || []).length },
@@ -2701,7 +2701,7 @@ export const REGIONS = {
   auction: {
     key: 'auction', label: '競売', icon: '⚖️', ready: false,
     gate: '入場条件：競売プレイヤー限定',
-    lat: 0.05, lon: -1.81, radius: 0.6, roadTo: 'main',
+    lat: 0.05, lon: -1.99, radius: 0.68, roadTo: 'main',
     desc: '市場価格以下の物件を入札で競り落とし、価値を再構築して高利回りを狙えるエリアです。',
     unlock: { mode: 'and', conds: [
       { key: 'junk', label: '訳あり物件の再生', need: 3, fmt: 'count', cur: s => s.stats?.junkRepairs ?? 0 },
@@ -2710,7 +2710,7 @@ export const REGIONS = {
   overseas: {
     key: 'overseas', label: '海外', icon: '🌏', ready: false, island: true,
     gate: '入場条件：グローバル投資家限定',
-    lat: 1.18, lon: 3.14, radius: 0.35,
+    lat: 0.98, lon: 3.14, radius: 0.35,
     desc: '国境を越えた物件購入から通貨の活用まで、グローバルな市場で巨額の資産を動かせるワールド特区です。',
     unlock: { mode: 'and', conds: [
       { key: 'corp',     label: '法人の設立', need: 1,            fmt: 'bool', cur: s => (s.isIncorporated ? 1 : 0) },
@@ -2720,17 +2720,30 @@ export const REGIONS = {
 };
 
 // 見た目のパラメータ（すべて world-sample でユーザーが実際に動かして確定した値）。
-export const SEA_GAP = 0.05;     // 陸と陸のあいだに最低限あける海（角距離）
-export const ROAD_W = 0.09;      // 街道の太さの基準（球の半径Rに対する比）
-export const ZOOM_MIN = 0.66;    // ズーム下限（陸地が増えたので現行0.70から下げる）
-export const LAND_FILL = 2.05;   // 陸地の埋まり具合（海岸線ブロブの本数の倍率）
-export const BLD_RANGE = 0.84;   // 建物を置く範囲（陸地半径に対する比）
-export const ROAD_CURVE = 0.52;  // 街道の蛇行の強さ（0＝直線）
-export const CAPES = 12;         // 岬の数（外へ突き出す地形。入り江は廃止— 海の色で抜くと池にしか見えなかった）
-export const CAPE_SIZE = 1.6;    // 岬1本ごとの長さ・付け根の太さの倍率
-export const ROAD_CLEAR = 0.055; // この幅より街道に近い場所には建物・山を置かない
-export const LAKES = 1;          // 内陸の池の数
-export const HILLS = 15;         // 山（地形記号）の数
+export const SEA_GAP = 0.00;     // 陸と陸のあいだに最低限あける海（角距離）（2026-08-09 サンプル確定値に合わせた）
+export const ROAD_W = 0.040;      // 街道の太さの基準（球の半径Rに対する比）。2026-08-09: オーナー要望で0.09から縮小
+export const ZOOM_MIN = 0.80;    // ズーム下限（陸地が増えたので現行0.70から下げる）（2026-08-09 サンプル確定値に合わせた）
+export const BLD_RANGE = 0.95;   // 建物を置く範囲（陸地半径に対する比）。旧0.84→0.95に拡大。
+export const ROAD_CURVE = 0.33;  // 街道の蛇行の強さ（0＝直線）。旧0.52→0.33。
+export const CAPES = 10;         // 岬の数。旧12→10。
+export const CAPE_SIZE = 2.0;    // 岬1本ごとの長さ・付け根の太さの倍率。旧1.6→2.0。
+export const ROAD_CLEAR = 0.005; // この幅より街道・路地に近い場所には建物・山を置かない。旧0.055→0.005。
+export const LAKES = 2;          // 内陸の池の数（本土基準）。旧1→2。
+export const HILLS = 40;         // 山（峰）の数（本土基準）。旧15→40。峰は稜線の上に並べる。
+
+// 2026-08-08 追加: 地形の見た目の刷新（v9-B）。海岸線・池・山脈・川・路地を
+// world-sample.tmp.html で確定した値のまま移植する。
+export const COAST_AMP = 0.55;   // 海岸線の歪み（ノイズの振幅）
+export const COAST_OCT = 8;      // 海岸線の細かさ（重ねる波の数。2〜8の整数）
+export const SHELF = 0.14;       // 浅瀬の幅（海岸線の外側に出る比率）
+export const LAKE_WARP = 0.60;   // 池の歪み
+export const RIVERS = 2;         // 川の数（本土基準）
+export const RIVER_CURVE = 1.20; // 川の蛇行の強さ
+export const RIDGES = 4;         // 山脈（稜線）の本数（本土基準）
+export const HILL_VAR = 2.50;    // 山の大小差（べき分布の指数。大きいほど少数の大峰＋多数の小峰になる）
+export const LANE_COUNT = 5;     // 陸地内部の路地の本数（本土基準）
+export const BLD_BAND = 0.300;   // 建物が路地・街道から広がる幅
+export const COAST_CLEAR = 0.010; // 建物が海岸から空ける最小幅（高い建物ほど自動で広がる。city.mjs側で階数に比例させる）
 
 // 球面上の角距離。cos(d) = sin φ1 sin φ2 + cos φ1 cos φ2 cos(Δλ)
 export function regionAngularDistance(a, b) {
@@ -3727,7 +3740,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, capGainTaxRate, capGainOf, capGainTaxOf, loanPayoffOf, CONSUMPTION_TAX, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, scrivenerFee, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, assessedValue, assessedValueOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, settleSale, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, startRestore, REPAIR_KINDS, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, applyValueUp, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, LAND_FILL, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_AMOUNT, BANKS, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, capGainTaxRate, capGainOf, capGainTaxOf, loanPayoffOf, CONSUMPTION_TAX, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, scrivenerFee, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, assessedValue, assessedValueOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, settleSale, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, startRestore, REPAIR_KINDS, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, applyValueUp, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_AMOUNT, BANKS, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -3754,7 +3767,10 @@ let dragging = false, lastX = 0, lastY = 0, moved = 0;
 let zoom = HOME.zoom;
 // v9-A: 下限は logic 側の L.ZOOM_MIN（0.66）を使う。陸地が4つに増えたので、より引けるようにした。
 // ここで const ZOOM_MIN を宣言すると、インライン化で logic の export と衝突してゲームが起動しなくなる。
-const ZOOM_MAX = 2.5;
+// 2026-08-10: 2.5→3.25(+30%)。ZOOM_UNIFORM_FROM を超える範囲は zoomFactor を凍結するため、
+// size ∝ R ∝ zoom となり「単純に拡大」される（従来の範囲の挙動は一切変えていない）。
+const ZOOM_MAX = 3.25;
+const ZOOM_UNIFORM_FROM = 2.5;
 const activePtrs = new Map();
 let pinchDist = 0, pinching = false;
 let rafId = 0, lastFrame = 0;
@@ -3766,7 +3782,11 @@ let viewAnim = null;  // v5: 翌月ボタンでゆっくり初期位置へ戻す
 // 各陸地は本土と同じ同心円構造（中心＝都心コア／外周＝郊外・地方）を、半径に対する比率で持つ。
 // 既存ロジックの areaKey(urban/local) は、陸地ごとの「都心コア寄り／郊外〜地方寄り」の半径帯へ対応させる。
 const REGION_LIST = Object.values(L.REGIONS);
-const CORE_RATIO = 0.286;   // 旧 CORE_R 0.30 ÷ OUTER_R 1.05 と同じ比率
+// 2026-08-09: 0.286→0.35に拡大。bandFor()専用の実物件配置帯（路地・建物の生成には無関係）で、
+// 道の離隔を正しいサイズに直した結果、都心コア帯が狭すぎると路地沿いの有効な置き場所を
+// 見つけにくくなるため、その分だけ帯を広げて余裕を持たせた。LANE_COUNT・MID_RATIOや
+// 路地/道そのものの生成ロジックは意図的に変更していない（道路網のレイアウトは現状維持の方針）。
+const CORE_RATIO = 0.35;
 const MID_RATIO = 0.619;    // 旧 MID_R 0.65 ÷ OUTER_R 1.05
 function regionOf(key) { return L.REGIONS[key] || L.REGIONS.main; }
 function regionUnlocked(r) { return st ? L.isRegionUnlocked(st, r.key) : r.key === 'main'; }
@@ -3794,18 +3814,38 @@ function slerpLL(a, b, t) {
 
 // v5: 建物の大きさは「球の半径Rに対する比率」で決める。絶対pxで持つと画面サイズによって
 // 見え方（密集度）が変わってしまうため。ユーザーが実サンプルを動かして確定した値。
-const PROP_SIZE = 0.100;    // 実物件（所有・市場）
-const FILLER_SIZE = 0.0868; // 雰囲気建物。実物件よりわずかに小さく、背景に退く
-const FILLER_COUNT = 200;   // 生成する雰囲気建物の総数
-const MIN_SEP = 0.15;       // 実物件どうしの最小間隔（重なり回避の押し出しに使う）
+// 2026-08-09: ユーザーが実機の調整ツールで確定した値（実物件は雰囲気建物の1.50倍）
+const PROP_SIZE = 0.060;    // 実物件（所有・市場）
+// 2026-08-09: 雰囲気建物の描画式を world-sample.tmp.html のもの（高さ=size×(0.42+階数×0.30)）に
+// 差し替えた際、入力側のこのサイズ定数だけ旧描画式（高さ=size×(0.30+階数×0.14)）向けの値
+// 0.0868 のまま取り残されていた。新しい式にそのまま渡すと約4.11倍の大きさになり、島全体を
+// 覆って池・川・地面の色が見えなくなっていた。world-sample.tmp.html の
+// `R * 0.030 * P.bldSize` と同じ値の 0.030 に合わせる。
+// 2026-08-09: ユーザーが実機の調整ツールで確定した値（実物件は雰囲気建物の1.50倍）
+const FILLER_SIZE = 0.040;  // 雰囲気建物。実物件の約2/3で、背景に退く
+// 2026-08-09: PROP_SIZE を 0.100→0.060 に縮めたのに合わせて 0.15→0.09 に比例縮小
+const MIN_SEP = 0.09;       // 実物件どうしの最小間隔（重なり回避の押し出しに使う）
+
+// 2026-08-09: 道の「実際に描かれる太さ」と「建物の実際の幅」から離隔を導くための基準値。
+// ROAD_CLEAR定数だけでは道の描画幅（drawLandmasses/drawRoadのlineWidth式）より狭く、
+// 建物が道にめり込む不具合があったため、描画式そのものと同じ計算で半幅を求める。
+const ALLEY_ROAD_HALF = L.ROAD_W * 0.22 / 2;     // 路地の路面半幅（drawLandmassesの路地lineWidthと同じ式）
+const HIGHWAY_ROAD_HALF = L.ROAD_W * 0.42 / 2;   // 街道の路面半幅（drawRoadのlineWidthと同じ式）
+// BLD_STYLEの最大w（kubun=1.14）とdrawFillerBuildingの最大wide（0.8+1.0*0.5=1.3）を基準に、
+// 建物サイズ×0.60(filler)/1.0(実物件の基準)から実際に描かれる最大幅の半分を求める。
+const PROP_HALF = PROP_SIZE * 1.14 / 2;          // 実物件の最大幅ジャンル(区分, g.w=1.14)を基準にした半幅
+const FILLER_HALF = FILLER_SIZE * 0.30 * 1.3;    // 雰囲気建物の最大幅(wide最大1.3)を基準にした半幅
 
 // v5: ズームと建物サイズの関係。Rはzoomに比例するので、建物をRに比例させるだけだと
 // 密集度がズームによらず一定になってしまう。そこで
 //   引くとき(zoom<1): さらに強く縮めて「引くほど小さく・空く」
 //   寄るとき(zoom>1): 伸びを抑えて「寄るほど互いに離れる」
 // という補正をかける。
+// zoom<=1: 引くほど強く縮めて空ける。1〜ZOOM_UNIFORM_FROM: 寄るほど互いに離す（従来通り）。
+// ZOOM_UNIFORM_FROM超: 凍結して純粋な拡大にする（アイコンがほとんど大きくならない問題への対応）。
 function zoomFactor() {
-  return zoom <= 1 ? Math.pow(zoom, 1.2) : Math.pow(zoom, -0.65);
+  if (zoom <= 1) return Math.pow(zoom, 1.2);
+  return Math.pow(Math.min(zoom, ZOOM_UNIFORM_FROM), -0.65);
 }
 function propUnit() { return R * PROP_SIZE * zoomFactor(); }
 function fillerUnit() { return R * FILLER_SIZE * zoomFactor(); }
@@ -3882,6 +3922,52 @@ function drawBuilding(x, y, size, o) {
   if (o.tilt) ctx.rotate(o.tilt);
 
   const left = -w / 2, sideW = w * 0.15, innerW = w - sideW, top = -h;
+
+  // 所有物件の外枠リング用シルエット。壁・側面・屋根に加え、横や上へ張り出す外階段・屋上設備も
+  // 1つのパスにまとめる（輪郭が本体の形と食い違って見えないようにするため）。
+  const shellPath = () => {
+    ctx.beginPath();
+    ctx.rect(left, top, innerW, h);
+    ctx.rect(left + innerW, top, sideW, h);
+    if (g.roofType === 'gable') {
+      ctx.moveTo(left - w * 0.10, top);
+      ctx.lineTo(0, top - h * 0.36);
+      ctx.lineTo(left + w + w * 0.10, top); ctx.closePath();
+    } else if (g.roofType === 'shed') {
+      ctx.moveTo(left - w * 0.09, top);
+      ctx.lineTo(left + w + w * 0.09, top - h * 0.22);
+      ctx.lineTo(left + w + w * 0.09, top - h * 0.10);
+      ctx.lineTo(left - w * 0.09, top + h * 0.045); ctx.closePath();
+    } else if (g.roofType === 'parapet') {
+      ctx.rect(left - w * 0.05, top - h * 0.075, w * 1.10, h * 0.075);
+    } else {
+      ctx.rect(left - w * 0.05, top - h * 0.038, w * 1.10, h * 0.038);
+    }
+    if (g.stairBox) ctx.rect(left - w * 0.15, top + h * 0.12, w * 0.15, h * 0.88);      // アパート: 左へ張り出す箱型外階段
+    if (g.stairZig) ctx.rect(left + w + w * 0.02, top, w * 0.14, h);                     // 鉄骨: 右へ張り出すジグザグ外階段
+    if (g.tank) ctx.rect(left + innerW * 0.16, top - h * 0.145, innerW * 0.34, h * 0.075);   // 鉄骨: 屋上の貯水タンク
+    if (g.roofType === 'rooftop') ctx.rect(left + innerW * 0.10, top - h * 0.085, innerW * 0.66, h * 0.048);   // RC: 屋上設備
+  };
+  if (owned) {                                    // 2026-08-09: 所有物件をひと目で分かるようにする金色の外枠。
+    // シルエットを1本のパスにして太い線でstrokeすると線幅の半分が外側に出るため、縦横比によらず
+    // 全方向へ均一な太さのリングになる（旧ctx.scale方式は上下左右のはみ出し量が食い違っていた）。
+    // 2026-08-10: 太さ(0.10)・最小px(1.5)はオーナーが?ring=1の実機調整ツールで確定した値。
+    // 点滅の周期・下限・色はツールの既定値のまま変更されなかったため、ツール追加前の元の式に戻した。
+    const t = performance.now() / 1000;
+    const pulse = 0.725 + 0.275 * Math.sin(t * 3.6);   // 周期約1.75秒・振幅0.45〜1.0で完全には消えない「呼吸」表現
+    const ring = Math.max(1.5, size * 0.10);           // 2026-08-10 実機確定値
+    ctx.save();
+    ctx.globalAlpha = (o.alpha == null ? 1 : o.alpha) * pulse;
+    ctx.fillStyle = 'rgba(251,191,36,1)';              // 251,191,36 = GOLD(#fbbf24)
+    ctx.strokeStyle = 'rgba(251,191,36,1)';
+    ctx.lineWidth = ring * 2;                          // 線幅の半分(=ring)だけ外側にはみ出す
+    ctx.lineJoin = 'round';
+    shellPath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
   ctx.fillStyle = wall; ctx.fillRect(left, top, innerW, h);
   ctx.fillStyle = side; ctx.fillRect(left + innerW, top, sideW, h);
 
@@ -3936,7 +4022,6 @@ function drawBuilding(x, y, size, o) {
       ctx.beginPath(); ctx.arc(left + innerW * 0.27, top - h * 0.100, Math.max(0.9, size * 0.020), 0, TAU); ctx.fill();
     }
   }
-
   // 窓。所有物件は入居率のぶんだけ下の階から金色に灯る（＝地図だけで稼働状況が分かる）。
   const rects = windowRects(g, left, top, w, h, innerW);
   const litN = owned ? Math.round(rects.length * (o.occ == null ? 1 : o.occ)) : 0;
@@ -4004,7 +4089,7 @@ function drawBuilding(x, y, size, o) {
     for (let i = 0; i < 5; i++) { px += (rnd() - 0.4) * w * 0.14; py += h * 0.17; ctx.lineTo(px, py); }
     ctx.stroke();
   }
-  ctx.strokeStyle = owned ? 'rgba(15,23,42,0.5)' : 'rgba(30,41,59,0.5)';
+  ctx.strokeStyle = 'rgba(30,41,59,0.5)';
   ctx.lineWidth = Math.max(0.6, size * 0.024);
   ctx.strokeRect(left, top, w, h);
   if (o.weed && detail) {                         // ボロ: 足元の雑草
@@ -4024,21 +4109,59 @@ function drawBuilding(x, y, size, o) {
   ctx.restore();
 }
 
-// 雰囲気建物（タップ不可・背景）: 濃紺のシルエット＋ごく淡い金の窓。
-// ピンハネ帝国のタイトル画面の摩天楼と同じ質感にして「夜の街」に見せる。
-function drawFillerBuilding(x, y, size, stories, seed, alpha) {
+// 雰囲気建物（タップ不可・背景）: world-sample.tmp.htmlのdrawTowersと同じ2.5Dの箱
+// （正面＋側面＋屋上＋接地影）に統一した（2026-08-09刷新）。旧版は単色のシルエット1枚だけで
+// tierによる違いが無かった＝「雰囲気がサンプルと違う」の主因だった。tierで配色を変え、
+// 地方の低層は切妻屋根の家にする。実物件（drawBuilding）はジャンル別シルエット・所有グレー/
+// カラー・傷み表現を持つ既存システムのため対象外（ユーザー確認2026-08-09、こちらは変更しない）。
+const FILLER_TIER = [
+  { front: 'hsl(206, 22%, 68%)', side: 'hsl(206, 24%, 48%)', roof: 'hsl(206, 20%, 80%)', win: 'rgba(186,226,255,0.60)' }, // 都心＝青寄りの高層
+  { front: 'hsl(35, 14%, 64%)',  side: 'hsl(35, 16%, 45%)',  roof: 'hsl(35, 14%, 76%)',  win: 'rgba(251,191,36,0.50)' }, // 郊外＝茶系の中層
+  { front: 'hsl(42, 26%, 78%)',  side: 'hsl(42, 22%, 56%)',  roof: 'hsl(8, 42%, 44%)',   win: 'rgba(251,191,36,0.50)' }, // 地方＝クリーム壁+赤い屋根
+];
+function drawFillerBuilding(x, y, size, stories, seed, alpha, tier) {
   const rnd = srand(seed);
-  const w = size * (stories >= 5 ? 0.56 : 0.70), h = size * (0.30 + stories * 0.14);
+  const c = FILLER_TIER[tier] || FILLER_TIER[1];
+  const wide = 0.8 + rnd() * 0.5;
+  const w = size * 0.60 * wide, h = size * (0.42 + stories * 0.30);
+  if (h < 1.2 || w < 0.8) return;
+  const dp = Math.max(0.6, w * 0.30);
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = '#0d1a2e'; ctx.fillRect(x - w / 2, y - h, w, h);
-  ctx.fillStyle = 'rgba(148,163,184,0.16)'; ctx.fillRect(x - w / 2, y - h, w, Math.max(0.8, h * 0.05));
-  const cols = Math.max(2, Math.round(w / (size * 0.20))), rows = Math.max(1, stories);
-  const gx = w / (cols + 1), gy = h / (rows + 1);
-  for (let r = 1; r <= rows; r++) for (let c = 1; c <= cols; c++) {
-    if (rnd() < 0.45) continue;
-    ctx.fillStyle = `rgba(251,191,36,${0.26 + rnd() * 0.36})`;
-    ctx.fillRect(x - w / 2 + gx * c - gx * 0.18, y - h + gy * r - gy * 0.16, Math.max(0.7, gx * 0.36), Math.max(0.7, gy * 0.30));
+
+  ctx.fillStyle = 'rgba(3,8,18,0.32)';                                  // 接地影
+  ctx.beginPath(); ctx.moveTo(x - w / 2, y); ctx.lineTo(x - w / 2 + dp * 1.7, y + dp * 0.55);
+  ctx.lineTo(x + w / 2 + dp * 1.7, y + dp * 0.55); ctx.lineTo(x + w / 2, y); ctx.closePath(); ctx.fill();
+
+  if (tier === 2 && h < size * 1.1) {                                   // 地方: 切妻屋根の家
+    const bh = h * 0.62;
+    ctx.fillStyle = c.side;
+    ctx.beginPath(); ctx.moveTo(x + w / 2, y); ctx.lineTo(x + w / 2 + dp, y - dp * 0.5);
+    ctx.lineTo(x + w / 2 + dp, y - bh - dp * 0.5); ctx.lineTo(x + w / 2, y - bh); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = c.front; ctx.fillRect(x - w / 2, y - bh, w, bh);
+    ctx.fillStyle = c.roof;                                             // 三角屋根
+    ctx.beginPath(); ctx.moveTo(x - w * 0.60, y - bh); ctx.lineTo(x, y - h);
+    ctx.lineTo(x + w * 0.60 + dp, y - bh - dp * 0.5); ctx.lineTo(x + w * 0.60, y - bh); ctx.closePath(); ctx.fill();
+    if (h > 7) { ctx.fillStyle = c.win; ctx.fillRect(x - w * 0.16, y - bh * 0.66, w * 0.32, bh * 0.28); }
+    ctx.restore();
+    return;
+  }
+
+  ctx.fillStyle = c.side;                                               // 側面
+  ctx.beginPath(); ctx.moveTo(x + w / 2, y); ctx.lineTo(x + w / 2 + dp, y - dp * 0.5);
+  ctx.lineTo(x + w / 2 + dp, y - h - dp * 0.5); ctx.lineTo(x + w / 2, y - h); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = c.roof;                                               // 屋上
+  ctx.beginPath(); ctx.moveTo(x - w / 2, y - h); ctx.lineTo(x - w / 2 + dp, y - h - dp * 0.5);
+  ctx.lineTo(x + w / 2 + dp, y - h - dp * 0.5); ctx.lineTo(x + w / 2, y - h); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = c.front;                                              // 正面
+  ctx.fillRect(x - w / 2, y - h, w, h);
+
+  if (h > 9 && w > 3.2) {                                               // 窓（引いたときは省略）
+    const cols = w > 6 ? 3 : 2, rows = Math.max(1, Math.min(stories, Math.floor(h / 4)));
+    const ww = w / (cols * 2 + 1), wh = Math.max(1, h / (rows * 2.4));
+    ctx.fillStyle = c.win;
+    for (let ry = 0; ry < rows; ry++) for (let cx = 0; cx < cols; cx++)
+      ctx.fillRect(x - w / 2 + ww * (1 + cx * 2), y - h + wh * 0.9 + ry * (h - wh * 1.4) / Math.max(1, rows - 0.001) * 0.98, ww, wh);
   }
   ctx.restore();
 }
@@ -4069,68 +4192,203 @@ function buildingOptsFor(p, owned) {
 // 外周いっぱいまで基本形で埋めると、岬を足しても既存の海岸線に埋もれて凹凸が見えなくなる
 // （world-sample で実際にそうなった）。入り江は廃止——海を色で抜く方式では、海岸に接して
 // いても独立した水たまり＝池にしか見えなかったため。
-const LAND_BLOBS = (() => {
+
+
+// ================================================================
+// 座標系（ここがすべての土台）。2026-08-08 地形刷新（v9-B）で追加。
+// ================================================================
+// 陸地ごとに「中心を原点とする方位等距離図法の平面」を1つだけ持つ。
+//   ang = 東を0とした反時計回りの角度 ／ d = 中心からの角距離
+// 海岸線・池・川・稜線・路地・建物は必ずこの平面で作り、球面へ戻すのは
+// landLL / xyLL の2関数だけにする。以前（world-sample以前）の実装は描画が
+// 北基準の方位、判定が東基準の平面近似で、角度の基準が2つ存在した結果
+// 海の上に建物が湧くバグがあった。基準を1つにすれば構造的に再発しない。
+function landLL(r, ang, d) { return pointAt(r, Math.max(1e-4, d), Math.PI / 2 - ang); }
+function xyLL(r, x, y) { return landLL(r, Math.atan2(y, x), Math.hypot(x, y)); }
+
+// 海岸線ノイズ。閉曲線として1周で必ず閉じるよう、倍音は整数だけを使う。
+// 振幅は倍音の -0.85 乗（低い波が主、高い波が細部）。
+const HARM = [2, 3, 5, 7, 11, 13, 17, 23];
+function fbm(ang, ph, oct) {
+  let n = 0, norm = 0;
+  for (let k = 0; k < oct; k++) {
+    const w = Math.pow(HARM[k], -0.85);
+    n += w * Math.sin(HARM[k] * ang + ph[k]); norm += w;
+  }
+  return norm ? n / norm : 0;
+}
+// 岬＝角度方向に幅を持つ滑らかな盛り上がり。局所の隆起として足すことで半島になる
+// （全体に低周波の波を掛けるだけでは、どの陸地も同じように少し歪むだけで半島にならない）。
+function capeBoost(ang, capes) {
+  let b = 0;
+  for (const c of capes) {
+    const t = Math.abs(Math.atan2(Math.sin(ang - c.ang), Math.cos(ang - c.ang))) / c.w;
+    if (t < 1) { const s = Math.cos(t * Math.PI / 2); b += c.h * s * s; }
+  }
+  return b;
+}
+function coastRaw(ang, sh) { return 1 + L.COAST_AMP * fbm(ang, sh.ph, sh.oct) + capeBoost(ang, sh.capes); }
+// 生の半径を最大値で割るので、輪郭は必ず r.radius 以下に収まる
+// （陸地どうしの離隔チェック regionOverlaps() の前提「陸は radius を超えない」を自動的に守る）。
+// クランプ（Math.min）ではなく正規化にする。クランプだと最大側に平らな面ができて不自然になる。
+function coastR(r, ang, sh) { return Math.max(r.radius * 0.26, r.radius * coastRaw(ang, sh) / sh.rawMax); }
+// 地面の色帯（都心・郊外）の輪郭。coastRに対する比率＋独立ノイズにする。単純な固定半径の円だと
+// 入り江などcoastRが凹んだ場所で帯が海へはみ出すため（world-sample.tmp.htmlと同じ理由で採用）。
+// 建物配置のCORE_RATIO/MID_RATIO（既存の帯判定・変更しない方針）とは別の、見た目専用の帯として重ねる。
+function bandR(r, ang, sh, b) {
+  const c = coastR(r, ang, sh);
+  return c * (b.scale * (1 + b.warp * fbm(ang, b.ph, 4)) + b.off * Math.cos(ang - b.dir));
+}
+
+// 2026-08-09: 乱数の種は陸地ごとに1本にする。world-sample.tmp.html の shapeOf() が
+// `srand(hash(m.key))` の1本から 海岸線→池→山→川→路地→森→建物 を順に引いており、
+// 島の形はこの引く順番と種で完全に決まるため。以前は要素ごとに 'coast:main' 'lake:main'
+// のような別々の種を使っており、同じアルゴリズムでもサンプルとは別の島になっていた。
+// 各キャッシュ配列は宣言順（＝サンプルの生成順）にこの1本から引くこと。順番を変えると形が変わる。
+const LAND_RND = (() => {
+  const out = {};
+  for (const r of REGION_LIST) out[r.key] = hashSeed(r.key);
+  return out;
+})();
+
+// 海岸線。輪郭を1本の閉曲線として持つ（多重ノイズ＋岬の隆起）。
+// 陸地ごとに1回だけ生成してキャッシュする（既存の LAND_BLOBS と同じパターン）。
+const LAND_COAST = (() => {
   const out = {};
   for (const r of REGION_LIST) {
-    const rnd = hashSeed('land:' + r.key);
-    const ls = lonScale(r.lat);
-    const n = Math.round(88 * L.LAND_FILL);
-    const blobs = Array.from({ length: n }, () => {
-      const ang = rnd() * TAU;
-      const d = Math.sqrt(rnd()) * r.radius * 0.50;
-      return {
-        lat: r.lat + Math.sin(ang) * d, lon: r.lon + Math.cos(ang) * d * ls,
-        rad: r.radius * (0.17 + rnd() * 0.13),
-        dLat: Math.sin(ang) * d, dLon: Math.cos(ang) * d * ls,
-        core: d < r.radius * CORE_RATIO,
+    const rnd = LAND_RND[r.key];
+    const oct = Math.max(2, Math.min(8, Math.round(L.COAST_OCT)));
+    const sh = { oct, ph: Array.from({ length: 8 }, () => rnd() * TAU), capes: [], rawMax: 1 };
+    for (let i = 0; i < Math.round(L.CAPES); i++)
+      sh.capes.push({ ang: rnd() * TAU, w: 0.20 + rnd() * 0.42, h: (0.10 + rnd() * 0.22) * L.CAPE_SIZE });
+    let mx = 0;
+    for (let i = 0; i < 512; i++) mx = Math.max(mx, coastRaw(i / 512 * TAU, sh));
+    sh.rawMax = Math.max(0.4, mx);
+    // 2026-08-09追加: 地面の色帯（都心/郊外）用のパラメータ。sample側のsh.bandsと同じ値
+    // （相似縮小だと同心円の縞に見えるため、帯ごとに独立した位相・向きを持たせる）。
+    sh.bands = [
+      { scale: 0.64, warp: 0.20, off: 0.06, dir: rnd() * TAU, ph: Array.from({ length: 8 }, () => rnd() * TAU) },
+      { scale: 0.34, warp: 0.24, off: 0.07, dir: rnd() * TAU, ph: Array.from({ length: 8 }, () => rnd() * TAU) },
+    ];
+    out[r.key] = sh;
+  }
+  return out;
+})();
+
+// 雰囲気建物の帯（0=都心 1=郊外 2=地方）。地面を塗るのと同じ bandR で判定するので、
+// 「緑の郊外の上に都心の高層ビルが立つ」といった色と高さの食い違いが起きない
+// （world-sample.tmp.html の tierXY と同じ式）。実物件の配置帯 bandFor（areaKey連動）とは別物。
+function fillerTierOf(r, x, y) {
+  const sh = LAND_COAST[r.key], ang = Math.atan2(y, x), d = Math.hypot(x, y);
+  if (d < bandR(r, ang, sh, sh.bands[1])) return 0;
+  if (d < bandR(r, ang, sh, sh.bands[0])) return 1;
+  return 2;
+}
+
+// 陸地の輪郭（緯度経度でキャッシュ。毎フレームは project() だけ）。描画側（drawLandmasses）が使う。
+const LAND_COAST_RING = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const sh = LAND_COAST[r.key], N = 220, ring = [];
+    for (let i = 0; i <= N; i++) { const ang = i / N * TAU; ring.push(landLL(r, ang, coastR(r, ang, sh))); }
+    out[r.key] = ring;
+  }
+  return out;
+})();
+
+// 地面の色帯（郊外・都心）の輪郭。coastRingと同じ手順でキャッシュする（2026-08-09追加）。
+const LAND_MID_RING = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const sh = LAND_COAST[r.key], N = 220, ring = [];
+    for (let i = 0; i <= N; i++) { const ang = i / N * TAU; ring.push(landLL(r, ang, bandR(r, ang, sh, sh.bands[0]))); }
+    out[r.key] = ring;
+  }
+  return out;
+})();
+const LAND_CORE_RING = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const sh = LAND_COAST[r.key], N = 220, ring = [];
+    for (let i = 0; i <= N; i++) { const ang = i / N * TAU; ring.push(landLL(r, ang, bandR(r, ang, sh, sh.bands[1]))); }
+    out[r.key] = ring;
+  }
+  return out;
+})();
+
+// 内陸の池。楕円×回転にノイズを掛けた閉曲線（真円のarcだと「池に見えない」ため）。
+// 建物・道・山はこの中に入らない。陸地ごとに1回だけ生成してキャッシュする。
+function lakeR(lk, a) { return lk.rad * (1 + L.LAKE_WARP * fbm(a, lk.ph, 4)); }
+const LAND_LAKES = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const rnd = LAND_RND[r.key];
+    const area = Math.min(1, (r.radius * r.radius) / 1.08);   // 小さい陸地には数を面積比で減らす
+    const want = Math.round(L.LAKES * area);
+    const lakes = [];
+    for (let i = 0; i < want * 8 && lakes.length < want; i++) {
+      const ang = rnd() * TAU, d = (0.15 + rnd() * 0.42) * r.radius;
+      const lk = {
+        x: d * Math.cos(ang), y: d * Math.sin(ang), rad: r.radius * (0.06 + rnd() * 0.09),
+        ecc: 0.35 + rnd() * 0.55, rot: rnd() * TAU, ph: Array.from({ length: 8 }, () => rnd() * TAU),
       };
-    });
-    // 岬: 基本の海岸線より外へ、細くなりながらブロブを連ねて突き出す。
-    const nCape = Math.round(L.CAPES);
-    for (let i = 0; i < nCape; i++) {
-      const ang = rnd() * TAU, steps = 4 + Math.floor(rnd() * 3);
-      const reach = r.radius * (0.60 + (0.14 + rnd() * 0.26) * L.CAPE_SIZE);
-      const w0 = r.radius * 0.15 * L.CAPE_SIZE;
-      for (let k = 1; k <= steps; k++) {
-        const rad = Math.max(r.radius * 0.035, w0 * (1 - 0.13 * k));
-        const d = r.radius * 0.48 + (reach - r.radius * 0.48) * (k / steps);
-        if (d + rad > r.radius) break;   // 陸地半径を超えない＝離隔チェックを壊さない
-        const a2 = ang + (rnd() - 0.5) * 0.14;
-        blobs.push({
-          lat: r.lat + Math.sin(a2) * d, lon: r.lon + Math.cos(a2) * d * ls,
-          rad, dLat: Math.sin(a2) * d, dLon: Math.cos(a2) * d * ls, core: false,
-        });
-      }
+      // onLandOf ではなく insideCoastOf を使う: onLandOf は inAnyLakeOf 経由で LAND_LAKES 自身を
+      // 参照するため、この初期化中に呼ぶと自己参照TDZになる（構築中の池同士の重なり判定は
+      // 直後の circular-distance チェックが担う）。
+      // 2026-08-09: サンプルと同じく池の半径の1.5倍の余裕を見る。余裕なしだと池の輪郭が
+      // 海岸線をまたいで海へはみ出すうえ、サンプルなら棄却される候補を採用してしまい、
+      // 以降の乱数の消費数がずれて山・川・路地までサンプルと別物になっていた。
+      if (!insideCoastOf(r.key, lk.x, lk.y, lk.rad * 1.5)) continue;
+      if (lakes.some(o => Math.hypot(o.x - lk.x, o.y - lk.y) < (o.rad + lk.rad) * 1.6)) continue;
+      lakes.push(lk);
     }
-    out[r.key] = blobs;
+    out[r.key] = lakes;
   }
   return out;
 })();
-
-// 内陸の池。陸を塗ったあとに水の色で抜く。建物・山はこの中に置かない。
-const LAND_WATERS = (() => {
+function inLakeOf(lk, x, y, pad) {
+  const dx = x - lk.x, dy = y - lk.y, cs = Math.cos(lk.rot), sn = Math.sin(lk.rot);
+  const ux = dx * cs + dy * sn, uy = (-dx * sn + dy * cs) / lk.ecc;
+  return Math.hypot(ux, uy) < lakeR(lk, Math.atan2(uy, ux)) + (pad || 0);
+}
+function inAnyLakeOf(regionKey, x, y, pad) {
+  return LAND_LAKES[regionKey].some(lk => inLakeOf(lk, x, y, pad));
+}
+function lakeOutlineOf(lk, pad) {
+  const N = 56, pts = [], cs = Math.cos(lk.rot), sn = Math.sin(lk.rot);
+  for (let i = 0; i <= N; i++) {
+    const a = i / N * TAU, rr = lakeR(lk, a) + (pad || 0);
+    const ux = rr * Math.cos(a), uy = rr * Math.sin(a) * lk.ecc;
+    pts.push({ x: lk.x + ux * cs - uy * sn, y: lk.y + ux * sn + uy * cs });
+  }
+  return pts;
+}
+// 描画用に緯度経度へ変換したリング（毎フレームの project() だけで済むようにキャッシュする）。
+const LAND_LAKE_RINGS = (() => {
   const out = {};
   for (const r of REGION_LIST) {
-    const rnd = hashSeed('water:' + r.key);
-    const ls = lonScale(r.lat);
-    out[r.key] = Array.from({ length: Math.round(L.LAKES) }, () => {
-      const ang = rnd() * TAU, d = (0.10 + rnd() * 0.30) * r.radius;
-      return {
-        lat: r.lat + Math.sin(ang) * d, lon: r.lon + Math.cos(ang) * d * ls,
-        rad: r.radius * (0.06 + rnd() * 0.08),
-        dLat: Math.sin(ang) * d, dLon: Math.cos(ang) * d * ls,
-      };
-    });
+    const edgePx = r.radius * 0.010;
+    out[r.key] = LAND_LAKES[r.key].map(lk => ({
+      edge: lakeOutlineOf(lk, edgePx).map(p => xyLL(r, p.x, p.y)),
+      face: lakeOutlineOf(lk, 0).map(p => xyLL(r, p.x, p.y)),
+    }));
   }
   return out;
 })();
 
-// その点が実際に陸（ブロブの塗られている範囲・かつ池の外）かどうか。
-// これを見ずに半径だけで配置していたため、ブロブの隙間＝海の上に建物が立っていた。
-function onLandOf(regionKey, dLat, dLon) {
-  const r = regionOf(regionKey), ls = lonScale(r.lat), aLon = dLon / ls;
-  if (!LAND_BLOBS[r.key].some(b => Math.hypot(dLat - b.dLat, aLon - b.dLon / ls) < b.rad * 0.92)) return false;
-  return !LAND_WATERS[r.key].some(w => Math.hypot(dLat - w.dLat, aLon - w.dLon / ls) < w.rad * 1.15);
+// 海岸線の内側かどうかだけを見る判定（池は見ない）。LAND_LAKES の生成ループ専用:
+// onLandOf は inAnyLakeOf → LAND_LAKES を参照するため、LAND_LAKES 自身の初期化中には呼べない
+// （自己参照TDZになる）。将来 onLandOf に「簡略化」して戻さないこと。
+// pad を渡すと「海岸線からその距離だけ内側」を陸とみなす。
+// 2026-08-09: 池のように面積を持つものが海へはみ出すのを防ぐために追加した。
+function insideCoastOf(regionKey, x, y, pad) {
+  const r = regionOf(regionKey);
+  return Math.hypot(x, y) < coastR(r, Math.atan2(y, x), LAND_COAST[r.key]) - (pad || 0);
+}
+// その点（陸地ローカル平面座標 x,y）が実際に陸（海岸線の内側・かつ池の外）かどうか。
+function onLandOf(regionKey, x, y) {
+  if (!insideCoastOf(regionKey, x, y)) return false;
+  return !inAnyLakeOf(regionKey, x, y);
 }
 
 // v9-A: 旧「未開拓エリア（海に浮かぶ黒いシミ4つ）」は廃止し、未解放の陸地そのものを黒く塗る方式にした。
@@ -4142,7 +4400,8 @@ function onLandOf(regionKey, dLat, dLon) {
 // 大円（＝球面上の最短路）そのままだと定規で引いたようになるので、進行方向の法線に、
 // 両端で0になる包絡線を掛けた揺らぎを足して蛇行させる。両端は必ず0なので接続点はずれない。
 function roadPhases(a, b) {
-  const rnd = hashSeed('road:' + a.key + ':' + b.key);
+  // 2026-08-09: world-sample の roadPhases と同じ種にする（区切り文字を入れると別の道になる）。
+  const rnd = hashSeed(a.key + b.key);
   return [rnd() * TAU, rnd() * TAU];
 }
 const ROAD_LL = REGION_LIST.filter(r => r.roadTo).map(r => ({ from: regionOf(r.roadTo), to: r }));
@@ -4182,77 +4441,451 @@ function nearRoad(lat, lon, clear) {
   return false;
 }
 
-// 山（地形記号）。外周寄りの陸に置く。建物より先に決めて、建物のほうに避けさせる。
-const LAND_HILLS = (() => {
+// 山脈。峰をランダム散布するのではなく、稜線の上に主峰と前衛峰を並べる。
+// 稜線→峰の順で生成し、後段（路地・建物）は峰・稜線を避ける。
+const LAND_RIDGES = (() => {
   const out = {};
   for (const r of REGION_LIST) {
-    const rnd = hashSeed('hill:' + r.key);
-    const want = Math.round(L.HILLS);
-    const ls = lonScale(r.lat);
-    const arr = [];
-    for (let i = 0; i < want * 8 && arr.length < want; i++) {
-      const ang = rnd() * TAU, d = (0.42 + rnd() * 0.48) * r.radius;
-      const dLat = Math.sin(ang) * d, dLon = Math.cos(ang) * d * ls;
-      if (!onLandOf(r.key, dLat, dLon)) continue;
-      if (nearRoad(r.lat + dLat, r.lon + dLon, L.ROAD_CLEAR)) continue;   // 道の上に山は生えない
-      arr.push({ lat: r.lat + dLat, lon: r.lon + dLon, dLat, dLon, sz: 0.7 + rnd() * 0.7 });
+    const rnd = LAND_RND[r.key];
+    const area = Math.min(1, (r.radius * r.radius) / 1.08);
+    const ridges = [];
+    for (let i = 0; i < Math.max(1, Math.round(L.RIDGES * area)); i++) {
+      const a0 = rnd() * TAU, d0 = (0.18 + rnd() * 0.34) * r.radius;
+      let x = d0 * Math.cos(a0), y = d0 * Math.sin(a0), dir = rnd() * TAU;
+      const nodes = [{ x, y }], steps = 6 + Math.floor(rnd() * 5), step = r.radius * (0.09 + rnd() * 0.06);
+      for (let k = 0; k < steps; k++) {
+        dir += (rnd() - 0.5) * 0.85;
+        const nx = x + Math.cos(dir) * step, ny = y + Math.sin(dir) * step;
+        // 2026-08-09: 稜線は海岸から陸地半径の6%の余裕を取る（サンプルと同じ）。余裕なしだと
+        // 海際まで稜線が伸び、山が海にかぶるうえ乱数の消費数がずれて峰の数がサンプルと合わなくなる。
+        if (!insideCoastOf(r.key, nx, ny, r.radius * 0.06) || inAnyLakeOf(r.key, nx, ny, r.radius * 0.02)) { dir += Math.PI * 0.62; continue; }
+        x = nx; y = ny; nodes.push({ x, y });
+      }
+      if (nodes.length >= 3) ridges.push(nodes);
     }
-    out[r.key] = arr;
+    out[r.key] = ridges;
   }
   return out;
 })();
-function nearHillOf(regionKey, dLat, dLon) {
-  const r = regionOf(regionKey), ls = lonScale(r.lat);
-  return LAND_HILLS[r.key].some(h => Math.hypot(dLat - h.dLat, (dLon - h.dLon) / ls) < r.radius * 0.055 * h.sz);
+function polyLen(pts) { let L2 = 0; for (let i = 1; i < pts.length; i++) L2 += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y); return L2; }
+function alongPoly(pts, s) {
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    if (acc + seg >= s) { const t = seg ? (s - acc) / seg : 0; return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t }; }
+    acc += seg;
+  }
+  return pts[pts.length - 1];
+}
+// 峰。稜線の上に並べ、中央を主峰にして端へ小さくする（べき分布で大小差を付ける）。
+const LAND_PEAKS = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const rnd = LAND_RND[r.key];
+    const area = Math.min(1, (r.radius * r.radius) / 1.08);
+    const wantPeaks = Math.round(L.HILLS * area);
+    const ridges = LAND_RIDGES[r.key];
+    const peaks = [];
+    if (ridges.length) {
+      const per = Math.max(1, Math.ceil(wantPeaks / ridges.length));
+      for (const nodes of ridges) {
+        const len = polyLen(nodes);
+        for (let i = 0; i < per && peaks.length < wantPeaks; i++) {
+          const t = Math.min(0.98, Math.max(0.02, (i + 0.5) / per + (rnd() - 0.5) * (0.7 / per)));
+          const p = alongPoly(nodes, len * t);
+          const x = p.x + (rnd() - 0.5) * r.radius * 0.035, y = p.y + (rnd() - 0.5) * r.radius * 0.035;
+          // 2026-08-09: 峰も海岸から陸地半径の4%の余裕を取る（サンプルと同じ・理由は稜線と同じ）。
+          if (!insideCoastOf(r.key, x, y, r.radius * 0.04) || inAnyLakeOf(r.key, x, y, r.radius * 0.01)) continue;
+          const taper = Math.pow(Math.sin(Math.PI * t), 0.55);
+          const sz = (0.30 + 1.10 * taper) * Math.pow(0.35 + rnd(), L.HILL_VAR);
+          const ll = xyLL(r, x, y);
+          peaks.push({ x, y, lat: ll.lat, lon: ll.lon, sz, skew: (rnd() - 0.5) * 0.55 });
+        }
+      }
+    }
+    peaks.sort((a, b) => a.sz - b.sz);
+    out[r.key] = peaks;
+  }
+  return out;
+})();
+const LAND_RIDGE_LL = (() => {
+  const out = {};
+  for (const r of REGION_LIST) out[r.key] = LAND_RIDGES[r.key].map(nodes => {
+    const N = 18, ring = [];
+    for (let i = 0; i <= N; i++) { const p = alongPoly(nodes, polyLen(nodes) * i / N); ring.push(xyLL(r, p.x, p.y)); }
+    return ring;
+  });
+  return out;
+})();
+function nearHillOf(regionKey, x, y) {
+  const r = regionOf(regionKey);
+  return LAND_PEAKS[r.key].some(pk => Math.hypot(x - pk.x, y - pk.y) < r.radius * 0.05 * (0.6 + pk.sz));
 }
 
-// 雰囲気建物のスロット: 中心=高密度・高層、外周=低密度・低層。
-// 引いたときは先頭6割だけ描いて間引く（生成順が半径に対してランダムなので偏らない）。
-// v9-A: 陸地ごとに生成する。棟数は面積比（半径の2乗）で配分するので、小さい陸地は自然に疎になる。
-// 本土は radius 1.20 で want=200・試行460回となり、単一大陸だった頃と同じ本数になる。
+// 折れ線に「両端で0になる包絡線つきの横ゆらぎ」を足す。両端が動かないので接続点はずれない。
+// c1/c2 は蛇行の周期数。川は道より細かく蛇行させるため大きい値を渡す。
+function wobble(pts, amp, ph, c1, c2) {
+  const out = [], n = pts.length - 1;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, p = pts[i];
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n, i + 1)];
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+    const env = Math.sin(Math.PI * t);
+    const w = 0.62 * Math.sin(t * TAU * (c1 || 1.3) + ph[0]) + 0.38 * Math.sin(t * TAU * (c2 || 2.7) + ph[1]);
+    const off = amp * env * w;
+    out.push({ x: p.x - dy / len * off, y: p.y + dx / len * off });
+  }
+  return out;
+}
+function resample(pts, n) { const len = polyLen(pts), out = []; for (let i = 0; i <= n; i++) out.push(alongPoly(pts, len * i / n)); return out; }
+function distSeg(x, y, p, q) {
+  const vx = q.x - p.x, vy = q.y - p.y, l2 = vx * vx + vy * vy;
+  const t = l2 ? Math.max(0, Math.min(1, ((x - p.x) * vx + (y - p.y) * vy) / l2)) : 0;
+  return Math.hypot(x - (p.x + vx * t), y - (p.y + vy * t));
+}
+function distPath(x, y, pts, stop) {
+  let best = Infinity;
+  for (let i = 1; i < pts.length; i++) { const d = distSeg(x, y, pts[i - 1], pts[i]); if (d < best) best = d; if (best < stop) return best; }
+  return best;
+}
+
+// 川。稜線の峰から出て、池があれば経由して海岸へ抜ける。
+const LAND_RIVERS = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const rnd = LAND_RND[r.key];
+    const sh = LAND_COAST[r.key];
+    const area = Math.min(1, (r.radius * r.radius) / 1.08);
+    const bigPeaks = LAND_PEAKS[r.key].slice().sort((a, b) => b.sz - a.sz);
+    const rivers = [];
+    for (let i = 0; i < Math.round(L.RIVERS * area); i++) {
+      const src = bigPeaks[i % Math.max(1, bigPeaks.length)];
+      let sx, sy;
+      if (src) { sx = src.x; sy = src.y; }
+      else { const a = rnd() * TAU, d = 0.35 * r.radius; sx = d * Math.cos(a); sy = d * Math.sin(a); }
+      const outAng = Math.atan2(sy, sx) + (rnd() - 0.5) * 0.9;
+      const endD = coastR(r, outAng, sh) * 1.01;
+      const way = [{ x: sx, y: sy }];
+      const lk = LAND_LAKES[r.key][i % Math.max(1, LAND_LAKES[r.key].length)];
+      if (lk && Math.hypot(lk.x - sx, lk.y - sy) > r.radius * 0.05) way.push({ x: lk.x, y: lk.y });
+      way.push({ x: endD * Math.cos(outAng), y: endD * Math.sin(outAng) });
+      const base = resample(way, 40);
+      // 太さは河口でも陸の1%程度に抑える（太いと運河に見える）。蛇行は道より高頻度。
+      const path = wobble(base, L.RIVER_CURVE * r.radius * 0.075, [rnd() * TAU, rnd() * TAU], 2.6, 5.1);
+      rivers.push({ path, w0: r.radius * 0.0022, w1: r.radius * 0.0100 });
+    }
+    out[r.key] = rivers;
+  }
+  return out;
+})();
+function nearRiverOf(regionKey, x, y, pad) {
+  const r = regionOf(regionKey);
+  return LAND_RIVERS[r.key].some(rv => distPath(x, y, rv.path, 0) < rv.w1 + (pad || 0));
+}
+const LAND_RIVER_LL = (() => {
+  const out = {};
+  for (const r of REGION_LIST) out[r.key] = LAND_RIVERS[r.key].map(rv => {
+    const n = rv.path.length - 1, up = [], dn = [];
+    for (let i = 0; i <= n; i++) {
+      const p = rv.path[i], a = rv.path[Math.max(0, i - 1)], b = rv.path[Math.min(n, i + 1)];
+      const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+      const w = rv.w0 + (rv.w1 - rv.w0) * (i / n);
+      up.push(xyLL(r, p.x - dy / len * w, p.y + dx / len * w));
+      dn.push(xyLL(r, p.x + dy / len * w, p.y - dx / len * w));
+    }
+    return { up, dn };
+  });
+  return out;
+})();
+
+// 陸地内部の路地＋環状路。現状の街道は国内↔新築・国内↔競売の2本のみで、陸地の内部・海外島には
+// 道が無いため、建物を「道沿い」に見せる土台としてここで生成する。
+// 海・池・川に当たったら打ち切らず、続きを別の道として残す（打ち切ると路地が激減し、
+// 建物が半分しか置けなくなる。川は渡ってよい前提で、橋は描画側で別途扱う）。
+const LAND_LANES = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const rnd = LAND_RND[r.key];
+    const sh = LAND_COAST[r.key];
+    const area = Math.min(1, (r.radius * r.radius) / 1.08);
+    const nLane = Math.max(1, Math.round(L.LANE_COUNT * area));   // v9-B fix7: LAND_RIDGESと同様、0本になる回帰を防ぐ下限ガード
+    const laneOK = p => onLandOf(r.key, p.x, p.y) && !inAnyLakeOf(r.key, p.x, p.y, 0);
+    const lanes = [];
+    const pushRuns = (pts, clear) => {
+      const c = clear == null ? L.ROAD_CLEAR * 0.5 : clear;
+      let run = [];
+      for (const p of pts) {
+        if (laneOK(p)) run.push(p);
+        else { if (run.length >= 3) lanes.push({ pts: run, len: polyLen(run), clear: c, roadHalf: ALLEY_ROAD_HALF }); run = []; }
+      }
+      if (run.length >= 3) lanes.push({ pts: run, len: polyLen(run), clear: c, roadHalf: ALLEY_ROAD_HALF });
+    };
+    // 2026-08-09: 街道（国内↔新築・国内↔競売）の陸上区間も「建物を並べる道」として登録する。
+    // これが無いと街道沿いだけが幅広い空き地になり、都心が街道で分断されて見えていた
+    // （world-sample.tmp.html は sh.roads に街道の陸上区間を入れてから路地を足している）。
+    // 街道は路面が広いので、路地の倍の余裕（L.ROAD_CLEAR）を空ける。サンプルの roadClear と同じ扱い。
+    for (const hw of ROAD_PATHS_LL) {
+      const seg = [];
+      for (const q of hw) {
+        const p = llToXYOf(r, q.lat, q.lon);
+        // 陸の内側だけを拾う。境界のわずかな外側まで含めるのはサンプルと同じ（1.05倍）。
+        if (Math.hypot(p.x, p.y) < coastR(r, Math.atan2(p.y, p.x), sh) * 1.05) seg.push(p);
+        else { if (seg.length >= 2) lanes.push({ pts: seg.slice(), len: polyLen(seg), clear: L.ROAD_CLEAR, roadHalf: HIGHWAY_ROAD_HALF }); seg.length = 0; }
+      }
+      if (seg.length >= 2) lanes.push({ pts: seg.slice(), len: polyLen(seg), clear: L.ROAD_CLEAR, roadHalf: HIGHWAY_ROAD_HALF });
+    }
+    for (let i = 0; i < nLane; i++) {
+      const a0 = (i / Math.max(1, nLane)) * TAU + rnd() * 0.5, a1 = a0 + (rnd() - 0.5) * 0.5;
+      const endD = Math.min(coastR(r, a1, sh) * 0.86, r.radius * L.BLD_RANGE);
+      const sd = r.radius * (0.02 + rnd() * 0.11), sa = rnd() * TAU;   // 起点を都心内でばらけさせる（1点集中だと星形に見える）
+      const base = resample([{ x: sd * Math.cos(sa), y: sd * Math.sin(sa) }, { x: endD * Math.cos(a1), y: endD * Math.sin(a1) }], 20);
+      pushRuns(wobble(base, r.radius * 0.05, [rnd() * TAU, rnd() * TAU]));
+    }
+    if (nLane > 0) {   // 環状路（都心の外周）
+      const ringPts = [];
+      // 2026-08-09: 固定の同心円(CORE_RATIO)ではなくbandRに沿わせる（world-sample.tmp.htmlと同じ式）。
+      // 真円だと海岸線が凹んだ場所で環状路だけ不自然な正円に見えるため。
+      for (let i = 0; i <= 44; i++) { const a = i / 44 * TAU, d = bandR(r, a, sh, sh.bands[1]) * 1.16; ringPts.push({ x: d * Math.cos(a), y: d * Math.sin(a) }); }
+      pushRuns(ringPts);
+    }
+    out[r.key] = lanes;
+  }
+  return out;
+})();
+function tangentAtLane(pts, i) {
+  const p = pts[i], q = pts[i + 1] || pts[i - 1];
+  if (!q) return { nx: 0, ny: 0 };
+  let dx = q.x - p.x, dy = q.y - p.y;
+  if (!pts[i + 1]) { dx = -dx; dy = -dy; }
+  const len = Math.hypot(dx, dy) || 1;
+  return { nx: -dy / len, ny: dx / len };
+}
+// 建物を置いてよい地点かどうかの地形判定（海・池・川・山・街道）。
+// 2026-08-09: 路地沿い配置(laneHugXY)と地方の農家配置の2箇所で同じ判定を使うため切り出した。
+// 路地そのものとの距離は用途で条件が違うので、ここには含めず呼び出し側で見る。
+function canPlaceBuildingAt(r, x, y, bldHalf = 0) {
+  const ang = Math.atan2(y, x);
+  if (Math.hypot(x, y) >= coastR(r, ang, LAND_COAST[r.key]) - L.COAST_CLEAR * r.radius) return false;
+  if (inAnyLakeOf(r.key, x, y, 0) || nearRiverOf(r.key, x, y, r.radius * 0.012)) return false;
+  if (nearHillOf(r.key, x, y)) return false;
+  const ll = xyLL(r, x, y);
+  if (nearRoad(ll.lat, ll.lon, HIGHWAY_ROAD_HALF + bldHalf)) return false;   // 国内↔新築・国内↔競売の街道の上には置かない
+  // 2026-08-09: 路地・環状路も実際の描画幅で避ける（従来はここでLAND_LANESを一切見ておらず、
+  // laneHugXYの候補生成が失敗してslotForのフォールバックに落ちたケースで道に建つ不具合の直接原因だった）。
+  if (LAND_LANES[r.key].some(lane => distPath(x, y, lane.pts, lane.roadHalf + bldHalf) < lane.roadHalf + bldHalf)) return false;
+  return true;
+}
+
+// 建物配置の共通ヘルパー。路地の上の点を1つ選び、路地から一定幅だけ離す。
+// rMin/rMax を渡すと「中心からの距離がその範囲に収まる点」だけを候補にする
+// （実物件の都心/地方リング判定を壊さないため）。見つからなければ null（呼び出し側でフォールバック）。
+function laneHugXY(r, rnd, rMin, rMax, bldHalf = 0) {
+  const lanes = LAND_LANES[r.key];
+  if (!lanes.length) return null;
+  for (let tries = 0; tries < 40; tries++) {
+    const lane = lanes[Math.floor(rnd() * lanes.length)];
+    if (lane.pts.length < 2) continue;
+    const s = rnd() * lane.len;
+    const idxF = Math.min(lane.pts.length - 1.001, s / (lane.len / (lane.pts.length - 1)));
+    const i = Math.max(0, Math.min(lane.pts.length - 2, Math.floor(idxF)));
+    const p = alongPoly(lane.pts, s);
+    const rad = Math.hypot(p.x, p.y);
+    if (rMin != null && (rad < rMin || rad > rMax)) continue;
+    const t = tangentAtLane(lane.pts, i);
+    const side = rnd() < 0.5 ? 1 : -1;
+    // 2026-08-09: オフセットの基準を lane.clear（従来の細すぎる余裕）から、道の実際の描画半幅
+    // ＋建物自身の半幅(bldHalf)に変更。これが「路地に寄せて配置したのに道にめり込む」不具合の根本原因。
+    const off = (lane.roadHalf + bldHalf + rnd() * L.BLD_BAND) * side;
+    // v9-B fix1: tangentAtLane は名前に反して既に法線(normal)を返す実装（dx,dyを90°回転済み）。
+    // ここで (-t.ny, t.nx) のようにもう一度90°回転させると合計180°回転してしまい、路地を横切る
+    // 向き（法線）ではなく路地に沿う向き（接線の逆）にオフセットしていた。t をそのまま使うのが正しい。
+    const x = p.x + t.nx * off, y = p.y + t.ny * off;
+    // v9-B fix3: rMin/rMax はオフセット前の p ではなく、実際に返す最終点で判定し直す
+    // （オフセット前だけ見ていると、返す点が帯の外に出て実物件の都心/地方リング判定が壊れる）。
+    if (rMin != null) { const rad2 = Math.hypot(x, y); if (rad2 < rMin || rad2 > rMax) continue; }
+    // 2026-08-09: 海・池・川・山・街道・他の路地の判定は canPlaceBuildingAt に切り出した（地方の農家配置と共用するため）。
+    // 判定条件（v9-B fix6のCOAST_CLEARを含む）はそのまま関数内へ移しただけで、挙動は変えていない。
+    if (!canPlaceBuildingAt(r, x, y, bldHalf)) continue;
+    // v9-B fix4: 自分がサンプルした路地だけでなく、他の路地（放射スポークと環状路は構造上交差する）にも
+    // 十分離れているかを確認する。
+    const tooCloseToLane = lanes.some(other => other !== lane && distPath(x, y, other.pts, other.roadHalf + bldHalf) < other.roadHalf + bldHalf);
+    if (tooCloseToLane) continue;
+    return { x, y };
+  }
+  return null;
+}
+
+// 緯度経度→陸地ローカル平面座標への逆変換（自己診断でのみ使用する）。
+// 中心cからの角距離と方位（北基準）を求め、landLL/xyLLと同じ ang=東基準・反時計回り の平面座標に変換する。
+function bearingFromOf(c, q) {
+  const dl = q.lon - c.lon;
+  return Math.atan2(Math.sin(dl) * Math.cos(q.lat), Math.cos(c.lat) * Math.sin(q.lat) - Math.sin(c.lat) * Math.cos(q.lat) * Math.cos(dl));
+}
+function llToXYOf(c, lat, lon) {
+  const d = Math.acos(Math.max(-1, Math.min(1, Math.sin(c.lat) * Math.sin(lat) + Math.cos(c.lat) * Math.cos(lat) * Math.cos(lon - c.lon))));
+  const ang = Math.PI / 2 - bearingFromOf(c, { lat, lon });
+  return { x: d * Math.cos(ang), y: d * Math.sin(ang) };
+}
+
+// 森・農地の点。郊外〜地方（都心コアの外）に小さな緑の点をまく。判定には使わない純粋な飾り。
+// world-sample.tmp.htmlの質感演出（要件定義書20の第10節）を本体へ移植（2026-08-09追加）。
+const LAND_TREES = (() => {
+  const out = {};
+  for (const r of REGION_LIST) {
+    const rnd = LAND_RND[r.key];
+    const area = Math.min(1, (r.radius * r.radius) / 1.08);
+    const want = Math.round(72 * area);
+    const trees = [];
+    for (let i = 0; i < want * 4 && trees.length < want; i++) {
+      const ang = rnd() * TAU, d = (0.35 + rnd() * 0.62) * r.radius;
+      const x = d * Math.cos(ang), y = d * Math.sin(ang);
+      // 2026-08-09: 固定円(CORE_RATIO)ではなく、建物と同じ fillerTierOf（bandR基準）で都心を判定する
+      // （地面の色帯とズレないようにするため）。x,yの計算をこの行より前に移動した。
+      if (fillerTierOf(r, x, y) === 0) continue;   // 都心コアは避ける
+      if (!insideCoastOf(r.key, x, y, r.radius * 0.03) || inAnyLakeOf(r.key, x, y, 0) || nearRiverOf(r.key, x, y, r.radius * 0.01)) continue;
+      const ll = xyLL(r, x, y);
+      trees.push({ lat: ll.lat, lon: ll.lon, s: 0.6 + rnd() * 0.7 });
+    }
+    out[r.key] = trees;
+  }
+  return out;
+})();
+
+// 雰囲気建物1棟が占有する半径（陸地半径に対する比）。都心ほど密に建てられる。
+// これが無いと同じ場所に建物が積み重なって塊に見える（world-sample の FP と同じ値）。
+const FILLER_FP = [0.016, 0.021, 0.030];
+
+// 雰囲気建物のスロット。路地に寄せて配置する（見た目の「街」らしさに直結する変更）。
+// 中心=高密度・高層、外周=低密度・低層という既存の傾向は tier（帯）判定を通じて維持する。
 const FILLER_SLOTS = (() => {
   const out = {};
   for (const r of REGION_LIST) {
-    const rnd = hashSeed('fill:' + r.key);
-    const want = Math.max(12, Math.round(FILLER_COUNT * Math.pow(r.radius / 1.20, 2)));
-    const ls = lonScale(r.lat);
+    const rnd = LAND_RND[r.key];
+    const want = Math.round(150 * r.radius * r.radius + 30);   // world-sample と同じ式
     const arr = [];
-    for (let i = 0; i < want * 6 && arr.length < want; i++) {
-      const ang = rnd() * TAU;
-      const d = rnd() * r.radius * L.BLD_RANGE;
-      const t = d / r.radius;                     // 0=中心（都心）〜1=外周（地方）
-      const keepProb = t < CORE_RATIO ? 0.62 : t < MID_RATIO ? 0.32 : 0.12;
+    // 近すぎる建物を弾く。tierごとの占有半径のうち大きいほうを使う（world-sample の place() と同じ）。
+    const tooClose = (x, y, tier) => {
+      const fp = r.radius * FILLER_FP[tier];
+      return arr.some(o => Math.hypot(o.x - x, o.y - y) < Math.max(fp, r.radius * FILLER_FP[o.tier]));
+    };
+    // ① 路地沿いに並べる（街に見せる主役）
+    for (let i = 0; i < want * 7 && arr.length < want; i++) {
+      const hug = laneHugXY(r, rnd, null, null, FILLER_HALF);   // 帯制約なし（雰囲気建物は実物件の都心/地方判定に使われないため）
+      if (!hug) continue;
+      const tier = fillerTierOf(r, hug.x, hug.y);
+      const keepProb = tier === 0 ? 0.92 : tier === 1 ? 0.55 : 0.20;
       if (rnd() > keepProb) continue;
-      const dLat = Math.sin(ang) * d, dLon = Math.cos(ang) * d * ls;
-      if (!onLandOf(r.key, dLat, dLon)) continue;   // 海・池の上には建てない
-      if (nearRoad(r.lat + dLat, r.lon + dLon, L.ROAD_CLEAR)) continue;   // 街道の上にも建てない
-      if (nearHillOf(r.key, dLat, dLon)) continue;   // 山の上にも建てない
-      const stories = t < CORE_RATIO ? 4 + Math.floor(rnd() * 6)
-        : t < MID_RATIO ? 2 + Math.floor(rnd() * 3)
-        : 1 + Math.floor(rnd() * 2);
-      arr.push({ lat: r.lat + dLat, lon: r.lon + dLon, stories, seed: 100 + i });
+      if (tooClose(hug.x, hug.y, tier)) continue;
+      const stories = tier === 0 ? 5 + Math.floor(rnd() * 7) : tier === 1 ? 2 + Math.floor(rnd() * 4) : 1 + Math.floor(rnd() * 2);
+      const ll = xyLL(r, hug.x, hug.y);
+      arr.push({ x: hug.x, y: hug.y, lat: ll.lat, lon: ll.lon, stories, tier, seed: 100 + i });
+    }
+    // ② 地方の農家（道から離れた家）。これが無いと田園がスカスカに見える（world-sample と同じ工程）。
+    for (let i = 0; i < want * 2 && arr.length < want * 1.15; i++) {
+      const a = rnd() * TAU, d = (0.55 + rnd() * 0.40) * r.radius;
+      const x = d * Math.cos(a), y = d * Math.sin(a);
+      if (fillerTierOf(r, x, y) !== 2) continue;
+      if (rnd() > 0.25) continue;
+      // world-sample は農家も共通の place() を通すため、この後さらに採用率 KEEP[2]=0.20 がかかる
+      // （実効 0.25×0.20＝約5%）。ここを1段だけにすると田園の家が5倍に増えてサンプルと違う密度になる。
+      if (rnd() > 0.20) continue;
+      if (Math.hypot(x, y) > r.radius * L.BLD_RANGE) continue;
+      if (!canPlaceBuildingAt(r, x, y, FILLER_HALF)) continue;
+      if (tooClose(x, y, 2)) continue;
+      const ll = xyLL(r, x, y);
+      // seedは建物の幅（drawFillerBuilding内のsrand）を決める。路地沿いループのseedは
+      // 100+i（iは want*7 まで回るので最大2000超）なので、900始まりだと重複して
+      // 幅がまったく同じ建物ができてしまう。桁を離して確実に衝突を避ける。
+      arr.push({ x, y, lat: ll.lat, lon: ll.lon, stories: 1 + Math.floor(rnd() * 2), tier: 2, seed: 1000000 + i });
     }
     out[r.key] = arr;
   }
   return out;
 })();
 
+// 起動時の自己診断: 生成した雰囲気建物が海・池・川・街道の上に乗っていないかを毎回確認する
+// （world-sample.tmp.html の検証で使った手法と同じ）。街道チェックを含めるのは、Task 7の実装中に
+// 「laneHugXYが海・池・川・山は避けるのに街道(nearRoad)だけ避けていない」という重大な回帰が
+// 実際に発生したため（fix済み）。同じ回帰を将来また踏まないための恒久的な検算として追加する。
+// 4陸地×数百棟程度なので起動コストは軽い。既存の regionOverlaps() 警告（logic.mjs）と同じ
+// 「読み込み時に自動でconsole.warn」パターンを踏襲する。
+{
+  const bad = [];
+  for (const r of REGION_LIST) {
+    for (const f of FILLER_SLOTS[r.key]) {
+      const p = llToXYOf(r, f.lat, f.lon);
+      const ang = Math.atan2(p.y, p.x), d = Math.hypot(p.x, p.y);
+      if (d >= coastR(r, ang, LAND_COAST[r.key])) bad.push({ region: r.key, issue: 'sea', lat: f.lat, lon: f.lon });
+      else if (inAnyLakeOf(r.key, p.x, p.y, 0)) bad.push({ region: r.key, issue: 'lake', lat: f.lat, lon: f.lon });
+      else if (nearRiverOf(r.key, p.x, p.y, 0)) bad.push({ region: r.key, issue: 'river', lat: f.lat, lon: f.lon });
+      else if (nearRoad(f.lat, f.lon, HIGHWAY_ROAD_HALF + FILLER_HALF)) bad.push({ region: r.key, issue: 'road', lat: f.lat, lon: f.lon });
+      // v9-B fix5: laneHugXY自身が山(nearHillOf)も避ける契約なので、自己診断も山を対象に含める。
+      else if (nearHillOf(r.key, p.x, p.y)) bad.push({ region: r.key, issue: 'hill', lat: f.lat, lon: f.lon });
+      // 2026-08-09: 路地(LAND_LANES)も自己診断の対象に追加。従来はここで一切チェックしておらず、
+      // 実際は32.3%の雰囲気建物が路地に重なっていたのに「0件」と報告し続けていた。
+      else if (LAND_LANES[r.key].some(lane => distPath(p.x, p.y, lane.pts, lane.roadHalf + FILLER_HALF) < lane.roadHalf + FILLER_HALF)) bad.push({ region: r.key, issue: 'lane', lat: f.lat, lon: f.lon });
+    }
+    // v9-B fix5: 雰囲気建物(FILLER_SLOTS)だけでなく、実物件配置(slotFor)も同じ地形判定でサンプル検算する。
+    // 起動コストを抑えるため、region×areaKey(urban/local)ごとに合成seed 'diag0'〜'diag19' の20件のみ。
+    for (const areaKey of ['urban', 'local']) {
+      for (let i = 0; i < 20; i++) {
+        const ll = slotFor(r.key, areaKey, 'diag' + i);
+        const p = llToXYOf(r, ll.lat, ll.lon);
+        const ang = Math.atan2(p.y, p.x), d = Math.hypot(p.x, p.y);
+        if (d >= coastR(r, ang, LAND_COAST[r.key])) bad.push({ region: r.key, issue: 'sea', source: 'slotFor', lat: ll.lat, lon: ll.lon });
+        else if (inAnyLakeOf(r.key, p.x, p.y, 0)) bad.push({ region: r.key, issue: 'lake', source: 'slotFor', lat: ll.lat, lon: ll.lon });
+        else if (nearRiverOf(r.key, p.x, p.y, 0)) bad.push({ region: r.key, issue: 'river', source: 'slotFor', lat: ll.lat, lon: ll.lon });
+        else if (nearRoad(ll.lat, ll.lon, HIGHWAY_ROAD_HALF + PROP_HALF)) bad.push({ region: r.key, issue: 'road', source: 'slotFor', lat: ll.lat, lon: ll.lon });
+        else if (nearHillOf(r.key, p.x, p.y)) bad.push({ region: r.key, issue: 'hill', source: 'slotFor', lat: ll.lat, lon: ll.lon });
+        // 2026-08-09: 路地も対象に追加（fillerと同じ理由。slotForのフォールバックは特にauction/overseasの
+        // 「地方」帯で高頻度に使われており、路地チェックが無いまま「問題なし」と報告していた）。
+        else if (LAND_LANES[r.key].some(lane => distPath(p.x, p.y, lane.pts, lane.roadHalf + PROP_HALF) < lane.roadHalf + PROP_HALF)) bad.push({ region: r.key, issue: 'lane', source: 'slotFor', lat: ll.lat, lon: ll.lon });
+      }
+    }
+  }
+  if (bad.length && typeof console !== 'undefined') console.warn('[v9-B] 雰囲気建物が地形からはみ出しています', bad.slice(0, 10), `他${Math.max(0, bad.length - 10)}件`);
+}
+
 // urban=都心コア寄り、local=郊外〜地方寄りの半径帯に配置（既存ロジックのareaKeyをそのまま利用）。
-// v9-A: 帯は陸地半径に対する比率で持つので、大きさの違う陸地でも同じ見え方になる。
 function bandFor(r, areaKey) {
   return areaKey === 'urban'
     ? { rMin: r.radius * 0.033, rMax: r.radius * CORE_RATIO }
-    // 外周は建物を置く範囲（BLD_RANGE）で頭打ちにする。ここを超えるとブロブの外＝海に出る。
     : { rMin: r.radius * MID_RATIO * 0.85, rMax: r.radius * L.BLD_RANGE };
 }
 // v9-A: 物件は自分の陸地（p.region）の中に置く。旧セーブは migrateSave で 'main' が補完されている。
+// 2026-08-08: 路地の上の点に寄せる（見つからなければ既存のランダム配置にフォールバックする）。
 function slotFor(regionKey, areaKey, seed) {
   const r = regionOf(regionKey);
   const rnd = hashSeed('slot:' + areaKey + ':' + seed);
   const { rMin, rMax } = bandFor(r, areaKey);
-  const ang = rnd() * TAU;
-  const rad = rMin + (rMax - rMin) * rnd();
-  return { lat: r.lat + Math.sin(ang) * rad, lon: r.lon + Math.cos(ang) * rad * lonScale(r.lat) };
+  const hug = laneHugXY(r, rnd, rMin, rMax, PROP_HALF);
+  if (hug) return xyLL(r, hug.x, hug.y);
+  // v9-B fix2: フォールバックに海岸線チェックがなく、非円形の海岸線では海の上に実物件が湧くことが
+  // あった。その角度の実際の海岸線内（安全マージン0.9倍）を超えないよう rad を制限する
+  // （rad/angの式自体はレビュー指定のまま変更しない）。
+  // 2026-08-09: 以前はここで海・池・川・山・街道を手書きの条件で個別に判定しており、路地
+  // （LAND_LANES）を一切見ていなかった。このフォールバックは上の laneHugXY が失敗したときに
+  // 使われる経路で、auction/overseasの「地方」帯では実測で58.7%〜100%の高頻度でここに落ちて
+  // いたため、道路密度の高いエリアの実物件が実質「道を避けない」状態になっていた（今回の主要バグ
+  // の1つ）。canPlaceBuildingAt に一本化し、路地も含めた地形判定を通す。
+  // 2026-08-09追記: 路地チェックを追加した結果、試行回数が旧来の8回のままだと
+  // auction/overseasのように陸地が小さく路地本数が少ない陸地の「都心」帯（CORE_RATIO拡大で
+  // 対象範囲も広がった）で8回とも失敗し、検証されていない firstLL をそのまま返すケースが
+  // 実測で最大27.8%まで増えてしまった（laneHugXY・fallback成功時はどちらも重なり0%なのに対し、
+  // このfirstLL経由だけが重なりの発生源だった）。laneHugXY が既に使っている試行回数40に揃えて
+  // 全滅率を1%未満まで下げる（0→8→40はこのファイル内で既に確立された「40回試す」という
+  // 慣習に合わせただけで、新しい方式を持ち込んではいない）。
+  let firstLL = null;
+  for (let tries = 0; tries < 40; tries++) {
+    const ang = rnd() * TAU;
+    const rad = Math.min(rMin + (rMax - rMin) * rnd(), coastR(r, ang, LAND_COAST[r.key]) * 0.9);
+    const ll = { lat: r.lat + Math.sin(ang) * rad, lon: r.lon + Math.cos(ang) * rad * lonScale(r.lat) };
+    if (!firstLL) firstLL = ll;
+    const p = llToXYOf(r, ll.lat, ll.lon);
+    if (!canPlaceBuildingAt(r, p.x, p.y, PROP_HALF)) continue;
+    return ll;
+  }
+  return firstLL;
 }
 
 function project(lat, lon) {
@@ -4289,6 +4922,23 @@ function drawGlobeBase() {
   pg.addColorStop(0, '#17416e'); pg.addColorStop(1, '#081a30');
   ctx.fillStyle = pg;
   ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+}
+
+// 惑星の明暗（ターミネーター）。陸地・建物の上に薄く重ねて球体らしさを出す
+// （world-sample.tmp.htmlの質感演出を本体へ移植。2026-08-09追加）。呼び出し側で球の円にクリップすること。
+// 2026-08-10: このグラデーションはyaw/pitchを一切参照しない画面固定の陰影で、既定カメラ角度
+// （HOME.yaw=0）では中心が国内エリアとちょうど重なるよう調整されていた。しかし影の最終色
+// rgba(2,6,16,0.55)は円の面積の約39%（外周角度では約61%）で最大値に張り付くほぼ不透明な黒で、
+// 「薄く重ねる」という設計意図に反していた。回転してこの固定した暗部に建物が入ると
+// ほぼ真っ黒になり視認・タップ不能になっていたのが本バグの原因。影自体を消す（yawに追従させる）
+// のではなく、他の光源色(0.10)と釣り合う薄さ(0.22)に留め、どの角度に回転しても
+// 建物が完全に見えなくならないようにする。
+function drawShading() {
+  const g = ctx.createRadialGradient(cx - R * 0.40, cy - R * 0.45, R * 0.08, cx, cy, R * 1.02);
+  g.addColorStop(0, 'rgba(255,246,214,0.10)');
+  g.addColorStop(0.55, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(2,6,16,0.22)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
 }
 
 // 球面に沿って線を引く（裏側に回った区間は途切れる）。橋・航路の共通処理。
@@ -4348,70 +4998,113 @@ function drawSeaRoute(from, island) {
   ctx.restore();
 }
 
+// 緯度経度の閉曲線を塗る／縁取る。球の裏側へ回った点は球の縁へ寄せて畳む。
+function fillLL(pts, fill, stroke, lw) {
+  ctx.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    let p = project(pts[i].lat, pts[i].lon);
+    if (p.z < 0.02) { const dx = p.x - cx, dy = p.y - cy, d = Math.hypot(dx, dy) || 1; p = { x: cx + dx / d * R, y: cy + dy / d * R }; }
+    if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+  }
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function strokeLL(pts) {
+  ctx.beginPath(); let pen = false;
+  for (const q of pts) { const p = project(q.lat, q.lon); if (p.z > 0.03) { if (pen) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); pen = true; } } else pen = false; }
+  ctx.stroke();
+}
+
 function drawLandmasses() {
   ctx.save();
   ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.clip();
 
-  // 陸地。まず一回り大きい砂色で塗ってから本体を重ねると、union の外周だけが海岸線として残る。
-  // 輪郭線が1本入るかどうかで「地図に見えるか」が決まる（塗り分けだけでは地図にならない）。
-  //
-  // 縁の太さは半径への掛け算ではなく固定px（球外周のリングと同じ Math.max(1, R*0.004)）にする。
-  // 掛け算だとブロブが大きいほど縁も太くなり、輪郭の太さが場所によってバラバラに見えていた。
   const edgePx = Math.max(1, R * 0.004);
+  const shelfExtra = L.SHELF;
   for (const r of REGION_LIST) {
     const open = regionUnlocked(r);
-    for (const b of LAND_BLOBS[r.key]) {
-      const p = project(b.lat, b.lon);
-      if (p.z < 0.02) continue;
-      ctx.globalAlpha = Math.min(1, p.z * 4) * (open ? 0.95 : 0.85);
-      ctx.fillStyle = open ? 'hsl(45, 32%, 52%)' : 'hsl(220, 22%, 14%)';
-      ctx.beginPath(); ctx.arc(p.x, p.y, b.rad * R * (0.35 + 0.65 * p.z) + edgePx, 0, TAU); ctx.fill();
-    }
-    for (const b of LAND_BLOBS[r.key]) {
-      const p = project(b.lat, b.lon);
-      if (p.z < 0.02) continue;
-      ctx.globalAlpha = Math.min(1, p.z * 4) * (open ? 0.95 : 0.85);
-      ctx.fillStyle = !open ? 'hsl(220, 25%, 9%)'
-        : b.core ? 'hsl(158, 26%, 21%)' : 'hsl(112, 26%, 20%)';
-      ctx.beginPath(); ctx.arc(p.x, p.y, b.rad * R * (0.35 + 0.65 * p.z), 0, TAU); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    if (!open) continue;   // 池・山は解放された陸地にだけ描く（未解放は黒い土地のまま）
 
-    // 池: 陸を塗ったあとに水の色で抜く。砂の縁は海岸線と同じ固定px。
-    for (const wt of LAND_WATERS[r.key]) {
-      const p = project(wt.lat, wt.lon);
-      if (p.z < 0.02) continue;
-      const rr = wt.rad * R * (0.35 + 0.65 * p.z);
-      ctx.globalAlpha = Math.min(1, p.z * 4);
-      ctx.fillStyle = 'hsl(45, 32%, 52%)';
-      ctx.beginPath(); ctx.arc(p.x, p.y, rr + edgePx, 0, TAU); ctx.fill();
-      ctx.fillStyle = 'hsl(202, 46%, 26%)';
+    // 浅瀬: 海岸線の外側に出る明るい水色の帯。開放状態に関係なく薄く出す。
+    if (shelfExtra > 0) {
+      const sh = LAND_COAST[r.key], N = 96, ring = [];
+      for (let i = 0; i <= N; i++) { const a = i / N * TAU; ring.push(landLL(r, a, coastR(r, a, sh) * (1 + shelfExtra))); }
+      fillLL(ring, 'rgba(94,190,224,0.20)', null, 0);
+    }
+
+    // 海岸線の輪郭（塗り＋縁）。輪郭線が1本入るかどうかで「地図に見えるか」が決まる。
+    // 2026-08-09: 単色べた塗り(旧hsl(112,26%,20%))から、sampleと同じ地方の色に変更。
+    fillLL(LAND_COAST_RING[r.key], open ? 'hsl(95, 30%, 30%)' : 'hsl(220, 25%, 9%)',
+      open ? 'hsl(45, 32%, 52%)' : 'rgba(148,163,184,0.25)', edgePx);
+    if (open) {
+      // 郊外・都心の地面色を重ねる（2026-08-09追加）。建物側のCORE_RATIO/MID_RATIOとは
+      // 別の帯だが、値は近いので見た目の食い違いは出ない。
+      fillLL(LAND_MID_RING[r.key], 'hsl(120, 24%, 25%)', null, 0);
+      fillLL(LAND_CORE_RING[r.key], 'hsl(150, 14%, 30%)', null, 0);
+    }
+
+    if (!open) continue;   // 池・山・川・路地は解放された陸地にだけ描く（未解放は黒い土地のまま）
+
+    // 森・農地の点（郊外〜地方の質感。2026-08-09追加）。
+    for (const tr of LAND_TREES[r.key]) {
+      const p = project(tr.lat, tr.lon); if (p.z < 0.05) continue;
+      const rr = Math.max(0.7, R * 0.006 * tr.s * (0.5 + p.z * 0.5));
+      ctx.globalAlpha = Math.min(1, p.z * 3) * 0.55; ctx.fillStyle = 'hsl(105, 34%, 17%)';
       ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = 1;
 
-    // 山（地形記号）。稜線に陽の当たる面を入れると、ただの三角ではなく山に見える。
-    for (const hl of LAND_HILLS[r.key]) {
-      const p = project(hl.lat, hl.lon);
-      if (p.z < 0.06) continue;
-      const u = R * 0.020 * hl.sz * (0.5 + p.z * 0.6);
+    // 池: 汀線→水面の順で重ねる。
+    for (const lr of LAND_LAKE_RINGS[r.key]) {
+      fillLL(lr.edge, 'hsl(45, 32%, 52%)', null, 0);
+      fillLL(lr.face, 'hsl(202, 46%, 26%)', null, 0);
+    }
+
+    // 川: 左右岸（up/dn）を1枚のポリゴンとして塗る。
+    for (const rv of LAND_RIVER_LL[r.key]) {
+      ctx.beginPath(); let pen = false;
+      for (const q of rv.up) { const p = project(q.lat, q.lon); if (p.z > 0.03) { if (pen) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); pen = true; } } else pen = false; }
+      for (let i = rv.dn.length - 1; i >= 0; i--) { const q = rv.dn[i]; const p = project(q.lat, q.lon); if (p.z > 0.03) { if (pen) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); pen = true; } } else pen = false; }
+      ctx.closePath(); ctx.fillStyle = 'hsl(202, 46%, 26%)'; ctx.fill();
+    }
+
+    // 路地: 既存の街道（drawRoad）と同じ色調で細めに引く。
+    ctx.save(); ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(200,181,138,0.72)'; ctx.lineWidth = Math.max(1, R * L.ROAD_W * 0.22);
+    for (const lane of LAND_LANES[r.key]) strokeLL(lane.pts.map(p => xyLL(r, p.x, p.y)));
+    ctx.restore();
+
+    // 山脈: 稜線の下地→峰（主峰・前衛峰）の順。
+    ctx.save();
+    ctx.strokeStyle = 'rgba(58, 66, 52, 0.50)'; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(2, R * 0.040);
+    for (const ring of LAND_RIDGE_LL[r.key]) strokeLL(ring);
+    ctx.restore();
+    const peakItems = LAND_PEAKS[r.key].map(pk => ({ pk, p: project(pk.lat, pk.lon) })).filter(o => o.p.z > 0.06).sort((a, b) => a.p.y - b.p.y);
+    for (const o of peakItems) {
+      const p = o.p, pk = o.pk, u = R * 0.031 * pk.sz * (0.5 + p.z * 0.6);
+      if (u < 1.2) continue;
+      const apx = p.x + u * pk.skew, apy = p.y - u * 1.15, by = p.y + u * 0.50;
       ctx.globalAlpha = Math.min(1, p.z * 3);
-      ctx.fillStyle = 'rgba(120,132,124,0.85)';
-      ctx.beginPath(); ctx.moveTo(p.x - u, p.y + u * 0.55); ctx.lineTo(p.x, p.y - u); ctx.lineTo(p.x + u, p.y + u * 0.55); ctx.closePath(); ctx.fill();
-      ctx.fillStyle = 'rgba(226,232,240,0.75)';
-      ctx.beginPath(); ctx.moveTo(p.x, p.y - u); ctx.lineTo(p.x + u * 0.34, p.y - u * 0.10); ctx.lineTo(p.x, p.y - u * 0.10); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(104,113,100,0.98)';
+      ctx.beginPath(); ctx.moveTo(p.x - u * 1.02, by); ctx.lineTo(p.x - u * 0.42, p.y - u * 0.28); ctx.lineTo(apx, apy); ctx.lineTo(p.x + u * 1.02, by); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(40,48,42,0.92)';
+      ctx.beginPath(); ctx.moveTo(apx, apy); ctx.lineTo(p.x + u * 1.02, by); ctx.lineTo(apx + u * 0.10, by); ctx.closePath(); ctx.fill();
+      if (pk.sz > 1.05) {
+        ctx.fillStyle = 'rgba(236,242,248,0.88)';
+        ctx.beginPath(); ctx.moveTo(apx, apy); ctx.lineTo(apx + u * 0.30, apy + u * 0.42); ctx.lineTo(apx + u * 0.05, apy + u * 0.30); ctx.lineTo(apx - u * 0.26, apy + u * 0.46); ctx.closePath(); ctx.fill();
+      }
     }
     ctx.globalAlpha = 1;
   }
-  // 街道と航路は陸地より後に描く（緑の上にかぶせる）
+
+  // 街道と航路は陸地より後に描く（緑の上にかぶせる）。既存のまま。
   for (const r of REGION_LIST) if (r.roadTo) drawRoad(regionOf(r.roadTo), r);
   drawSeaRoute(L.REGIONS.main, L.REGIONS.overseas);
 
+  // 経緯線。既存のまま。
   ctx.strokeStyle = 'rgba(148,163,184,0.09)'; ctx.lineWidth = 1;
   for (let m = 0; m < 8; m++) {
-    const lon = m * TAU / 8;
-    ctx.beginPath(); let pen = false;
+    const lon = m * TAU / 8; ctx.beginPath(); let pen = false;
     for (let la = -85; la <= 85; la += 6) {
       const p = project(la * Math.PI / 180, lon);
       if (p.z > 0.02) { if (pen) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); pen = true; } } else pen = false;
@@ -4420,7 +5113,7 @@ function drawLandmasses() {
   }
   ctx.restore();
 
-  // 未解放の陸地には🔒とエリア名。タップすると解放条件が見られる。
+  // 未解放の陸地には🔒とエリア名。既存のまま。
   ctx.save();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for (const r of REGION_LIST) {
@@ -4450,8 +5143,33 @@ function drawBadges(p, pr, size, kind) {
     ctx.fillStyle = occ >= 0.999 ? '#4ade80' : occ > 0 ? '#fbbf24' : '#f87171';
     ctx.beginPath(); ctx.arc(pr.x + size * 0.42, top - size * 0.18, Math.max(1.8, size * 0.11), 0, TAU); ctx.fill();
     if ((st.listings || []).some(l => l.propertyId === p.id)) {
-      ctx.fillStyle = '#facc15';
-      ctx.beginPath(); ctx.arc(pr.x - size * 0.42, top - size * 0.18, Math.max(1.8, size * 0.11), 0, TAU); ctx.fill();
+      // 2026-08-10: 黄色いドットを廃止し「売出中」の立て看板に変更。
+      // 大きさは建物の高さに比例させる（固定サイズだと引いたとき看板が家より大きくなる）。
+      // 位置は建物の左端＋外階段の張り出し＋リングの太さより外側にとり、上側を建物と反対へ傾ける。
+      const bh = size * g.h;
+      const postH = Math.min(size * 0.45, bh * 0.70);
+      const boardH = postH * 0.52, boardW = boardH * 1.7;
+      const ringPad = Math.max(1.5, size * 0.10);
+      const leftEdge = size * (g.w * 0.5 + (g.stairBox ? g.w * 0.15 : 0)) + ringPad;
+      ctx.save();
+      ctx.translate(pr.x - leftEdge - boardW * 0.45, pr.y);
+      ctx.rotate(-0.20);                                       // 約-11度。地面に少し斜めに刺さっている表現
+      ctx.fillStyle = '#8b6b45';                               // 支柱（木の杭）
+      ctx.fillRect(-Math.max(0.6, size * 0.022), -postH, Math.max(1.2, size * 0.045), postH);
+      const byTop = -postH - boardH * 0.15;
+      ctx.fillStyle = '#f8fafc';                               // 白い板
+      ctx.fillRect(-boardW / 2, byTop, boardW, boardH);
+      ctx.fillStyle = '#dc2626';                               // 上部の赤帯（不動産の売看板らしさ）
+      ctx.fillRect(-boardW / 2, byTop, boardW, Math.max(0.8, boardH * 0.30));
+      ctx.strokeStyle = '#1e293b'; ctx.lineWidth = Math.max(0.5, size * 0.018);
+      ctx.strokeRect(-boardW / 2, byTop, boardW, boardH);
+      if (boardH >= 10.5) {                                    // 板が十分大きいときだけ「売」を載せる（漢字は8px未満だと潰れる）
+        ctx.fillStyle = '#b91c1c';
+        ctx.font = `bold ${Math.round(boardH * 0.78)}px sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('売', 0, byTop + boardH * 0.66);
+      }
+      ctx.restore();
     }
     if (p.repairJob || p.valueUpJob) {
       ctx.globalAlpha = 1; ctx.fillStyle = '#f59e0b';
@@ -4467,23 +5185,41 @@ function drawBadges(p, pr, size, kind) {
   ctx.restore();
 }
 
+// 実物件を置いてよい地点かを緯度経度で判定する。spreadItems の押し出し先の検証に使う。
+// 2026-08-09: canPlaceBuildingAt（海・池・川・山・街道）に加えて、陸地内部の路地の上にも
+// 乗らないことを見る。雰囲気建物と違い実物件は路地沿いに寄せる処理を通らない経路があるため。
+function canPlaceRealAt(r, lat, lon) {
+  const p = llToXYOf(r, lat, lon);
+  return canPlaceBuildingAt(r, p.x, p.y, PROP_HALF);
+}
+
 // 実物件（所有・市場）同士が重なってタップしづらくなるのを防ぐ決定的な間引き配置。
 // 既に配置済みの点と近すぎる場合、id由来の固定角度でスパイラル状に押し出す（毎フレーム同じ結果になる）。
 function spreadItems(items) {
   const placed = [];
+  const conflicts = (la, lo) => placed.some(pl => {
+    const dlat = la - pl.lat, dlon = (lo - pl.lon) * Math.cos(la);
+    return Math.sqrt(dlat * dlat + dlon * dlon) < MIN_SEP;
+  });
   for (const it of items) {
+    const r = regionOf(it.p.region);
     let lat = it.lat, lon = it.lon;
-    for (let tries = 0; tries < 24; tries++) {
-      const conflict = placed.some(pl => {
-        const dlat = lat - pl.lat;
-        const dlon = (lon - pl.lon) * Math.cos(lat);
-        return Math.sqrt(dlat * dlat + dlon * dlon) < MIN_SEP;
-      });
-      if (!conflict) break;
-      const pushAng = hashSeed('push:' + it.kind + ':' + it.p.id + ':' + tries)() * TAU;
-      const pushRad = MIN_SEP * 0.65 * (tries + 1);
-      lat = it.lat + Math.sin(pushAng) * pushRad;
-      lon = it.lon + Math.cos(pushAng) * pushRad;
+    if (conflicts(lat, lon)) {
+      // 2026-08-09: 押し出し先が海・池・川・山・道の上にならないか毎回確認する。
+      // 以前は地形を見ずに動かしていたため、所有30件のとき7件が海や山の上に建っていた。
+      // 押し出し量も陸地半径の45%までに抑える（旧実装は最大2.34rad＝本土の半径の1.8倍まで飛んだ）。
+      let found = false;
+      for (let tries = 0; tries < 24; tries++) {
+        const pushAng = hashSeed('push:' + it.kind + ':' + it.p.id + ':' + tries)() * TAU;
+        const pushRad = Math.min(MIN_SEP * 0.65 * (tries + 1), r.radius * 0.45);
+        const la = it.lat + Math.sin(pushAng) * pushRad;
+        const lo = it.lon + Math.cos(pushAng) * pushRad;
+        if (conflicts(la, lo) || !canPlaceRealAt(r, la, lo)) continue;
+        lat = la; lon = lo; found = true; break;
+      }
+      // 空きが見つからないときは押し出さず元の位置に戻す。slotFor が地形を検証済みの
+      // 安全な場所なので、建物どうしが重なることより海や山の上に建つほうが致命的だと判断する。
+      if (!found) { lat = it.lat; lon = it.lon; }
     }
     placed.push({ ...it, lat, lon });
   }
@@ -4541,18 +5277,25 @@ function draw(ts) {
   const fillers = [];
   for (const r of REGION_LIST) if (regionUnlocked(r)) fillers.push(...FILLER_SLOTS[r.key]);
   const cap = zoom < 0.9 ? Math.round(fillers.length * 0.6) : fillers.length;
+  // 2026-08-09 サンプルに合わせて調整。
+  // ・遠近の縮み 0.62+z*0.8（最大1.42倍）→0.5+z*0.5（最大1.0倍）: 旧式は球の手前で1.0倍を超えて
+  //   拡大しており、正しい遠近表現になっていなかった。
+  // ・不透明度 0.30+z*0.26（最大0.56、透けすぎて白いもやに見えていた）→Math.min(1,z*3)*0.95（最大0.95）。
+  // ・並び替えをz順から画面y順に変更: 2.5Dの箱は「画面で下にあるものほど手前」に描かないと
+  //   重なりが逆転する（サンプルもy順）。表示のしきい値も0.05→0.03でサンプルに合わせた。
   fillers.slice(0, cap)
     .map(s => ({ s, p: project(s.lat, s.lon) }))
-    .filter(o => o.p.z > 0.05)
-    .sort((a, b) => a.p.z - b.p.z)
-    .forEach(({ s, p }) => drawFillerBuilding(p.x, p.y, fUnit * (0.62 + p.z * 0.8), s.stories, s.seed, 0.30 + p.z * 0.26));
+    .filter(o => o.p.z > 0.03)
+    .sort((a, b) => a.p.y - b.p.y)
+    .forEach(({ s, p }) => drawFillerBuilding(p.x, p.y, fUnit * (0.5 + p.z * 0.5), s.stories, s.seed, Math.min(1, p.z * 3) * 0.95, s.tier));
 
-  // 実物件（所有=カラー／市場=グレー）は奥から手前へ
+  // 実物件（所有=カラー／市場=グレー）は画面で下にあるものほど手前になるようyの昇順で描く
+  // （2026-08-09: z順だと2.5Dの箱の重なりが逆転することがあったため画面y順に変更）
   const pUnit = propUnit();
   coloredItems()
     .map(it => ({ ...it, pr: project(it.lat, it.lon) }))
     .filter(it => it.pr.z > 0.04)
-    .sort((a, b) => a.pr.z - b.pr.z)
+    .sort((a, b) => a.pr.y - b.pr.y)
     .forEach(it => {
       const size = pUnit * (0.80 + it.pr.z * 0.55);
       if (it.kind === 'owned') {   // 所有物件の足元に淡いハロー（自分の物件を見分けやすく）
@@ -4563,6 +5306,11 @@ function draw(ts) {
       drawBuilding(it.pr.x, it.pr.y, size, { ...o, alpha: it.kind === 'owned' ? 1 : 0.85 });
       drawBadges(it.p, it.pr, size, it.kind);
     });
+
+  // 惑星の明暗を陸地・建物の上に重ねる（球の円にクリップして描く）。
+  ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.clip();
+  drawShading();
+  ctx.restore();
 
   // 一覧「地図を見る」からのハイライト（拡大リング＋跳ねる📍ピン）。どこかをクリックするまで維持され、
   // ピン自体をクリックすると詳細画面が開く（pointerup側で処理）。
@@ -4599,7 +5347,7 @@ function tipHtmlFor(hit) {
   const nm = p.name || p.label;
   if (hit.kind === 'owned') {
     const occ = p.units && p.units.length ? Math.round(p.units.filter(u => u.occupied).length / p.units.length * 100) : 100;
-    return `🏠 <b>${nm}</b><br>${p.owner === 'corp' ? '🏢法人' : '👤個人'}・入居${occ}%・躯体${Math.round(p.repairState)}%・手入れ${Math.round(p.careState ?? p.repairState)}%${p.repairJob ? '・🔨修繕中' : ''}${p.autoManage ? '・🏢おまかせ' : ''}`;
+    return `🏠 <b>${nm}</b><br>${p.owner === 'corp' ? '🏢法人' : '👤個人'}・入居${occ}%・躯体${Math.round(p.repairState)}%・手入れ${Math.round(p.careState ?? p.repairState)}%${(st.listings || []).some(l => l.propertyId === p.id) ? '・🏷️売出中' : ''}${p.repairJob ? '・🔨修繕中' : ''}${p.autoManage ? '・🏢おまかせ' : ''}`;
   }
   return `⭐ <b>${nm}</b><br>市場（お気に入り）・${L.yen(p.price)}・利回り${(p.grossYield * 100).toFixed(1)}%`;
 }
@@ -5276,12 +6024,12 @@ function openAchievementsModal() {
     </div>`;
   }).join('');
   const overlay = el(`<div id="lm-achievements-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header" style="align-items:safe center;">
-    <div class="bg-white rounded-xl p-5 w-full max-w-sm space-y-3 max-h-[80vh] overflow-y-auto" style="max-height:80dvh">
-      <div class="flex justify-between items-center">
+    <div class="bg-white rounded-xl w-full max-w-sm max-h-[80vh] flex flex-col" style="max-height:80dvh">
+      <div class="p-5 border-b shrink-0 flex justify-between items-center">
         <h2 class="font-bold text-lg">🏆 通算実績（${unlockedCount} / ${ids.length} 解除）</h2>
         <button id="ach-close" class="text-slate-400 text-xl leading-none">✕</button>
       </div>
-      <div class="space-y-2">${rows}</div>
+      <div class="p-5 overflow-y-auto min-h-0 flex-1 space-y-2">${rows}</div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
@@ -5925,8 +6673,9 @@ function openMobileDrawer() {
   const unread = (state.notifications || []).filter(n => !n.read).length;
   const item = (id, label) => `<button id="${id}" class="w-full text-left hud-tile rounded-lg px-3 py-3 text-sm font-bold flex justify-between items-center">${label}</button>`;
   const box = el(`<div class="absolute inset-0"><div class="absolute inset-0 bg-black/50" id="dr-backdrop"></div>
-    <div class="absolute top-0 right-0 bottom-0 w-72 max-w-[85%] hud-panel shadow-2xl p-3 space-y-2 overflow-y-auto">
-      <div class="flex justify-between items-center"><h2 class="font-bold hud-accent">≡ メニュー</h2><button id="dr-close" class="hud-sub text-2xl leading-none">✕</button></div>
+    <div class="absolute top-0 right-0 bottom-0 w-72 max-w-[85%] hud-panel shadow-2xl flex flex-col">
+      <div class="p-3 pb-2 shrink-0 flex justify-between items-center"><h2 class="font-bold hud-accent">≡ メニュー</h2><button id="dr-close" class="hud-sub text-2xl leading-none">✕</button></div>
+      <div class="hud-divide p-3 pt-2 overflow-y-auto min-h-0 flex-1 space-y-2">
       <div class="hud-tile rounded-lg p-2 text-xs">
         <div class="flex justify-between font-bold hud-accent"><span>🎯 目標達成度</span><span>${pct}%</span></div>
         <div class="w-full hud-track rounded-full h-2 mt-1 overflow-hidden"><div class="bg-emerald-500 h-2" style="width:${pct}%"></div></div>
@@ -5947,7 +6696,7 @@ function openMobileDrawer() {
         <button id="dr-mute" class="flex-1 hud-tile rounded-lg py-2 text-sm">${muted ? '🔇 消音中' : '🔊 音あり'}</button>
         <button id="dr-reset" class="flex-1 hud-tile rounded-lg py-2 text-sm hud-bad">リセット</button>
       </div>
-    </div></div>`);
+    </div></div></div>`);
   m.innerHTML = ''; m.appendChild(box);
   const go = (fn) => { close(); fn(); };
   m.querySelector('#dr-backdrop').addEventListener('click', close);
@@ -6230,9 +6979,9 @@ function openKpiModal(which, keepBulk = false) {
       <div class="text-[11px] text-slate-500 mb-1">信用度が高いほど審査に通りやすく、取引実績（完済）が増えると金利優遇を受けやすくなります。</div>
       <table class="w-full text-sm">${bankRows}</table>`;
   }
-  const boxEl = el(`<div class="bg-white rounded-xl p-4 w-full max-w-md max-h-[75vh] overflow-y-auto space-y-2" style="max-height:75dvh">
-    <div class="flex justify-between items-center"><h2 class="font-bold">${title}</h2><button id="kpi-close" class="text-slate-400 text-xl">✕</button></div>
-    <div>${body}</div></div>`);
+  const boxEl = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col" style="max-height:75dvh">
+    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">${title}</h2><button id="kpi-close" class="text-slate-400 text-xl">✕</button></div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">${body}</div></div>`);
   m.appendChild(boxEl);
   boxEl.querySelector('#kpi-close').addEventListener('click', close);
   if (which === 'cash' && !state.isIncorporated && state.cash >= L.CONFIG.corporateSetupCost) {
@@ -7017,10 +7766,11 @@ function openRecruitPicker(p, unitIndex, onAd, onSelf) {
       ${!enough ? '<div class="text-[11px] text-red-600">現金が足りません</div>' : ''}</button>`;
   }).join('');
 
-  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-sm space-y-3 max-h-[85vh] overflow-y-auto" style="max-height:85dvh">
-    <div class="flex justify-between items-center">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 border-b shrink-0 flex justify-between items-center">
       <h2 class="font-bold">📣 ${unitIndex + 1}号室の入居者を募集</h2>
       <button id="rc-x" class="text-slate-400 text-xl leading-none">✕</button></div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-xs text-slate-600">家賃 ${L.yen(u.rent)}・空室${u.vacantMonths}ヶ月。
       いまの決まりやすさは ${fillTierText(base)} です。${u.ad ? `<span class="text-emerald-700 font-bold">（${term('ad', 'AD')}${u.ad.months}ヶ月分 掲出中）</span>` : ''}</div>
 
@@ -7043,7 +7793,7 @@ function openRecruitPicker(p, unitIndex, onAd, onSelf) {
         ${canSelf ? '' : '<div class="text-[11px] text-red-600">行動力が足りません（翌月へ進むと回復します）</div>'}</button>
     </div>
 
-    <button id="rc-cancel" class="w-full text-slate-500 text-sm">やめる</button></div>`);
+    <button id="rc-cancel" class="w-full text-slate-500 text-sm">やめる</button></div></div>`);
   m.appendChild(box);
   box.querySelectorAll('.ad-pick').forEach(b => b.addEventListener('click', () => {
     close(); onAd(Number(b.dataset.m));
@@ -7944,7 +8694,7 @@ function openWorkMenu(propId, category, back, initialSel = null) {
       ${backFn ? '<button id="wk-back" class="text-xs text-navy font-bold">← 戻る</button>' : '<span></span>'}
       <button id="wk-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>`;
 
-    let body;
+    let headHtml, body;
     if (step === 1) {
       const opts = workOptions(p, category);
       // v8.9: DIYできる項目には「今どれだけ進んでいるか」と「目安あと何回か」を必ず添える
@@ -7972,8 +8722,8 @@ function openWorkMenu(propId, category, back, initialSel = null) {
         return `<div class="text-xs font-bold ${maxed ? 'text-red-600 bg-red-50' : 'text-navy bg-slate-50'} rounded px-2 py-1.5">
           価値UP Lv${lv}/${max}${maxed ? '（上限に達しています）' : '　※どのプランでも完了ごとに+1（同じプランの繰り返しでもOK）'}</div>`;
       })() : '';
-      body = `${head(back)}<h2 class="font-bold">${title}｜${p.name || p.label}</h2>
-        <div class="text-xs text-slate-500">${lead}どの工事をするか選んでください。</div>
+      headHtml = `${head(back)}<h2 class="font-bold">${title}｜${p.name || p.label}</h2>`;
+      body = `<div class="text-xs text-slate-500">${lead}どの工事をするか選んでください。</div>
         ${valueUpHeader}
         <div class="space-y-1.5">${rows || '<div class="text-sm text-slate-500 py-4 text-center">いま必要な工事はありません。</div>'}</div>`;
     } else if (step === 2) {
@@ -7982,8 +8732,8 @@ function openWorkMenu(propId, category, back, initialSel = null) {
         : sel.type === 'valueup' ? L.VALUE_UP_PLANS[sel.planKey].months
         : L.repairJobMonths(p, sel.type);
       const loanOk = L.canUseReformLoan(sel.cost, state.creditScore);
-      body = `${head(true)}<h2 class="font-bold">${sel.label}</h2>
-        <div class="text-xs text-slate-500">${sel.effect}</div>
+      headHtml = `${head(true)}<h2 class="font-bold">${sel.label}</h2>`;
+      body = `<div class="text-xs text-slate-500">${sel.effect}</div>
         <button id="wk-diy" class="w-full border-2 rounded-lg p-3 text-left ${sel.diyable ? 'hover:bg-slate-50 border-emerald-500' : 'opacity-50'}" ${sel.diyable ? '' : 'disabled'}>
           <div class="font-bold text-sm">🔨 自分でやる（DIY）${sel.diyable ? '' : '<span class="text-xs font-normal">｜この工事では選べません</span>'}</div>
           ${sel.diyable ? `<div class="text-xs text-slate-600">材料費 <b>${L.yen(material)}</b>のみ・行動力${sel.diyAp}を何回か使って自分で仕上げる</div>
@@ -8001,8 +8751,8 @@ function openWorkMenu(propId, category, back, initialSel = null) {
       const blockedReason = sel.cost < L.REFORM_LOAN_MIN_COST
         ? `工事費が${L.yen(L.REFORM_LOAN_MIN_COST)}未満のため、少額工事は現金のみです`
         : '信用度が基準未満のため、現在は融資を利用できません';
-      body = `${head(true)}<h2 class="font-bold">${sel.label}｜支払い方法</h2>
-        <div class="text-sm">費用 <b>${L.yen(sel.cost)}</b>（現金 ${L.yen(state.cash)}）</div>
+      headHtml = `${head(true)}<h2 class="font-bold">${sel.label}｜支払い方法</h2>`;
+      body = `<div class="text-sm">費用 <b>${L.yen(sel.cost)}</b>（現金 ${L.yen(state.cash)}）</div>
         <button id="wk-cash" class="w-full border rounded-lg py-2.5 text-sm font-bold ${state.cash < sel.cost ? 'opacity-40' : 'hover:bg-slate-50'}" ${state.cash < sel.cost ? 'disabled' : ''}>現金で支払う（${L.yen(sel.cost)}）</button>
         ${loanOk ? `<button id="wk-loan" class="w-full bg-navy text-white rounded-lg py-2.5 text-sm font-bold ${state.cash < down ? 'opacity-40' : ''}" ${state.cash < down ? 'disabled' : ''}>
           リフォームローンを使う（頭金${L.yen(down)}＋借入${L.yen(loanAmount)}）</button>
@@ -8013,7 +8763,9 @@ function openWorkMenu(propId, category, back, initialSel = null) {
           : `<div class="text-xs text-red-600">🚫 ${blockedReason}</div>`}`;
     }
 
-    const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-md space-y-2 max-h-[85vh] overflow-y-auto" style="max-height:85dvh">${body}</div>`);
+    const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0">${headHtml}</div>
+      <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">${body}</div></div>`);
     m.appendChild(box);
     box.querySelector('#wk-x').addEventListener('click', close);
     box.querySelector('#wk-back')?.addEventListener('click', () => {
@@ -8851,9 +9603,9 @@ function wireWorkButton(btn) {
 function openLogModal() {
   const m = document.getElementById('log-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
-  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-md max-h-[70vh] overflow-y-auto" style="max-height:70dvh">
-    <div class="flex justify-between items-center mb-2"><h2 class="font-bold">📜 ログ</h2><button id="log-close" class="text-slate-400 text-xl">✕</button></div>
-    <div class="text-xs space-y-0.5">${(state.log || []).map(l => `<div>・${l}</div>`).join('') || '<div class="text-slate-500">まだログはありません</div>'}</div></div>`);
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[70vh] flex flex-col" style="max-height:70dvh">
+    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">📜 ログ</h2><button id="log-close" class="text-slate-400 text-xl">✕</button></div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 text-xs space-y-0.5">${(state.log || []).map(l => `<div>・${l}</div>`).join('') || '<div class="text-slate-500">まだログはありません</div>'}</div></div>`);
   m.appendChild(box);
   box.querySelector('#log-close').addEventListener('click', () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; });
 }
@@ -8886,9 +9638,9 @@ function openListingsModal() {
       </div>
     </div>`;
   }).join('') : '<div class="text-slate-500 text-sm">まだ見つかった物件はありません。営業してみましょう。</div>';
-  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-md max-h-[75vh] overflow-y-auto space-y-2" style="max-height:75dvh">
-    <div class="flex justify-between items-center"><h2 class="font-bold">🗂️ 物件情報（${state.market.length}件）</h2><button id="listings-close" class="text-slate-400 text-xl">✕</button></div>
-    ${rows}</div>`);
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col" style="max-height:75dvh">
+    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">🗂️ 物件情報（${state.market.length}件）</h2><button id="listings-close" class="text-slate-400 text-xl">✕</button></div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">${rows}</div></div>`);
   m.appendChild(box);
   tutMaybeAdvance('listings');
   box.querySelector('#listings-close').addEventListener('click', close);
@@ -9001,14 +9753,15 @@ function openNotificationsModal() {
       </div>
     </div>`;
   }).join('') : '<div class="text-slate-500 text-sm">通知はまだありません</div>';
-  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-md max-h-[75vh] overflow-y-auto space-y-2" style="max-height:75dvh">
-    <div class="flex justify-between items-center"><h2 class="font-bold">🔔 通知</h2><button id="notifs-close" class="text-slate-400 text-xl">✕</button></div>
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col" style="max-height:75dvh">
+    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">🔔 通知</h2><button id="notifs-close" class="text-slate-400 text-xl">✕</button></div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">
     <div class="flex items-center justify-between gap-2">
       <button id="notifs-settings-toggle" class="text-[11px] font-bold text-navy underline text-left">${notifSettingsOpen ? '▲ 通知の表示設定を閉じる' : '▶ 通知の表示設定'}</button>
       ${notifs.some(n => !n.read) ? '<button id="notifs-read-all" class="text-[11px] border rounded px-2 py-0.5 text-slate-600 shrink-0">✓ 全て既読にする</button>' : ''}
     </div>
     ${notifSettingsOpen ? `<div class="border rounded p-2">${notifSettingsRows()}</div>` : ''}
-    ${rows}</div>`);
+    ${rows}</div></div>`);
   m.appendChild(box);
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   box.querySelector('#notifs-close').addEventListener('click', close);
