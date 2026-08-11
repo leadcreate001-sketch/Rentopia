@@ -3956,10 +3956,18 @@ function drawBuilding(x, y, size, o) {
     const t = performance.now() / 1000;
     const pulse = 0.725 + 0.275 * Math.sin(t * 3.6);   // 周期約1.75秒・振幅0.45〜1.0で完全には消えない「呼吸」表現
     const ring = Math.max(1.5, size * 0.10);           // 2026-08-10 実機確定値
+    // 2026-08-11: リングの色を入居率で変える。旧drawBadgesの入居率ドットは、①「一部入居」の色が
+    // 金色リングとΔE 0.0で同一（識別不能）、②背景がリングと空で半々に割れて一定の下地に乗らない、
+    // ③リングの点滅を継承してちらつく、の三重苦で読めなかった。リング自体を染めれば面積が大きく
+    // 常に一定の下地（建物のシルエット）に乗るため、同じ色分けでもずっと視認できる。
+    const occ = o.occ == null ? 1 : o.occ;
+    const ringRGB = occ >= 0.999 ? '74,222,128' : occ > 0 ? '251,191,36' : '248,113,113';
+    // 74,222,128=#4ade80(満室・緑) / 251,191,36=#fbbf24(一部入居・金) / 248,113,113=#f87171(空室・赤)
+    // ＝旧drawBadgesの入居率ドットと同じ色・同じ閾値をそのまま移した
     ctx.save();
     ctx.globalAlpha = (o.alpha == null ? 1 : o.alpha) * pulse;
-    ctx.fillStyle = 'rgba(251,191,36,1)';              // 251,191,36 = GOLD(#fbbf24)
-    ctx.strokeStyle = 'rgba(251,191,36,1)';
+    ctx.fillStyle = `rgba(${ringRGB},1)`;
+    ctx.strokeStyle = `rgba(${ringRGB},1)`;
     ctx.lineWidth = ring * 2;                          // 線幅の半分(=ring)だけ外側にはみ出す
     ctx.lineJoin = 'round';
     shellPath();
@@ -4371,6 +4379,8 @@ const LAND_LAKE_RINGS = (() => {
     out[r.key] = LAND_LAKES[r.key].map(lk => ({
       edge: lakeOutlineOf(lk, edgePx).map(p => xyLL(r, p.x, p.y)),
       face: lakeOutlineOf(lk, 0).map(p => xyLL(r, p.x, p.y)),
+      c: xyLL(r, lk.x, lk.y),
+      rad: lk.rad * (1 + L.LAKE_WARP) + edgePx,
     }));
   }
   return out;
@@ -4926,18 +4936,11 @@ function drawGlobeBase() {
 
 // 惑星の明暗（ターミネーター）。陸地・建物の上に薄く重ねて球体らしさを出す
 // （world-sample.tmp.htmlの質感演出を本体へ移植。2026-08-09追加）。呼び出し側で球の円にクリップすること。
-// 2026-08-10: このグラデーションはyaw/pitchを一切参照しない画面固定の陰影で、既定カメラ角度
-// （HOME.yaw=0）では中心が国内エリアとちょうど重なるよう調整されていた。しかし影の最終色
-// rgba(2,6,16,0.55)は円の面積の約39%（外周角度では約61%）で最大値に張り付くほぼ不透明な黒で、
-// 「薄く重ねる」という設計意図に反していた。回転してこの固定した暗部に建物が入ると
-// ほぼ真っ黒になり視認・タップ不能になっていたのが本バグの原因。影自体を消す（yawに追従させる）
-// のではなく、他の光源色(0.10)と釣り合う薄さ(0.22)に留め、どの角度に回転しても
-// 建物が完全に見えなくならないようにする。
 function drawShading() {
   const g = ctx.createRadialGradient(cx - R * 0.40, cy - R * 0.45, R * 0.08, cx, cy, R * 1.02);
   g.addColorStop(0, 'rgba(255,246,214,0.10)');
   g.addColorStop(0.55, 'rgba(0,0,0,0)');
-  g.addColorStop(1, 'rgba(2,6,16,0.22)');
+  g.addColorStop(1, 'rgba(2,6,16,0.55)');
   ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
 }
 
@@ -4998,13 +5001,62 @@ function drawSeaRoute(from, island) {
   ctx.restore();
 }
 
-// 緯度経度の閉曲線を塗る／縁取る。球の裏側へ回った点は球の縁へ寄せて畳む。
-function fillLL(pts, fill, stroke, lw) {
+// 緯度経度の閉曲線が囲む領域を塗る／縁取る。
+// 2026-08-11: 旧 fillLL は「裏側へ回った点を球の縁へ寄せて畳む」方式だった。しかし陸地が球の裏側の
+// 中央付近へ回ると輪郭の全点が縁の全周へ広がり、円盤全体を塗りつぶす。未解放エリアの黒
+// (hsl(220,25%,9%)) がこれをやって地図が真っ黒になっていた（回転すると画面が黒くなるバグの原因。
+// 全周1度刻み4320件の検算で417件が「実際は見えないのに画面をほぼ塗る」状態だった）。
+// 畳むのをやめ「見えている区間だけを描き、裏へ隠れた区間は球の縁の円弧で置き換える」方式にする。
+//   centre : この閉曲線が囲む中心（lat/lon を持つオブジェクト）
+//   rad    : 中心から輪郭までのおおよその角距離。裏側の極を包む配置の判定にだけ使う
+function fillCapLL(pts, centre, rad, fill, stroke, lw) {
+  const c = project(centre.lat, centre.lon);
+  // 裏側の極まで包み込む配置。見えるのは縁沿いのドーナツ状の帯で1本の閉曲線では表せないので描かない
+  // （この状態で実際に見えるのは円盤の数%以下なので、描かなくても見た目はほぼ変わらない）。
+  if (c.z < -Math.cos(rad)) return;
+  let n = pts.length;                             // 輪郭は末尾が先頭と同一点なので1つ落とす
+  if (n > 1 && Math.abs(pts[0].lat - pts[n - 1].lat) < 1e-9 && Math.abs(pts[0].lon - pts[n - 1].lon) < 1e-9) n--;
+  const ps = [], vis = [];
+  let nVis = 0;
+  for (let i = 0; i < n; i++) { const p = project(pts[i].lat, pts[i].lon); ps.push(p); vis.push(p.z > 0); if (p.z > 0) nVis++; }
+  if (nVis === 0) return;
+
   ctx.beginPath();
-  for (let i = 0; i < pts.length; i++) {
-    let p = project(pts[i].lat, pts[i].lon);
-    if (p.z < 0.02) { const dx = p.x - cx, dy = p.y - cy, d = Math.hypot(dx, dy) || 1; p = { x: cx + dx / d * R, y: cy + dy / d * R }; }
-    if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+  if (nVis === n) {                               // 全部見えている（通常のフレームはここ）
+    for (let i = 0; i < n; i++) { const p = ps[i]; if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y); }
+  } else {
+    const cross = (a, b) => {                     // 縁との交点（z=0を線形補間して縁へ乗せる）
+      const t = a.z / (a.z - b.z);
+      const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t;
+      const d = Math.hypot(x - cx, y - cy) || 1;
+      return { x: cx + (x - cx) / d * R, y: cy + (y - cy) / d * R };
+    };
+    let started = false;
+    const put = (p) => { if (started) ctx.lineTo(p.x, p.y); else { ctx.moveTo(p.x, p.y); started = true; } };
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      if (vis[i]) put(ps[i]);
+      if (!vis[i] || vis[j]) continue;
+      const pExit = cross(ps[i], ps[j]);
+      let k = j; while (!vis[k]) k = (k + 1) % n;  // 次に表へ戻ってくる点
+      const pEnter = cross(ps[k], ps[(k - 1 + n) % n]);
+      put(pExit);
+      const phiA = Math.atan2(pExit.y - cy, pExit.x - cx), phiB = Math.atan2(pEnter.y - cy, pEnter.x - cx);
+      // 縁をどちら回りにどれだけ回すかは、隠れている区間の方位角を実際にたどって求める。
+      // 輪郭の点は十分に細かいので1歩ぶんの方位角の変化は必ず±180度未満になり、
+      // その短い方の変化量を足し上げれば180度を超える回り込みも含めて正しく再現できる。
+      let sweep = 0, prev = phiA;
+      for (let m = j; m !== k; m = (m + 1) % n) {
+        const hx = ps[m].x - cx, hy = ps[m].y - cy;
+        if (Math.hypot(hx, hy) < 1e-9) continue;   // 真裏の極。方位が定まらないので飛ばす
+        const phi = Math.atan2(hy, hx);
+        sweep += ((phi - prev + Math.PI) % TAU + TAU) % TAU - Math.PI; prev = phi;
+      }
+      sweep += ((phiB - prev + Math.PI) % TAU + TAU) % TAU - Math.PI;
+      const steps = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 36)));
+      for (let s = 1; s < steps; s++) { const a = phiA + sweep * s / steps; put({ x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R }); }
+      put(pEnter);
+    }
   }
   ctx.closePath();
   if (fill) { ctx.fillStyle = fill; ctx.fill(); }
@@ -5029,18 +5081,18 @@ function drawLandmasses() {
     if (shelfExtra > 0) {
       const sh = LAND_COAST[r.key], N = 96, ring = [];
       for (let i = 0; i <= N; i++) { const a = i / N * TAU; ring.push(landLL(r, a, coastR(r, a, sh) * (1 + shelfExtra))); }
-      fillLL(ring, 'rgba(94,190,224,0.20)', null, 0);
+      fillCapLL(ring, r, r.radius * (1 + shelfExtra), 'rgba(94,190,224,0.20)', null, 0);
     }
 
     // 海岸線の輪郭（塗り＋縁）。輪郭線が1本入るかどうかで「地図に見えるか」が決まる。
     // 2026-08-09: 単色べた塗り(旧hsl(112,26%,20%))から、sampleと同じ地方の色に変更。
-    fillLL(LAND_COAST_RING[r.key], open ? 'hsl(95, 30%, 30%)' : 'hsl(220, 25%, 9%)',
+    fillCapLL(LAND_COAST_RING[r.key], r, r.radius, open ? 'hsl(95, 30%, 30%)' : 'hsl(220, 25%, 9%)',
       open ? 'hsl(45, 32%, 52%)' : 'rgba(148,163,184,0.25)', edgePx);
     if (open) {
       // 郊外・都心の地面色を重ねる（2026-08-09追加）。建物側のCORE_RATIO/MID_RATIOとは
       // 別の帯だが、値は近いので見た目の食い違いは出ない。
-      fillLL(LAND_MID_RING[r.key], 'hsl(120, 24%, 25%)', null, 0);
-      fillLL(LAND_CORE_RING[r.key], 'hsl(150, 14%, 30%)', null, 0);
+      fillCapLL(LAND_MID_RING[r.key], r, r.radius, 'hsl(120, 24%, 25%)', null, 0);
+      fillCapLL(LAND_CORE_RING[r.key], r, r.radius, 'hsl(150, 14%, 30%)', null, 0);
     }
 
     if (!open) continue;   // 池・山・川・路地は解放された陸地にだけ描く（未解放は黒い土地のまま）
@@ -5056,8 +5108,8 @@ function drawLandmasses() {
 
     // 池: 汀線→水面の順で重ねる。
     for (const lr of LAND_LAKE_RINGS[r.key]) {
-      fillLL(lr.edge, 'hsl(45, 32%, 52%)', null, 0);
-      fillLL(lr.face, 'hsl(202, 46%, 26%)', null, 0);
+      fillCapLL(lr.edge, lr.c, lr.rad, 'hsl(45, 32%, 52%)', null, 0);
+      fillCapLL(lr.face, lr.c, lr.rad, 'hsl(202, 46%, 26%)', null, 0);
     }
 
     // 川: 左右岸（up/dn）を1枚のポリゴンとして塗る。
@@ -5139,35 +5191,37 @@ function drawBadges(p, pr, size, kind) {
   const g = BLD_STYLE[L.svgBuildingParts(p).shape] || BLD_STYLE.kodate;
   const top = pr.y - size * g.h;
   if (kind === 'owned') {
-    const occ = p.units && p.units.length ? p.units.filter(u => u.occupied).length / p.units.length : 1;
-    ctx.fillStyle = occ >= 0.999 ? '#4ade80' : occ > 0 ? '#fbbf24' : '#f87171';
-    ctx.beginPath(); ctx.arc(pr.x + size * 0.42, top - size * 0.18, Math.max(1.8, size * 0.11), 0, TAU); ctx.fill();
     if ((st.listings || []).some(l => l.propertyId === p.id)) {
-      // 2026-08-10: 黄色いドットを廃止し「売出中」の立て看板に変更。
-      // 大きさは建物の高さに比例させる（固定サイズだと引いたとき看板が家より大きくなる）。
-      // 位置は建物の左端＋外階段の張り出し＋リングの太さより外側にとり、上側を建物と反対へ傾ける。
+      // 2026-08-11: 看板を建物の手前に重ねる配置へ変更（オーナー要望「大部分が被ってよい」）。
+      // 板の高さは size*0.40 を基本にしつつ建物高さ*0.55 で頭打ちにする。上限が無いと戸建て
+      // （一番背が低い）で板が建物のほぼ全体を覆い、入居率を示すリングが見えなくなるため。
+      // 支柱の根元は pr.y+size*0.10。足元の緑の楕円（半径 0.72*size × 0.22*size、この位置での
+      // 下端は 0.218*size）の内側に必ず収まる。
       const bh = size * g.h;
-      const postH = Math.min(size * 0.45, bh * 0.70);
-      const boardH = postH * 0.52, boardW = boardH * 1.7;
-      const ringPad = Math.max(1.5, size * 0.10);
-      const leftEdge = size * (g.w * 0.5 + (g.stairBox ? g.w * 0.15 : 0)) + ringPad;
+      const boardH = Math.min(size * 0.40, bh * 0.55);
+      const boardW = boardH * 2.3;
+      const boardCY = -(bh * 0.55) - size * 0.10;        // 支柱の根元から見た板の中心y（建物の中ほどに重なる）
+      const boardTop = boardCY - boardH / 2, boardBot = boardCY + boardH / 2;
+      const postW = Math.max(1.2, size * 0.045);
       ctx.save();
-      ctx.translate(pr.x - leftEdge - boardW * 0.45, pr.y);
-      ctx.rotate(-0.20);                                       // 約-11度。地面に少し斜めに刺さっている表現
-      ctx.fillStyle = '#8b6b45';                               // 支柱（木の杭）
-      ctx.fillRect(-Math.max(0.6, size * 0.022), -postH, Math.max(1.2, size * 0.045), postH);
-      const byTop = -postH - boardH * 0.15;
-      ctx.fillStyle = '#f8fafc';                               // 白い板
-      ctx.fillRect(-boardW / 2, byTop, boardW, boardH);
-      ctx.fillStyle = '#dc2626';                               // 上部の赤帯（不動産の売看板らしさ）
-      ctx.fillRect(-boardW / 2, byTop, boardW, Math.max(0.8, boardH * 0.30));
+      ctx.translate(pr.x - size * 0.10, pr.y + size * 0.10);
+      ctx.rotate(-0.16);                                 // 約-9度。地面に少し斜めに刺さっている表現
+      ctx.fillStyle = '#8b6b45';                         // 支柱（木の杭）: 地面から板の下端まで
+      ctx.fillRect(-postW / 2, boardBot, postW, Math.abs(boardBot));
+      ctx.fillStyle = '#f8fafc';                         // 白い板
+      ctx.fillRect(-boardW / 2, boardTop, boardW, boardH);
+      ctx.fillStyle = '#dc2626';                         // 上部の赤帯（不動産の売看板らしさ）
+      ctx.fillRect(-boardW / 2, boardTop, boardW, Math.max(0.8, boardH * 0.30));
       ctx.strokeStyle = '#1e293b'; ctx.lineWidth = Math.max(0.5, size * 0.018);
-      ctx.strokeRect(-boardW / 2, byTop, boardW, boardH);
-      if (boardH >= 10.5) {                                    // 板が十分大きいときだけ「売」を載せる（漢字は8px未満だと潰れる）
+      ctx.strokeRect(-boardW / 2, boardTop, boardW, boardH);
+      // 文字は入る大きさのときだけ出す（漢字は8px未満だと潰れる）。3文字→1文字→なしの段階制。
+      const font3 = boardW / 3.4, font1 = Math.min(boardH * 0.85, boardW * 0.6);
+      const label = font3 >= 8 ? '売出中' : font1 >= 8 ? '売' : null;
+      if (label) {
         ctx.fillStyle = '#b91c1c';
-        ctx.font = `bold ${Math.round(boardH * 0.78)}px sans-serif`;
+        ctx.font = `bold ${Math.round(label.length === 3 ? font3 : font1)}px sans-serif`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('売', 0, byTop + boardH * 0.66);
+        ctx.fillText(label, 0, boardCY + boardH * 0.14);   // 赤帯のぶん少し下げて白地の中央へ
       }
       ctx.restore();
     }
