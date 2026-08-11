@@ -573,9 +573,24 @@ function _hashRng(str) {
   return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
 }
 const PLACE_TOKENS = ['本町', '緑丘', '桜台', '旭', '港南', '松原', '若葉', '泉', '月見', 'みどり', '東雲', '富士見', '栄', '幸', '錦', '宮前', '高砂', '日之出', '大手', '花水木'];
+// v13: 築25年以下が使う洋風寄りの地名。硬い地名（大手・本町・栄・幸・錦・高砂・日之出・旭）を
+// 外し、きれいな響きのものを足してある。「メゾン・ド・大手」のような噛み合わせを構造的に防ぐ。
+export const PLACE_TOKENS_MODERN = ['緑丘', '桜台', '港南', '松原', '若葉', '泉', '月見', 'みどり', '東雲', '富士見', '花水木', '宮前',
+  '青葉', '星ヶ丘', '藤が丘', '白鷺', '桜坂', '汐見', '白樺', '光丘', '美原', '楓'];
+// 築浅のアルファベット表記名（THE 〜 RESIDENCE 等）用。PLACE_TOKENS_MODERN を全て網羅する。
+export const PLACE_ROMAJI = {
+  '緑丘': 'MIDORIGAOKA', '桜台': 'SAKURADAI', '港南': 'KONAN', '松原': 'MATSUBARA',
+  '若葉': 'WAKABA', '泉': 'IZUMI', '月見': 'TSUKIMI', 'みどり': 'MIDORI',
+  '東雲': 'SHINONOME', '富士見': 'FUJIMI', '花水木': 'HANAMIZUKI', '宮前': 'MIYAMAE',
+  '青葉': 'AOBA', '星ヶ丘': 'HOSHIGAOKA', '藤が丘': 'FUJIGAOKA', '白鷺': 'SHIRASAGI',
+  '桜坂': 'SAKURAZAKA', '汐見': 'SHIOMI', '白樺': 'SHIRAKABA', '光丘': 'HIKARIGAOKA',
+  '美原': 'MIHARA', '楓': 'KAEDE',
+};
 export function propertyName(genreKey, builtAge, seed) {
   const rnd = _hashRng('name:' + seed);
-  const place = PLACE_TOKENS[Math.floor(rnd() * PLACE_TOKENS.length)];
+  // 築25年以下だけ洋風寄りの地名プールを使う（築古は従来どおりで既存物件の名前が変わらない）
+  const tokens = builtAge >= 26 ? PLACE_TOKENS : PLACE_TOKENS_MODERN;
+  const place = tokens[Math.floor(rnd() * tokens.length)];
   const detached = genreKey === 'kodate' || genreKey === 'w_kodate';
   if (detached) {
     if (builtAge >= 26) return `${place}の古家`;
@@ -586,11 +601,15 @@ export function propertyName(genreKey, builtAge, seed) {
     const pool = [`${place}荘`, `コーポ${place}`, `${place}文化`, `第${1 + Math.floor(rnd() * 3)}${place}ビル`, `${place}アパート`];
     return pool[Math.floor(rnd() * pool.length)];
   }
-  if (builtAge >= 11) {   // 中古: 標準的な名前
-    const pool = [`${place}ハイツ`, `${place}コーポ`, `サンハイツ${place}`, `${place}プラザ`, `${place}ハイム`];
+  if (builtAge >= 11) {   // 中古: 落ち着いたおしゃれ名（フレンチ系）
+    const pool = [`メゾン・ド・${place}`, `${place}コート`, `カーサ${place}`, `${place}レジデンス`,
+      `ベルヴュー${place}`, `シャルマン${place}`, `${place}ヴェルデ`, `アヴニール${place}`];
     return pool[Math.floor(rnd() * pool.length)];
   }
-  const pool = [`グランレジデンス${place}`, `パーク${place}テラス`, `ザ・${place}ヒルズ`, `${place}ガーデンズ`, `リヴェール${place}`];   // 築浅: モダンな名前
+  // 築浅: 華やかな高級名。ローマ字を持つ地名ではアルファベット表記も混ぜる（一覧で築浅だけ視覚的に浮く）
+  const roman = PLACE_ROMAJI[place];
+  const pool = [`グランレジデンス${place}`, `パーク${place}テラス`, `ザ・${place}ヒルズ`, `${place}ガーデンズ`, `リヴェール${place}`];
+  if (roman) pool.push(`THE ${roman} RESIDENCE`, `${roman} COURT`, `${roman} TOWER`);
   return pool[Math.floor(rnd() * pool.length)];
 }
 
@@ -2381,7 +2400,9 @@ export function dedupePropertyIds(state) {
   const fix = (p) => {
     if (seen.has(String(p.id))) {
       p.id = 'p' + s.nextPropertyId++;
-      p.name = propertyName(p.genreKey, p.builtAge, p.id);
+      // v13: 名前は生成時に確定させ、ID採番のやり直しでは改名しない。所有中に築年数が進んで
+      // 帯（築浅→中古→築古）をまたいでいても、買ったときの名前のまま維持する。
+      if (!p.name) p.name = propertyName(p.genreKey, p.builtAge, p.id);
       fixed += 1;
     }
     seen.add(String(p.id));
@@ -3740,7 +3761,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, capGainTaxRate, capGainOf, capGainTaxOf, loanPayoffOf, CONSUMPTION_TAX, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, scrivenerFee, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, assessedValue, assessedValueOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, settleSale, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, startRestore, REPAIR_KINDS, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, applyValueUp, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_AMOUNT, BANKS, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, capGainTaxRate, capGainOf, capGainTaxOf, loanPayoffOf, CONSUMPTION_TAX, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, scrivenerFee, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, assessedValue, assessedValueOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, settleSale, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, startRestore, REPAIR_KINDS, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, applyValueUp, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_AMOUNT, BANKS, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -6095,15 +6116,19 @@ function openAchievementsModal() {
 // 丸アイコン⚙️「設定」。既存機能を束ねるだけ（新機能は作らない）。
 function openTitleSettingsModal() {
   const overlay = el(`<div id="lm-settings-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header">
-    <div class="bg-white rounded-xl p-5 w-full max-w-sm space-y-2">
-      <div class="flex justify-between items-center mb-1">
-        <h2 class="font-bold text-lg">⚙️ 設定</h2>
-        <button id="ttlset-close" class="text-slate-400 text-xl leading-none">✕</button>
+    <div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0">
+        <div class="flex justify-between items-center gap-2">
+          <h2 class="font-bold text-lg">⚙️ 設定</h2>
+          <button id="ttlset-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
+        </div>
       </div>
-      <button id="ttlset-bgm" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">🎵 BGMの気分</button>
-      <button id="ttlset-mute" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">${muted ? '🔇 ミュート中（タップで解除）' : '🔊 音あり（タップでミュート）'}</button>
-      <button id="ttlset-terms" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">${termsOff ? '📕 用語ハイライト OFF（タップでON）' : '📖 用語ハイライト ON（タップでOFF）'}</button>
-      <button id="ttlset-reset" class="w-full border border-red-300 text-red-600 rounded-lg py-2.5 text-sm text-left px-3 mt-2">🗑️ データをリセット</button>
+      <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+        <button id="ttlset-bgm" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">🎵 BGMの気分</button>
+        <button id="ttlset-mute" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">${muted ? '🔇 ミュート中（タップで解除）' : '🔊 音あり（タップでミュート）'}</button>
+        <button id="ttlset-terms" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">${termsOff ? '📕 用語ハイライト OFF（タップでON）' : '📖 用語ハイライト ON（タップでOFF）'}</button>
+        <button id="ttlset-reset" class="w-full border border-red-300 text-red-600 rounded-lg py-2.5 text-sm text-left px-3">🗑️ データをリセット</button>
+      </div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
@@ -6948,7 +6973,11 @@ function openKpiModal(which, keepBulk = false) {
         <div class="font-bold text-slate-700">👤個人${persN}件 ・ 🏢法人${corpN}件</div>
         <button id="kpi-bulk-toggle" class="border rounded px-2 py-1 font-bold ${bulkMode ? 'bg-navy text-white' : 'text-navy'}">${bulkMode ? '✕ まとめて査定を終了' : '☑ まとめて査定'}</button>
       </div>
-      ${bulkMode ? '<div class="text-[11px] text-slate-500 mb-1">査定したい物件にチェック → 下の「査定する」（1件につき行動力-5）</div>' : ''}` : '';
+      ${bulkMode ? `<div class="text-[11px] text-slate-500 mb-1">査定したい物件にチェック → 下の「査定する」（1件につき行動力-5）</div>
+      <label class="flex items-center gap-2 mb-1 pl-[9px] cursor-pointer select-none">
+        <input type="checkbox" id="kpi-bulk-all" class="w-4 h-4 shrink-0">
+        <span class="text-[11px] font-bold text-navy">全て選択</span>
+      </label>` : ''}` : '';
     // v8: 手当てが要る物件ほど上に出す。件数が増えると危険な物件がスクロールの下に埋もれるため。
     const byRisk = [...state.properties].sort((a, b) =>
       L.BAND_RANK[L.worstBandOf(b)] - L.BAND_RANK[L.worstBandOf(a)]);
@@ -7059,6 +7088,29 @@ function openKpiModal(which, keepBulk = false) {
   boxEl.querySelector('#kpi-bulk-toggle')?.addEventListener('click', () => {
     bulkMode = !bulkMode; close(); openKpiModal('props', true);
   });
+  // 「全て選択」：件数が増えると1件ずつのチェックが苦行になるので一括で入れ／解除できるようにする。
+  // 下のチェック列と同じ見た目・同じ左位置（カードのborder1px + p-2）に置いて「この列の親」だと分かるようにする。
+  // チェック状態はDOMだけが持つ（再描画で消える）ため、再描画せずその場で書き換える。
+  const bulkAllEl = boxEl.querySelector('#kpi-bulk-all');
+  const syncBulkUI = () => {
+    const checks = [...boxEl.querySelectorAll('.kpi-check')];
+    const n = checks.filter(c => c.checked).length;
+    if (bulkAllEl) {
+      bulkAllEl.checked = !!checks.length && n === checks.length;
+      bulkAllEl.indeterminate = n > 0 && n < checks.length;   // 一部だけ選択中は中間表示
+    }
+    const runEl = boxEl.querySelector('#kpi-bulk-run');
+    if (runEl) runEl.textContent = n
+      ? `🔍 ${n}件をまとめて査定する（行動力-${n * 5}）`
+      : '🔍 チェックした物件をまとめて査定する';
+  };
+  bulkAllEl?.addEventListener('change', () => {
+    const turnOn = bulkAllEl.checked;
+    boxEl.querySelectorAll('.kpi-check').forEach(c => { c.checked = turnOn; });
+    syncBulkUI();
+  });
+  boxEl.querySelectorAll('.kpi-check').forEach(c => c.addEventListener('change', syncBulkUI));
+  if (bulkAllEl) syncBulkUI();
   boxEl.querySelector('#kpi-bulk-run')?.addEventListener('click', () => {
     const ids = [...boxEl.querySelectorAll('.kpi-check')].filter(c => c.checked).map(c => parsePropId(c.dataset.id));
     if (!ids.length) { alert('査定したい物件にチェックを入れてください'); return; }
@@ -7970,32 +8022,65 @@ function openPurchase(propId, back) {
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   // v8.3: 一度断られた物件は満額も含めて買付できない（売主が態度を固めた状態）。
   const blocked = !!L.offerBlockedReason(p);
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-2">
-    <div class="flex justify-between items-center gap-2">
-      ${back ? '<button id="of-back" class="text-xs text-navy">← 戻る</button>' : '<span></span>'}
-      <button id="of-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
-    <div><h2 class="font-bold" style="font-size:clamp(0.75rem,4vw,0.95rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name || p.label} に買付を入れる（行動力-10）</h2><div class="text-[11px] text-slate-500">${p.label}</div></div>
-    <div class="text-sm">売出価格: ${p.origPrice && p.price < p.origPrice ? `<span class="line-through text-slate-400">${L.yen(p.origPrice)}</span> → ` : ''}<b>${L.yen(p.price)}</b>${p.origPrice && p.price < p.origPrice ? ' <span class="text-[11px] bg-red-500 text-white rounded px-1">値下げ中</span>' : ''}${p.staleFlag ? ' <span class="text-[11px] bg-amber-500 text-white rounded px-1">売れ残り中</span>' : ''}</div>
-    ${p.sellerUrgency ? `<div class="text-xs"><span class="bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 font-bold">🏃 売り急ぎ</span> <span class="text-slate-600">${p.sellerUrgency.reason}そうだ</span></div>` : ''}
-    ${blocked ? `<div class="rounded-lg bg-red-50 text-red-800 p-2 text-xs space-y-1">
-      <div class="font-bold">🚫 この物件には買付を入れられません</div>
-      <div>一度断られたため、売主が態度を固めています。<b>満額でも受け付けてもらえません。</b></div>
-      <div class="text-red-700">次のどちらかで交渉が再開できます：<br>・売主が<b>値下げ</b>する<br>・<b>6ヶ月以上売れ残る</b>（現在 ${p.listedMonths ?? 0}ヶ月）</div>
-    </div>` : ''}
-    <button id="of-detail" class="w-full text-xs text-navy underline">📋 ${term('rentroll', 'レントロール')}・収支・融資の詳細を見る</button>
-    <button id="of-full" class="w-full ${blocked ? 'bg-slate-300 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-700 text-white'} rounded py-2 text-sm font-bold" ${blocked ? 'disabled' : ''}>満額 ${L.yen(p.price)}${blocked ? '（受け付けてもらえない）' : '（必ず通る）'}</button>
-    ${(!blocked && L.sashineBuffBonus(state) > 0) ? `<div class="text-[11px] bg-amber-100 text-amber-800 rounded px-2 py-1 font-bold">✨ 耳より情報：この指値だけ成功率 +${Math.round(L.sashineBuffBonus(state) * 100)}pt（使うと消えます）</div>` : ''}
-    <div class="pt-1 border-t ${blocked ? 'opacity-50' : ''}">
-      <div class="text-sm">${term('sashine', '指値')} <b id="of-cutpct">5%</b>引き → <b id="of-cutprice">${L.yen(Math.round(p.price * 0.95))}</b></div>
-      <input id="of-slider" type="range" min="1" max="99" step="1" value="5" class="w-full" ${blocked ? 'disabled' : ''}>
-      <div class="flex items-center gap-2 text-xs">
-        <span class="text-slate-500 shrink-0">成功率</span>
-        <div class="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div id="of-gauge" class="h-2 rounded-full"></div></div>
-        <span id="of-chance" class="font-bold w-12 text-right"></span></div>
-      <div id="of-note" class="text-[11px] mt-1"></div>
-      <button id="of-submit" class="w-full bg-navy text-white rounded py-2 text-sm font-bold mt-1" ${blocked ? 'disabled' : ''}>この指値で申し込む（行動力-10）</button>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openDetail / openWorkMenu と同じ構造）。
+  // 満額＝緑枠カード／指値＝紺枠カードの二択にして、工事メニューのDIY/業者と同じ見せ方に揃える。
+  const priceBadges = `${p.origPrice && p.price < p.origPrice ? '<span class="text-[11px] bg-red-500 text-white rounded px-1.5 py-0.5 font-bold">値下げ中</span>' : ''}${p.staleFlag ? '<span class="text-[11px] bg-amber-500 text-white rounded px-1.5 py-0.5 font-bold">売れ残り中</span>' : ''}${p.sellerUrgency ? `<span class="text-[11px] bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 font-bold">🏃 売り急ぎ・${p.sellerUrgency.reason}そうだ</span>` : ''}`;
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-3 border-b shrink-0">
+      <div class="flex justify-between items-center mb-1">
+        ${back ? '<button id="of-back" class="text-xs text-navy font-bold">← 戻る</button>' : '<span></span>'}
+        <button id="of-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+      <div class="flex items-center gap-2.5">${renderBuildingSVG(p, 'w-14 h-14')}
+        <div class="min-w-0 flex-1">
+          <div class="font-bold truncate">${p.name || p.label}</div>
+          <div class="text-[11px] text-slate-500">${p.label}</div>
+        </div>
+      </div>
+      <div class="mt-2 rounded-lg bg-slate-50 px-2.5 py-2">
+        <div class="flex items-baseline justify-between gap-2">
+          <span class="text-[11px] text-slate-500 shrink-0">売出価格</span>
+          <span class="text-right">${p.origPrice && p.price < p.origPrice ? `<span class="line-through text-slate-400 text-xs">${L.yen(p.origPrice)}</span> ` : ''}<b class="text-lg text-ink">${L.yen(p.price)}</b></span>
+        </div>
+        ${priceBadges ? `<div class="mt-1 flex flex-wrap gap-1">${priceBadges}</div>` : ''}
+      </div>
     </div>
-    <button id="of-cancel" class="w-full text-slate-500 text-sm">やめる</button></div>`);
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+      <button id="of-detail" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50">📋 ${term('rentroll', 'レントロール')}・収支・融資の詳細を見る</button>
+      ${blocked ? `<div class="rounded-lg bg-red-50 text-red-800 p-2 text-xs space-y-1">
+        <div class="font-bold">🚫 この物件には買付を入れられません</div>
+        <div>一度断られたため、売主が態度を固めています。<b>満額でも受け付けてもらえません。</b></div>
+        <div class="text-red-700">次のどちらかで交渉が再開できます：<br>・売主が<b>値下げ</b>する<br>・<b>6ヶ月以上売れ残る</b>（現在 ${p.listedMonths ?? 0}ヶ月）</div>
+      </div>` : ''}
+      <div class="text-xs text-slate-500 font-bold">買い方を選ぶ（どちらも ${term('action_power', '行動力')}-10）</div>
+      <button id="of-full" class="w-full border-2 ${blocked ? 'border-slate-300' : 'border-emerald-500 hover:bg-emerald-50'} rounded-lg p-3 text-left" ${blocked ? 'disabled' : ''}>
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-bold text-sm ${blocked ? 'text-slate-500' : ''}">💴 満額で買う</div>
+          <span class="text-[11px] ${blocked ? 'bg-slate-400' : 'bg-emerald-600'} text-white rounded-full px-2 py-0.5 font-bold shrink-0">${blocked ? '受け付けてもらえない' : '必ず通る'}</span>
+        </div>
+        <div class="text-2xl font-black ${blocked ? 'text-slate-500' : 'text-emerald-700'} mt-0.5">${L.yen(p.price)}</div>
+        <div class="text-xs text-slate-600 mt-0.5">${blocked ? '売主が態度を固めているため、満額を出しても断られる。' : '交渉なしで即決。値切らないぶん確実に手に入る。'}</div>
+      </button>
+      ${(!blocked && L.sashineBuffBonus(state) > 0) ? `<div class="text-[11px] bg-amber-100 text-amber-800 rounded px-2 py-1 font-bold">✨ 耳より情報：この指値だけ成功率 +${Math.round(L.sashineBuffBonus(state) * 100)}pt（使うと消えます）</div>` : ''}
+      <div class="w-full border-2 ${blocked ? 'border-slate-300 opacity-50' : 'border-navy'} rounded-lg p-3 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-bold text-sm">🤝 ${term('sashine', '指値')}で買う（値切る）</div>
+          <span id="of-chance-pill" class="text-[11px] rounded-full px-2 py-0.5 font-bold shrink-0 text-white"></span>
+        </div>
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span id="of-cutprice" class="text-2xl font-black text-navy">${L.yen(Math.round(p.price * 0.95))}</span>
+          <span class="text-xs text-slate-500"><b id="of-cutpct">5%</b>引き（<span id="of-cutdiff"></span>）</span>
+        </div>
+        <input id="of-slider" type="range" min="1" max="99" step="1" value="5" class="w-full" ${blocked ? 'disabled' : ''}>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="text-slate-500 shrink-0">成功率</span>
+          <div class="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div id="of-gauge" class="h-2 rounded-full"></div></div>
+          <span id="of-chance" class="font-bold w-12 text-right"></span></div>
+        <div id="of-note" class="text-[11px] leading-relaxed rounded px-2 py-1.5"></div>
+        <button id="of-submit" class="w-full bg-navy text-white rounded-lg py-2.5 text-sm font-bold" ${blocked ? 'disabled' : ''}>この指値で申し込む</button>
+      </div>
+      <button id="of-cancel" class="w-full text-slate-500 text-sm py-1">やめる</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   // 詳細は買付モーダルを閉じてから開く（重なりで見えなくなる問題を解消）。詳細から買付へ「戻る」で戻れる。
   box.querySelector('#of-detail').addEventListener('click', () => { close(); openDetail(propId, 'market', () => openPurchase(propId, back)); });
@@ -8009,6 +8094,7 @@ function openPurchase(propId, back) {
   const submit = box.querySelector('#of-submit');
   const noteEl = box.querySelector('#of-note');
   const gauge = box.querySelector('#of-gauge');
+  const chancePill = box.querySelector('#of-chance-pill');
   const update = () => {
     const cut = Number(slider.value) / 100;
     const chance = L.offerSuccessChance(p, cut, lv);
@@ -8016,27 +8102,33 @@ function openPurchase(propId, back) {
     // 上振れすることがある（ダメ元の柔軟度）。それは判定にだけ使う内部情報にとどめ、
     // 表示は「指値を深くするほど成功率が上がって見える」逆転が起きないよう常に1%で固定する。
     const displayChance = cut > line ? 0.01 : chance;
+    const cutPrice = Math.max(10000, Math.round(p.price * (1 - cut)));
     box.querySelector('#of-cutpct').textContent = `${slider.value}%`;
-    box.querySelector('#of-cutprice').textContent = L.yen(Math.max(10000, Math.round(p.price * (1 - cut))));
+    box.querySelector('#of-cutprice').textContent = L.yen(cutPrice);
+    box.querySelector('#of-cutdiff').textContent = `-${L.yen(p.price - cutPrice)}`;
     box.querySelector('#of-chance').textContent = `${Math.round(displayChance * 100)}%`;
     gauge.style.width = `${Math.max(3, Math.round(displayChance * 100))}%`;
     gauge.style.background = displayChance >= 0.5 ? '#059669' : displayChance >= 0.2 ? '#f59e0b' : '#dc2626';
+    // v14: 成功率ピルの色分けはゲージ（gauge.style.background）と同じしきい値（0.5 / 0.2）で揃える。
+    chancePill.textContent = `成功率 ${Math.round(displayChance * 100)}%`;
+    chancePill.className = 'text-[11px] rounded-full px-2 py-0.5 font-bold shrink-0 text-white ' +
+      (displayChance >= 0.5 ? 'bg-emerald-600' : displayChance >= 0.2 ? 'bg-amber-500' : 'bg-red-600');
     if (cut <= line) {
       // 用語ヘルプのspanを出すため innerHTML で入れる（中身は自前の文字列のみ）
       noteEl.innerHTML = `🏢「頑張って交渉します」（${term('toritsugi', '取次ライン')}: ${Math.round(line * 100)}%引きまで）`;
-      noteEl.className = 'text-[11px] mt-1 text-slate-600';
-      submit.textContent = 'この指値で申し込む（行動力-10）';
-      submit.className = 'w-full bg-navy text-white rounded py-2 text-sm font-bold mt-1';
+      noteEl.className = 'text-[11px] leading-relaxed rounded px-2 py-1.5 bg-slate-50 text-slate-600';
+      submit.textContent = 'この指値で申し込む';
+      submit.className = 'w-full rounded-lg py-2.5 text-sm font-bold bg-navy text-white';
     } else if (L.hasSellerBackground(p)) {
       noteEl.textContent = '🏢「売主さんには事情があるようです。ダメ元で当たってみます…」（失敗してもペナルティなし）';
-      noteEl.className = 'text-[11px] mt-1 text-amber-700 font-bold';
-      submit.textContent = '🙏 ダメ元で打診してもらう（行動力-10）';
-      submit.className = 'w-full bg-amber-500 hover:bg-amber-600 text-white rounded py-2 text-sm font-bold mt-1';
+      noteEl.className = 'text-[11px] leading-relaxed rounded px-2 py-1.5 bg-amber-50 text-amber-800 font-bold';
+      submit.textContent = '🙏 ダメ元で打診してもらう';
+      submit.className = 'w-full rounded-lg py-2.5 text-sm font-bold bg-amber-500 hover:bg-amber-600 text-white';
     } else {
       noteEl.textContent = '🏢「この価格はさすがに…無謀な指値は評判に関わりますよ」（失敗すると交渉力の評判ダウン）';
-      noteEl.className = 'text-[11px] mt-1 text-red-600 font-bold';
-      submit.textContent = '⚠️ 非常識な指値を強行する（行動力-10）';
-      submit.className = 'w-full bg-red-600 hover:bg-red-700 text-white rounded py-2 text-sm font-bold mt-1';
+      noteEl.className = 'text-[11px] leading-relaxed rounded px-2 py-1.5 bg-red-50 text-red-700 font-bold';
+      submit.textContent = '⚠️ 非常識な指値を強行する';
+      submit.className = 'w-full rounded-lg py-2.5 text-sm font-bold bg-red-600 hover:bg-red-700 text-white';
     }
   };
   slider.addEventListener('input', update);
@@ -8074,8 +8166,12 @@ function showCounterProposal(cp) {
   const m = document.getElementById('purchase-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-3">
-    <div class="flex justify-between items-center"><h2 class="font-bold">🙋 不動産会社からの逆提案</h2><button id="cp-x" class="text-slate-400 text-xl leading-none">✕</button></div>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <div class="flex justify-between items-center gap-2"><h2 class="font-bold">🙋 不動産会社からの逆提案</h2><button id="cp-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-sm text-slate-700 bg-slate-50 rounded-lg p-3">「その予算感でしたら…実は<b>こういう物件</b>がありますよ。訳ありですが、価格は頑張れます」</div>
     <div class="flex items-center gap-2 border rounded-lg p-2">${renderBuildingSVG(cp, 'w-14 h-14')}
       <div class="min-w-0 flex-1 text-left">
@@ -8086,7 +8182,9 @@ function showCounterProposal(cp) {
         ${cp.sellerUrgency ? `<div class="text-[11px] text-rose-600 font-bold">🏃 売り急ぎ: ${cp.sellerUrgency.reason}そうだ</div>` : ''}
       </div></div>
     <button id="cp-detail" class="w-full bg-navy text-white rounded-lg py-2 text-sm font-bold">📋 詳細を見る</button>
-    <button id="cp-later" class="w-full text-slate-500 text-sm">あとで（🗂️市場一覧に追加されています）</button></div>`);
+    <button id="cp-later" class="w-full text-slate-500 text-sm">あとで（🗂️市場一覧に追加されています）</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   box.querySelector('#cp-x').addEventListener('click', close);
   box.querySelector('#cp-later').addEventListener('click', close);
@@ -8378,8 +8476,14 @@ function openCorpTransfer(propId) {
   const capTax = bd.tax;
   const acqCost = Math.round(price * L.CONFIG.corpTransferCostRate);
   const total = capTax + acqCost;
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-2">
-    <div class="flex justify-between items-center gap-2"><h2 class="font-bold" style="font-size:clamp(0.75rem,4vw,0.95rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto">🏢 ${p.name || p.label} を法人へ売却（移転）</h2><button id="tc-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0 flex-1"><h2 class="font-bold truncate">🏢 ${p.name || p.label}</h2><div class="text-[11px] text-slate-500">法人へ売却（移転）</div></div>
+        <button id="tc-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <table class="w-full text-sm">
       <tr><td>移転価格（現在の時価）</td><td class="text-right font-bold">${L.yen(price)}</td></tr>
       <tr class="border-t"><td>${term('capital_gains_tax', '譲渡税')}（個人側・${heldYears <= 5 ? '短期39%' : '長期20%'}）</td><td class="text-right text-red-600">-${L.yen(capTax)}</td></tr>
@@ -8392,7 +8496,9 @@ function openCorpTransfer(propId) {
       <div>✅ 売却時の${term('capital_gains_tax', '譲渡税')}が保有期間に関係なく30%に</div>
     </div>
     <button id="tc-run" class="w-full bg-navy text-white rounded py-2 text-sm font-bold ${state.cash < total ? 'opacity-40' : ''}" ${state.cash < total ? 'disabled' : ''}>法人へ移転する（${L.yen(total)} 支払い）</button>
-    <button id="tc-cancel" class="w-full text-slate-500 text-sm">やめる</button></div>`);
+    <button id="tc-cancel" class="w-full text-slate-500 text-sm">やめる</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   box.querySelector('#tc-x').addEventListener('click', close);
   box.querySelector('#tc-cancel').addEventListener('click', close);
@@ -8419,25 +8525,41 @@ function openSell(propId) {
   // 「まだ売れていない」と誤解して二重に売り出そうとしてしまう。
   const pending = (state.pendingSales || []).find(x => x.propertyId === propId);
   if (pending) {
-    const box2 = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-3">
-      <div class="flex justify-between items-start gap-2"><h2 class="font-bold">${p.name || p.label} は売却手続き中</h2><button id="sl-x0" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
+    const box2 = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0">
+        <div class="flex justify-between items-start gap-2">
+          <div class="min-w-0 flex-1"><h2 class="font-bold truncate">${p.name || p.label}</h2><div class="text-[11px] text-slate-500">売却手続き中</div></div>
+          <button id="sl-x0" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+      </div>
+      <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
       <div class="rounded-lg bg-emerald-50 p-3 text-sm space-y-1">
         <div>✅ 買付を承諾済みです。<b>${L.yen(pending.price)}</b> で成約しました。</div>
         <div>📅 <b>翌月に決済</b>され、手取りが入金されます。</div>
       </div>
       ${netProceedsBox(p, pending.price, true)}
       <div class="text-xs text-slate-500">決済までは売出価格の変更も再掲載もできません。</div>
-      <button id="sl-ok" class="w-full bg-navy text-white rounded py-2 text-sm font-bold">閉じる</button></div>`);
+      <button id="sl-ok" class="w-full bg-navy text-white rounded py-2 text-sm font-bold">閉じる</button>
+      </div>
+    </div>`);
     m.appendChild(box2);
     box2.querySelector('#sl-ok').addEventListener('click', close);
     box2.querySelector('#sl-x0').addEventListener('click', close);
     return;
   }
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-3">
-    <div class="flex justify-between items-center gap-2"><h2 class="font-bold" style="font-size:clamp(0.75rem,4vw,0.95rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto">${p.name || p.label} の売却</h2><button id="sl-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一。中身は短いが型は他モーダルと揃える。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0 flex-1"><h2 class="font-bold truncate">${p.name || p.label}</h2><div class="text-[11px] text-slate-500">売却</div></div>
+        <button id="sl-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-sm">まず不動産屋に査定を依頼しよう（行動力-5）</div>
     <button id="sl-appraise" class="w-full bg-navy text-white rounded py-2">査定を依頼する</button>
-    <button id="sl-cancel" class="w-full text-slate-500 text-sm">やめる</button></div>`);
+    <button id="sl-cancel" class="w-full text-slate-500 text-sm">やめる</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   box.querySelector('#sl-cancel').addEventListener('click', close);
   box.querySelector('#sl-x').addEventListener('click', close);
@@ -8491,8 +8613,13 @@ function drawPricing(m, p, appraisal, close, back, afterList = back) {
   let price = appraisal;
   const gpi = L.gpiAnnual(p);
   const yieldOf = (v) => (v > 0 ? (gpi / v * 100).toFixed(1) : '-');
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-3">
-    <div class="flex justify-between items-center gap-2">${back ? '<button id="sl-back" class="text-xs text-navy shrink-0">← 戻る</button>' : ''}<h2 class="font-bold" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto">売出価格を決める</h2><button id="sl-x2" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchase/openWorkMenuと同じ構造）。
+  // 内訳表・アコーディオン・ボタン2つと中身が多く、低い端末では見出しごと流れて消えていたため。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <div class="flex justify-between items-center gap-2">${back ? '<button id="sl-back" class="text-xs text-navy shrink-0">← 戻る</button>' : ''}<h2 class="font-bold truncate">売出価格を決める</h2><button id="sl-x2" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-sm">不動産会社の査定額（参考）: <b>${L.yen(appraisal)}</b>（利回り${yieldOf(appraisal)}%）</div>
     <div class="text-center text-2xl font-black text-navy"><span class="text-xs font-normal text-slate-500 align-middle">価格</span> <span id="sl-price-v">${L.yen(appraisal)}</span></div>
     <input id="sl-price-range" type="range" min="${Math.max(10000, Math.round(appraisal * 0.5))}" max="${Math.round(appraisal * 2)}" step="10000" value="${appraisal}" class="w-full">
@@ -8507,7 +8634,9 @@ function drawPricing(m, p, appraisal, close, back, afterList = back) {
       <div id="sl-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">安くすれば早く売れ、高いほど時間がかかる。訳あり物件を高利回りで仕入れ、通常の利回り水準の価格で売り抜く戦略も。</div>
     </div>
     <button id="sl-list" class="w-full bg-emerald text-white rounded py-2">この価格で売りに出す</button>
-    <button id="sl-cancel2" class="w-full text-slate-500 text-sm">やめる</button></div>`);
+    <button id="sl-cancel2" class="w-full text-slate-500 text-sm">やめる</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   const range = box.querySelector('#sl-price-range');
   const updatePrice = () => {
@@ -8548,12 +8677,20 @@ function drawPricing(m, p, appraisal, close, back, afterList = back) {
 function drawListingManage(m, p, listing, close) {
   m.innerHTML = '';
   const downTo = Math.round(listing.askingPrice * 0.95 / 10000) * 10000;
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-3">
-    <div class="flex justify-between items-center gap-2"><h2 class="font-bold" style="font-size:clamp(0.75rem,4vw,0.95rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto">${p.name || p.label}（売出中 ${listing.listedMonths}ヶ月目）</h2><button id="sl-x3" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0 flex-1"><h2 class="font-bold truncate">${p.name || p.label}</h2><div class="text-[11px] text-slate-500">売出中 ${listing.listedMonths}ヶ月目</div></div>
+        <button id="sl-x3" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-sm">売出価格: <b>${L.yen(listing.askingPrice)}</b></div>
     <button id="sl-down" class="w-full border rounded py-2 text-sm">5%値下げする → ${L.yen(downTo)}</button>
     <button id="sl-delist" class="w-full border rounded py-2 text-sm">掲載を取り下げる</button>
-    <button id="sl-close" class="w-full text-slate-500 text-sm">閉じる</button></div>`);
+    <button id="sl-close" class="w-full text-slate-500 text-sm">閉じる</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   box.querySelector('#sl-down').addEventListener('click', () => {
     state = L.updateListing(state, p.id, downTo).state;
@@ -8576,13 +8713,19 @@ function showOfferModal(listing) {
   const o = listing.offer;
   const lv = L.skillLevel(state.skills.negotiation.exp);
   const counterPrice = Math.round((o.price + listing.askingPrice) / 2 / 10000) * 10000;
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-2">
-    <h2 class="font-bold">💌 ${p.name || p.label} に買付が入った！</h2>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <h2 class="font-bold truncate">💌 ${p.name || p.label}</h2><div class="text-[11px] text-slate-500">買付が入った！</div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-sm">売出 ${L.yen(listing.askingPrice)} に対し <b>${o.type === 'full' ? '満額' : '指値'} ${L.yen(o.price)}</b></div>
     ${netProceedsBox(p, o.price)}
     <button class="of-act w-full bg-emerald text-white rounded py-2 text-sm" data-a="accept">承諾する（翌月決済）</button>
     ${o.type === 'sashine' ? `<button class="of-act w-full border rounded py-2 text-sm" data-a="counter">カウンター ${L.yen(counterPrice)}（成立確率${Math.round((0.5 + (lv - 1) * 0.05) * 100)}%・不成立なら買付消滅）</button>` : ''}
-    <button class="of-act w-full border rounded py-2 text-sm" data-a="reject">断る（掲載継続）</button></div>`);
+    <button class="of-act w-full border rounded py-2 text-sm" data-a="reject">断る（掲載継続）</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   box.querySelectorAll('.of-act').forEach(b => b.addEventListener('click', () => {
     const r = L.respondToOffer(state, listing.propertyId, b.dataset.a, lv, Math.random);
@@ -9929,8 +10072,13 @@ function openSearchModal() {
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   const genreBoxes = BASE_GENRE_ORDER.map(k =>
     `<label class="flex items-center gap-1 text-xs border rounded px-1 py-0.5"><input type="checkbox" class="sel-genre" value="${k}" ${searchSelection.genres.includes(k) ? 'checked' : ''}> ${L.GENRE[k].label}</label>`).join('');
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-2">
-    <div class="flex justify-between items-start gap-2"><h2 class="font-bold">🏘️ 物件情報を探す（1回 行動力-1）</h2><button id="search-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一。#sr-feed は元々スクロール枠なので
+  // 高さ(h-28)はそのまま維持し、本文全体のスクロールとは独立させる。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <div class="flex justify-between items-start gap-2"><h2 class="font-bold">🏘️ 物件情報を探す（1回 行動力-1）</h2><button id="search-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    </div>
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="grid grid-cols-2 gap-1">${genreBoxes}</div>
     <label class="flex items-center gap-1 text-xs"><input type="checkbox" id="sel-wakeari" ${searchSelection.wakeari ? 'checked' : ''}> 訳あり物件も含める</label>
     <div class="flex gap-3 text-xs">
@@ -9945,7 +10093,9 @@ function openSearchModal() {
     <div id="sr-progress" class="text-[11px] font-bold text-slate-600 text-center">${(state.salesSearch?.spent || 0) > 0 ? `調査継続中（累計 行動力${state.salesSearch.spent}消費）` : '足で稼いだ情報が出物につながる'}</div>
     <button id="btn-search" class="w-full bg-navy text-white rounded py-2 text-sm font-bold select-none touch-none">🔍 動いて情報を集める（${term('action_power', '行動力')}-1・長押しOK）</button>
     <div id="sr-feed" class="text-[11px] leading-relaxed h-28 overflow-y-auto space-y-0.5 bg-slate-50 rounded p-2"><div class="sr-empty text-slate-500">ここに調査ログが流れます。物件を見つけたらログをタップで詳細へ。</div></div>
-    <button id="btn-search-close" class="w-full text-slate-500 text-sm">閉じる</button></div>`);
+    <button id="btn-search-close" class="w-full text-slate-500 text-sm">閉じる</button>
+    </div>
+  </div>`);
   m.appendChild(box);
   // v7.2: モーダルを開いた時点で「物件を探すを押す」ステップは完了。次は中のボタンを指す。
   tutMaybeAdvance('openSearch');
@@ -10369,7 +10519,16 @@ function showEvent(pending) {
     : '';
   // 見出しは発生時に確定済み（セミナーのお題など）。古いセーブには無いので関数側で解決する。
   const title = pending.title || L.eventTitle(ev);
-  const box = el(`<div class="bg-white rounded-xl p-5 w-full max-w-md space-y-3"><h2 class="font-bold">${title}</h2>${where}</div>`);
+  // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。選択肢が
+  // 後からappendChildで足される作りなので、追加先は本文側の#ev-body（スクロールする方）に固定する。
+  // このモーダルはXボタンを持たない（選択肢を選ぶまで閉じられない仕様。元からその設計）。
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0">
+      <h2 class="font-bold">${title}</h2>${where ? `<div class="mt-1.5">${where}</div>` : ''}
+    </div>
+    <div id="ev-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3"></div>
+  </div>`);
+  const body = box.querySelector('#ev-body');
   // v8: 初心者モードでは「クイズを避けて経験値だけもらう」逃げ道（beginnerHidden）を出さない。
   // 学習のための仕掛けなので、選べてしまうと結局使われないため。
   const beginner = state.difficulty === 'beginner';
@@ -10388,7 +10547,7 @@ function showEvent(pending) {
       if (withOffer) { showOfferModal(withOffer); return; }
       checkEnd();
     });
-    box.appendChild(b);
+    body.appendChild(b);
   });
   m.appendChild(box);
 }
