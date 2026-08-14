@@ -7768,10 +7768,32 @@ function openSoldRecordsModal(back) {
     body.querySelectorAll('.sold-row').forEach(b => b.addEventListener('click', () => drawDetail(sorted[Number(b.dataset.idx)])));
   };
 
+  // v15.1: 売却時の入居率／躯体／手入れ等はstate.soldRecordsに保存されているのに画面のどこにも
+  // 出ていなかった（scorecardHtmlは保有中の物件とも共用する成績カードなので、ここに専用項目を
+  // 混ぜず、詳細ビュー側で成績カードの直前に別カードとして差し込む）。
+  const soldStateHtml = (r) => {
+    const tone = (v) => v >= 80 ? 'text-emerald-700' : v >= 40 ? 'text-amber-600' : 'text-red-600';
+    const metaParts = [r.owner === 'corp' ? '🏢法人' : '👤個人'];
+    if (r.valueUpLevel > 0) metaParts.push(`✨バリューアップ Lv${r.valueUpLevel}`);
+    metaParts.push(r.longTerm ? '長期譲渡' : '短期譲渡');
+    const resolved = r.resolvedJunk || [];
+    // junkFlags・resolvedJunkは文字列配列。差集合を取るだけでよい
+    // （傾き・事故歴・再建築不可はL.PERMANENT_JUNK_FLAGSで再生不可なので必ずこちら側に残る）。
+    const unresolved = (r.junkFlags || []).filter(f => !resolved.includes(f));
+    return `<div class="border rounded-lg p-3 mb-2 text-xs">
+      <div class="text-slate-500 font-bold mb-1">売却時の状態</div>
+      <div>入居 <b class="${tone(r.occAtSale)}">${r.occAtSale}%</b> ・ 🏚躯体 <b class="${tone(r.repairStateAtSale)}">${r.repairStateAtSale}%</b> ・ 🧹手入れ <b class="${tone(r.careStateAtSale)}">${r.careStateAtSale}%</b></div>
+      <div class="text-slate-500 mt-0.5">${metaParts.join(' ・ ')}</div>
+      ${resolved.length ? `<div class="text-slate-600 mt-0.5">🔨 再生した訳あり: ${resolved.join('・')}</div>` : ''}
+      ${unresolved.length ? `<div class="text-red-600 mt-0.5">⚠️ 未解消の訳あり: ${unresolved.join('・')}</div>` : ''}
+    </div>`;
+  };
+
   // 個別の成績カード詳細ビュー（同じモーダル内で本文だけ差し替える）
   const drawDetail = (r) => {
     body.innerHTML = `<button id="sold-detail-back" class="text-[11px] text-navy underline font-bold mb-2">← 一覧へ戻る</button>
       <div class="font-bold text-sm mb-2">${r.name || r.label}</div>
+      ${soldStateHtml(r)}
       ${scorecardHtml(r.card, { sold: true })}`;
     body.querySelector('#sold-detail-back').addEventListener('click', drawList);
   };
@@ -8570,6 +8592,8 @@ function appealBox(p, u) {
 // 「📣 入居者を募集」1つにまとめ、押してからこの画面で手段を選ぶ形にした。
 // v8.4: ADは1〜3ヶ月分から選ぶ。積むほど決まりやすいが、確定はしない。
 function openRecruitPicker(p, unitIndex, onAd, onSelf) {
+  // v15.1: スワイプの列挙漏れ（13項目実装時に対象から抜けていた）。他の12モーダルと同じやり方で登録する。
+  navGo({ key: `recruit:${p.id}:${unitIndex}`, open: () => openRecruitPicker(p, unitIndex, onAd, onSelf) });   // v15.1: 履歴に登録
   const u = p.units[unitIndex];
   // 物件詳細（z-50）の上に重ねるので、既存のモーダル枠は使わず専用のオーバーレイを作る。
   const m = el('<div class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4 modal-below-header"></div>');
@@ -8596,7 +8620,7 @@ function openRecruitPicker(p, unitIndex, onAd, onSelf) {
       ${!enough ? '<div class="text-[11px] text-red-600">現金が足りません</div>' : ''}</button>`;
   }).join('');
 
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col" style="max-height:85dvh">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 border-b shrink-0 flex justify-between items-center">
       <h2 class="font-bold">📣 ${unitIndex + 1}号室の入居者を募集</h2>
       <button id="rc-x" class="text-slate-400 text-xl leading-none">✕</button></div>
@@ -9139,16 +9163,22 @@ function reformFinanceCompareBox(rs, p, plan) {
 // v15: 全滅したときに「何をどうすれば通るのか」が分からないと詰む。
 // リフォームを外す／頭金を増やす、のどちらで届くのかを具体的に出す。
 // この探索はdraw()のたびに走ると重いので、rs（4行同時審査の結果）が全部否決のときだけ実行する。
+// v15.1: 元は「リフォームを選んでいるときだけ」出す条件になっており、リフォーム未選択のまま
+// 4行全滅（空室の多い物件でDSCR不足等）した場合にヒントが何も出なかった（列挙し忘れではなく
+// 発動条件が狭すぎた取りこぼし）。「4行すべて否決」だけをガードにし、リフォームを外す提案①は
+// リフォームを選んでいるときだけ内側で判定する形に変える。
 function reformRejectHint(p, price, downRatio, state, plan, maxDownPct, rs) {
+  if (!rs.every(r => !r.approved)) return '';
   const reformTotal = L.purchaseReformTotal(p, plan);
-  if (!reformTotal || !rs.every(r => !r.approved)) return '';
-  // ① リフォームを外せば通る銀行があるか
-  const withoutReform = L.reviewAllBanks(p, price, downRatio, state, null);
-  const okWithout = withoutReform.find(r => r.approved);
-  if (okWithout) {
-    return `<div class="text-[11px] text-amber-800 bg-amber-50 rounded px-2 py-1.5">💡 リフォームを外せば ${okWithout.label} が通ります。</div>`;
+  // ① リフォームを選んでいて、外せば通る銀行があるか（未選択なら外しようがないのでスキップ）
+  if (reformTotal > 0) {
+    const withoutReform = L.reviewAllBanks(p, price, downRatio, state, null);
+    const okWithout = withoutReform.find(r => r.approved);
+    if (okWithout) {
+      return `<div class="text-[11px] text-amber-800 bg-amber-50 rounded px-2 py-1.5">💡 リフォームを外せば ${okWithout.label} が通ります。</div>`;
+    }
   }
-  // ② 頭金を5%刻みで上げ、現金上限（maxDownPct）まで最初に通る割合を探す
+  // ② 頭金を5%刻みで上げ、現金上限（maxDownPct）まで最初に通る割合を探す（リフォーム未選択でもここに来る）
   const startPct = Math.floor(downRatio * 100 / 5) * 5 + 5;
   for (let pct = startPct; pct <= maxDownPct; pct += 5) {
     const rs2 = L.reviewAllBanks(p, price, pct / 100, state, plan);
@@ -9333,6 +9363,8 @@ function showPayment(propId, price, close) {
 function openCorpTransfer(propId) {
   const p = state.properties.find(x => x.id === propId);
   if (!p) return;
+  // v15.1: スワイプの列挙漏れ（13項目実装時に対象から抜けていた）。他の12モーダルと同じやり方で登録する。
+  navGo({ key: `corp:${propId}`, open: () => openCorpTransfer(propId) });   // v15.1: 履歴に登録
   const m = document.getElementById('sell-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
@@ -9344,7 +9376,7 @@ function openCorpTransfer(propId) {
   const acqCost = Math.round(price * L.CONFIG.corpTransferCostRate);
   const total = capTax + acqCost;
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
       <div class="flex justify-between items-start gap-2">
         <div class="min-w-0 flex-1"><h2 class="font-bold truncate">🏢 ${p.name || p.label}</h2><div class="text-[11px] text-slate-500">法人へ売却（移転）</div></div>
@@ -10763,12 +10795,15 @@ function openPropertyFromNotif(n) {
 
 // v3: 他決済み物件の閲覧専用詳細。買付・指値・お気に入りは不可、見るだけ。
 function openSoldSnapshot(p) {
+  // v15.1: スワイプの列挙漏れ（13項目実装時に対象から抜けていた）。他の12モーダルと同じやり方で登録する。
+  // p.idはstructuredClone(市場物件)由来なら通常あるが、古いセーブ等での欠落に備えname/labelへフォールバックする。
+  navGo({ key: `soldsnap:${p.id ?? p.name ?? p.label}`, open: () => openSoldSnapshot(p) });   // v15.1: 履歴に登録
   const m = document.getElementById('detail-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   const occ = p.units?.length ? Math.round(p.units.filter(u => u.occupied).length / p.units.length * 100) : 100;
   const rows = (p.units || []).map((u, i) => `<tr class="border-t"><td>${i + 1}号室</td><td class="text-right">${L.yen(u.rent)}</td><td class="text-right">${u.occupied ? '入居中' : '空室'}</td></tr>`).join('');
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-lg max-h-[85vh] flex flex-col" style="max-height:85dvh">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-lg max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-3 border-b shrink-0">
       <div class="flex justify-between items-center mb-1">
         <span class="text-[11px] bg-slate-500 text-white rounded px-2 py-0.5">🚫 他決済み（閲覧のみ）</span>
