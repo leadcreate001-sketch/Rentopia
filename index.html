@@ -343,7 +343,7 @@ export const CASH_CATEGORIES = {
   rent:   { label: '🏠 家賃収入' },
   sale:   { label: '💰 売却の入金' },
   refund: { label: '🛡️ 保険金・還付' },
-  work:   { label: '🔨 内職' },
+  work:   { label: '💼 副業収入' },
   opex:   { label: '🧹 運営費' },
   loan:   { label: '🏦 ローン返済' },
   tax:    { label: '🧾 税金' },
@@ -976,8 +976,9 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
   if (costs.acquisition > 0) {
     const delay = ACQ_TAX_DELAY_MIN + Math.floor(rng() * (ACQ_TAX_DELAY_MAX - ACQ_TAX_DELAY_MIN + 1));
     s.taxSchedule = s.taxSchedule || [];
+    // v18.1: 個人／法人どちらの財布から出る予定かをownerに持たせる（納税の予定を名義別に分けて表示するため）。
     s.taxSchedule.push({ month: s.month + delay, kind: 'acquisition_tax',
-      amount: costs.acquisition, label: '不動産取得税' });
+      amount: costs.acquisition, label: '不動産取得税', owner: p.owner });
     bookOf(s, p.owner).expense += costs.acquisition;
   }
   if (method === 'cash') {
@@ -1711,7 +1712,8 @@ export function settleSale(state, sale) {
       dueMonth = monthIndexOf(saleYear + 1, 3);   // 個人は翌年3月にまとめて納付
     }
     s.taxSchedule = s.taxSchedule || [];
-    s.taxSchedule.push({ month: dueMonth, kind: 'consumption_tax', amount: ctaxAmount, label: '消費税' });
+    // v18.1: 売った物件の名義（p.owner）が納税者。
+    s.taxSchedule.push({ month: dueMonth, kind: 'consumption_tax', amount: ctaxAmount, label: '消費税', owner: p.owner });
   }
   const taxLabel = p.owner === 'corp' ? `法人${fmtTaxRate(CONFIG.corporateTaxRate)}`
     : `${bd.longTerm ? '長期' : '短期'}${fmtTaxRate(bd.rate)}`;
@@ -3373,7 +3375,7 @@ export function doWork(state, rng = Math.random) {
   s.actionPower -= 1;
   // v3.9: 金額幅(1,000〜10,000円)は維持しつつ低額を引きやすく偏らせ、平均を約2,000円（旧5,500円の約37%）に。
   const earned = (10 + Math.floor(Math.pow(rng(), 6) * 91)) * 100;
-  moveCash(s, earned, 'work', '内職');
+  moveCash(s, earned, 'work', '副業');
   return { state: s, earned };
 }
 
@@ -4063,10 +4065,11 @@ function closePersonalBooks(s) {
   const taxBase = incomeTax - withheldTax;
   if (!diff.skipPrepaidTax && taxBase >= PREPAY_THRESHOLD) {
     const prepay = Math.round(taxBase / 3);
+    // v18.1: closePersonalBooksが積む税はすべて個人（'personal'）名義。
     s.taxSchedule.push({ month: monthIndexOf(nextYear, 7), kind: 'income_tax_prepay',
-      amount: prepay, label: '所得税の予定納税' });
+      amount: prepay, label: '所得税の予定納税', owner: 'personal' });
     s.taxSchedule.push({ month: monthIndexOf(nextYear, 11), kind: 'income_tax_prepay',
-      amount: prepay, label: '所得税の予定納税' });
+      amount: prepay, label: '所得税の予定納税', owner: 'personal' });
   }
 
   // v17: 9. 翌年3月は「確定申告の所得税−源泉徴収済み−今年に納めた予定納税額」を精算し、
@@ -4076,7 +4079,7 @@ function closePersonalBooks(s) {
   const marchAmount = taxBase + book.capGainTax - (book.prepaidIncomeTax ?? 0);
   if (marchAmount !== 0) {
     s.taxSchedule.push({ month: monthIndexOf(nextYear, 3), kind: 'income_tax',
-      amount: marchAmount, label: marchAmount > 0 ? '所得税・譲渡税' : '所得税の還付' });
+      amount: marchAmount, label: marchAmount > 0 ? '所得税・譲渡税' : '所得税の還付', owner: 'personal' });
   }
   book.prepaidIncomeTax = 0;
 
@@ -4089,11 +4092,11 @@ function closePersonalBooks(s) {
     const first = residentDiff - base * 3;   // 端数は第1期（6月）に寄せる
     const periods = [[nextYear, 6, first], [nextYear, 8, base], [nextYear, 10, base], [nextYear + 1, 1, base]];
     for (const [y, m, amount] of periods) {
-      if (amount > 0) s.taxSchedule.push({ month: monthIndexOf(y, m), kind: 'resident_tax', amount, label: '住民税' });
+      if (amount > 0) s.taxSchedule.push({ month: monthIndexOf(y, m), kind: 'resident_tax', amount, label: '住民税', owner: 'personal' });
     }
   } else if (residentDiff < 0) {
     s.taxSchedule.push({ month: monthIndexOf(nextYear, 6), kind: 'resident_tax',
-      amount: residentDiff, label: '住民税の還付' });
+      amount: residentDiff, label: '住民税の還付', owner: 'personal' });
   }
 
   // v17: 12. 個人事業税（不動産貸付業・第1種・税率5%）。基準は給与と無関係の税なので
@@ -4106,8 +4109,8 @@ function closePersonalBooks(s) {
     if (businessTax > 0) {
       const second = Math.floor(businessTax / 2);
       const first = businessTax - second;   // 端数は第1期（8月）に寄せる
-      s.taxSchedule.push({ month: monthIndexOf(nextYear, 8), kind: 'business_tax', amount: first, label: '個人事業税' });
-      if (second > 0) s.taxSchedule.push({ month: monthIndexOf(nextYear, 11), kind: 'business_tax', amount: second, label: '個人事業税' });
+      s.taxSchedule.push({ month: monthIndexOf(nextYear, 8), kind: 'business_tax', amount: first, label: '個人事業税', owner: 'personal' });
+      if (second > 0) s.taxSchedule.push({ month: monthIndexOf(nextYear, 11), kind: 'business_tax', amount: second, label: '個人事業税', owner: 'personal' });
     }
   }
 
@@ -4135,8 +4138,9 @@ function closeCorpBooks(s) {
   // v17: 決算の納付は「今回の税額−前期の中間納付額」を精算する形にする（マイナスなら還付）。
   const settleAmount = tax - (book.prepaidCorpTax ?? 0);
   if (settleAmount !== 0) {
+    // v18.1: closeCorpBooksが積む税はすべて法人（'corp'）名義。
     s.taxSchedule.push({ month: s.month + 2, kind: 'corp_tax',
-      amount: settleAmount, label: settleAmount > 0 ? '法人税等（決算）' : '法人税等の還付' });
+      amount: settleAmount, label: settleAmount > 0 ? '法人税等（決算）' : '法人税等の還付', owner: 'corp' });
   }
   book.prepaidCorpTax = 0;
 
@@ -4145,7 +4149,7 @@ function closeCorpBooks(s) {
   const diff = difficultyOf(s);
   if (!diff.skipPrepaidTax && tax > CORP_INTERIM_THRESHOLD) {
     s.taxSchedule.push({ month: s.month + 8, kind: 'corp_tax_interim',
-      amount: Math.round(tax / 2), label: '法人税の中間納付' });
+      amount: Math.round(tax / 2), label: '法人税の中間納付', owner: 'corp' });
   }
 
   book.income = 0; book.expense = 0; book.year = year + 1;
@@ -4494,6 +4498,13 @@ export function migrateSave(state) {
   // v17: 給与所得との損益通算に使う年収。旧セーブには無いのでattrから同じ規則で補う。
   if (typeof s.salaryAnnual !== 'number') s.salaryAnnual = s.attr === 'employee' ? CONFIG.salaryEmployee : CONFIG.salarySelf;
   if (!Array.isArray(s.taxSchedule)) s.taxSchedule = [];
+  // v18.1: 旧セーブのtaxScheduleにはowner（個人/法人どちらの予定か）が無いので、kindから補う。
+  // corp_tax・corp_tax_interimだけが法人の税、それ以外（所得税・住民税・個人事業税・消費税・
+  // 不動産取得税）は個人の税として積んできた（消費税・不動産取得税は物件owner別に積み分けて
+  // いなかった旧仕様なので、遡って正確な名義には戻せない＝個人扱いにするのが安全側）。
+  s.taxSchedule.forEach(x => {
+    if (!x.owner) x.owner = (x.kind === 'corp_tax' || x.kind === 'corp_tax_interim') ? 'corp' : 'personal';
+  });
   // v18: 現金の動きの明細。旧セーブには無いので空で始める（過去の実績は復元できない）。
   if (!Array.isArray(s.cashLog)) s.cashLog = [];
   // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高。旧セーブには無いので空で始める
@@ -7912,10 +7923,11 @@ const TUTORIAL_STEPS = [
   // チュートリアルだけの特別な画面を作ると、本編で同じものを探しても見つからない。
   { key: 'apRecovered', keep: [], info: true, targets: ['hud-ap', 'hud-ap-m'],
     text: 'ここを見てほしい。行動力が6から満タンに戻っている。月が変わるたび、ここが全回復する。' },
-  // v8.9: スマホ版はヘッダーの📖ボタン自体を削除したため、この段はPCでしか出ない（対象が
-  // 無い＝visibleTutTargetがnullを返すステップは自動で飛ばされる）。optionalは進捗の分母から外すため。
-  { key: 'terms', keep: [], info: true, targets: ['btn-terms'], optional: true,
-    text: '点線の用語はポインタを合わせると説明が出る。📖 で表示のON/OFF、長押しで用語集がまとめて読める。' },
+  // v18.1: スマホはヘッダーの📖（btn-terms）がCSSで非表示のため、visibleTutTargetは
+  // 幅・高さ0の要素をスキップしてtargets配列の次候補（m-menu＝≡メニュー）に自動で移る。
+  // PCではbtn-terms、スマホではm-menuが光る。optionalは進捗の分母から外すため。
+  { key: 'terms', keep: [], info: true, targets: ['btn-terms', 'm-menu'], optional: true,
+    text: `点線の用語はポインタを合わせると説明が出る。📖用語集では全${Object.keys(L.TERMS).length}語の一覧と、表示のON/OFFができる。` },
   // v7.6: ここで「押して確認してみよう」とは言わない。押すと開く画面は暗幕の下に入って読めず、
   // 促しておきながら確認できない状態になる。場所だけ教えて、確認は本編に入ってからにしてもらう。
   // v7.7: スキル状況（目利き力・交渉力・自主管理）とスマホの≡メニューへの言及を追加。
@@ -9156,23 +9168,43 @@ function taxTabHtml(state, uiState) {
   const carryLossHtml = carryLossCard('個人', state.books.personal, L.PERSONAL_CARRY_LOSS_YEARS)
     + (state.isIncorporated ? carryLossCard('法人', state.books.corp, L.CORP_CARRY_LOSS_YEARS) : '');
 
-  // (c) 納税の予定。合計が手元現金を超えていれば警告する。
+  // (c) 納税の予定。v18.1: どちらの財布から出るか分かるよう個人・法人でブロックを分ける
+  // （現金は1つなので、合計と現金超過の警告だけは両方を合わせた総額で判定する）。
   const schedule = [...(state.taxSchedule || [])].sort((a, b) => a.month - b.month);
   const scheduleTotal = schedule.reduce((t, x) => t + x.amount, 0);
+  const scheduleTableHtml = (rows) => `<table class="w-full text-xs">
+      <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1">名目</th><th class="pb-1 text-right">金額</th><th class="pb-1"></th></tr></thead>
+      <tbody>${rows.map(x => {
+        const left = x.month - state.month;
+        // v17: 予定納税・中間納付の払い過ぎは還付（マイナス金額）になる。そのまま「-¥xxx」と
+        // 出すと減額のように見えて紛らわしいので、「還付 +¥xxx」と現金が増える表記にする。
+        const amountHtml = x.amount < 0
+          ? `<span class="text-emerald-700 font-bold">還付 +${L.yen(-x.amount)}</span>`
+          : L.yen(x.amount);
+        return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(x.month)}</td><td>${x.label}</td><td class="text-right">${amountHtml}</td><td class="text-right text-slate-500 text-[10.5px] pl-1">${left <= 0 ? '今月' : `あと${left}ヶ月`}</td></tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  // ブロックの見出しに小計を出す。該当なし（空配列）のブロックはそもそも描画しない。
+  const scheduleBlock = (icon, label, rows) => {
+    if (!rows.length) return '';
+    const sub = rows.reduce((t, x) => t + x.amount, 0);
+    return `<div class="mb-3">
+      <div class="font-bold text-xs text-slate-600 mb-1 flex items-center justify-between">
+        <span>${icon} ${label}</span><span class="tabular-nums">${L.yen(sub)}</span>
+      </div>
+      ${scheduleTableHtml(rows)}
+    </div>`;
+  };
+  const personalSchedule = schedule.filter(x => x.owner !== 'corp');
+  const corpSchedule = schedule.filter(x => x.owner === 'corp');
+  // 法人化していない・法人の予定も無いときは法人ブロックごと出さない（情報を増やさない）。
+  const showCorpBlock = state.isIncorporated || corpSchedule.length > 0;
   const scheduleHtml = schedule.length
-    ? `<table class="w-full text-xs">
-        <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1">名目</th><th class="pb-1 text-right">金額</th><th class="pb-1"></th></tr></thead>
-        <tbody>${schedule.map(x => {
-          const left = x.month - state.month;
-          // v17: 予定納税・中間納付の払い過ぎは還付（マイナス金額）になる。そのまま「-¥xxx」と
-          // 出すと減額のように見えて紛らわしいので、「還付 +¥xxx」と現金が増える表記にする。
-          const amountHtml = x.amount < 0
-            ? `<span class="text-emerald-700 font-bold">還付 +${L.yen(-x.amount)}</span>`
-            : L.yen(x.amount);
-          return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(x.month)}</td><td>${x.label}</td><td class="text-right">${amountHtml}</td><td class="text-right text-slate-500 text-[10.5px] pl-1">${left <= 0 ? '今月' : `あと${left}ヶ月`}</td></tr>`;
-        }).join('')}</tbody>
-        <tfoot><tr class="border-t-2 font-bold"><td colspan="2" class="py-1">合計</td><td colspan="2" class="text-right py-1">${L.yen(scheduleTotal)}</td></tr></tfoot>
-      </table>
+    ? `${scheduleBlock('👤', '個人', personalSchedule)}
+      ${showCorpBlock ? scheduleBlock('🏢', '法人', corpSchedule) : ''}
+      <div class="border-t-2 pt-1.5 mt-1 flex justify-between font-bold text-xs">
+        <span>合計</span><span class="tabular-nums">${L.yen(scheduleTotal)}</span>
+      </div>
       ${scheduleTotal > state.cash ? '<div class="text-red-600 text-[11px] font-bold mt-2">⚠️ 納税予定の合計が手元現金を超えています</div>' : ''}`
     : '<div class="text-slate-500 text-xs">まだ納税予定はありません（12月に暦年を締めると確定します）</div>';
 
@@ -9317,7 +9349,8 @@ function openMoneyHub(initialTab = 'month') {
     { key: 'tax', label: '🧾 税金' },
     { key: 'loans', label: '🏦 借入' },
   ];
-  const cashBoxState = { detailOpen: false, trendOpen: false, itemOpen: null };   // 「今月」タブの折りたたみ状態
+  // 「今月」タブの折りたたみ状態。trendMonthOpen/trendItemOpenはv18.1で追加（過去12ヶ月の推移の月別内訳）。
+  const cashBoxState = { detailOpen: false, trendOpen: false, itemOpen: null, trendMonthOpen: null, trendItemOpen: null };
   const taxState = { expenseOpen: false };   // 「税金」タブの経費内訳の折りたたみ
   const draw = () => {
     const tabsBox = overlay.querySelector('#money-tabs');
@@ -9327,9 +9360,25 @@ function openMoneyHub(initialTab = 'month') {
     if (activeTab === 'month') {
       body.innerHTML = monthlyCashBox(state, cashBoxState);
       body.querySelector('.cashbox-toggle-detail')?.addEventListener('click', () => { cashBoxState.detailOpen = !cashBoxState.detailOpen; draw(); });
-      body.querySelector('.cashbox-toggle-trend')?.addEventListener('click', () => { cashBoxState.trendOpen = !cashBoxState.trendOpen; draw(); });
+      body.querySelector('.cashbox-toggle-trend')?.addEventListener('click', () => {
+        cashBoxState.trendOpen = !cashBoxState.trendOpen;
+        // 推移ブロックごと閉じたら中の展開状態も畳んでおく（次に開いたとき毎回全閉から始まる）。
+        if (!cashBoxState.trendOpen) { cashBoxState.trendMonthOpen = null; cashBoxState.trendItemOpen = null; }
+        draw();
+      });
       body.querySelectorAll('.cashbox-cat-toggle').forEach(btn => btn.addEventListener('click', () => {
         cashBoxState.itemOpen = cashBoxState.itemOpen === btn.dataset.cat ? null : btn.dataset.cat;
+        draw();
+      }));
+      // v18.1: 過去12ヶ月の推移。行タップでその月の内訳をアコーディオン展開（開けるのは1ヶ月だけ）。
+      body.querySelectorAll('.trend-row-toggle').forEach(tr => tr.addEventListener('click', () => {
+        const m = Number(tr.dataset.month);
+        cashBoxState.trendMonthOpen = cashBoxState.trendMonthOpen === m ? null : m;
+        cashBoxState.trendItemOpen = null;   // 別の月を開いたらカテゴリの展開状態はリセット
+        draw();
+      }));
+      body.querySelectorAll('.trend-cat-toggle').forEach(btn => btn.addEventListener('click', () => {
+        cashBoxState.trendItemOpen = cashBoxState.trendItemOpen === btn.dataset.cat ? null : btn.dataset.cat;
         draw();
       }));
     } else if (activeTab === 'assets') {
@@ -9630,6 +9679,17 @@ function scopeLabel(t) {
 let termPop = null;
 function closeTermPopover() { termPop?.remove(); termPop = null; }
 
+// v18.1: ヘッダーの📖（#btn-terms）はスマホ用CSSでdisplay:noneにされるため、DOMに存在する
+// かどうかではなく実際に表示されているか（offsetParent）で判定する。表示されていなければ
+// ≡メニューの📖用語集へ誘導する（脚注に「押すとON/OFF」と書いてあるのに操作手段が無い状態を防ぐ）。
+function termPopFootHtml() {
+  const btn = document.getElementById('btn-terms');
+  const btnVisible = !!btn && btn.offsetParent !== null;
+  return btnVisible
+    ? `📖 長押しで用語集（全${Object.keys(L.TERMS).length}語）・押すと用語の表示ON/OFF`
+    : `≡メニューの📖用語集で、全${Object.keys(L.TERMS).length}語の一覧と表示のON/OFF`;
+}
+
 function showTermPopover(anchor) {
   closeTermPopover();
   const t = L.TERMS[anchor.dataset.term];
@@ -9640,7 +9700,7 @@ function showTermPopover(anchor) {
     <div class="mt-1 tp-calc">🧮 ${t.calc}</div>
     <div class="mt-1">${t.here}</div>
     <div class="mt-1 tp-hint">💡 ${t.hint}</div>
-    <div class="mt-2 tp-foot">📖 長押しで用語集（全${Object.keys(L.TERMS).length}語）・押すと用語の表示ON/OFF</div>
+    <div class="mt-2 tp-foot">${termPopFootHtml()}</div>
   </div>`);
   termPop.dataset.for = anchor.dataset.term;
   document.body.appendChild(termPop);
@@ -9729,6 +9789,7 @@ function openGlossaryModal() {
     <div class="p-3 border-b shrink-0 flex justify-between items-center">
       <h2 class="font-bold">📖 用語集（${Object.keys(L.TERMS).length}語）</h2>
       <button id="gl-close" class="text-slate-400 text-xl leading-none">✕</button></div>
+    <div id="gl-terms-row" class="px-3 pt-2 shrink-0"></div>
     <div class="px-3 pt-2 shrink-0">
       <div class="flex justify-between text-[11px] font-bold text-navy"><span>📚 習得の進み</span><span>${learned.size} / ${Object.keys(L.TERMS).length}</span></div>
       <div class="w-full bg-slate-200 rounded-full h-2 mt-1 overflow-hidden"><div class="bg-navy h-2" style="width:${Math.round(learned.size / Object.keys(L.TERMS).length * 100)}%"></div></div>
@@ -9738,6 +9799,22 @@ function openGlossaryModal() {
       <div class="text-[11px] text-slate-500 mb-2">ゲーム中は、点線の下線が引かれた用語を押すと同じ説明が吹き出しで出ます。</div>
       ${L.TERM_GROUPS.map(section).join('')}</div></div>`);
   m.appendChild(box);
+  // v18.1: 用語ハイライトのON/OFFトグル。スマホはヘッダーの📖ボタンが無く切り替え手段が
+  // 無かったので、全端末から開けるこのモーダルに常設する（押してもモーダルは閉じない）。
+  const drawTermsToggle = () => {
+    const row = box.querySelector('#gl-terms-row');
+    row.innerHTML = `<div class="flex items-center justify-between">
+      <span class="text-xs font-bold ${termsOff ? 'text-slate-400' : 'text-emerald-700'}">用語ハイライト ${termsOff ? 'OFF' : 'ON'}</span>
+      <button id="gl-terms-toggle" class="shrink-0 inline-flex items-center w-11 h-6 rounded-full ${termsOff ? 'bg-slate-300' : 'bg-emerald-500'} transition-colors">
+        <span class="w-5 h-5 rounded-full bg-white shadow transform ${termsOff ? 'translate-x-0.5' : 'translate-x-5'} transition-transform"></span>
+      </button>
+    </div>`;
+    row.querySelector('#gl-terms-toggle').addEventListener('click', () => {
+      setTermsOff(!termsOff);
+      drawTermsToggle();
+    });
+  };
+  drawTermsToggle();
   box.querySelector('#gl-close').addEventListener('click', close);
 }
 
@@ -10065,20 +10142,13 @@ function collapseHeader(cls, open, label, summaryHtml) {
   </button>`;
 }
 
-// v18: 今月の収支ブロック。既存の方針（詳細は格納・パッと見は少なく）を踏襲し、
-// 常時見えるのは合計だけ・内訳と推移は既定で閉じた折りたたみにする。
-// 「💰 お金」ハブの「今月」タブ本体としてそのまま使う独立した関数。
-// uiStateは呼び出し側（openMoneyHub）が保持する { detailOpen, trendOpen, itemOpen }。
-// クリックはHTMLを返すだけのこの関数では処理せず、呼び出し側がdata-*属性を見て
-// uiStateをトグルしてから再描画する（expenseOpenと同じ流儀）。
-function monthlyCashBox(state, uiState) {
-  const summary = L.monthlyCashSummary(state, state.month);
-  const beforeTax = L.monthlyCF(state);
-  const tax = L.afterTaxCF(state);
-  const netTone = summary.net >= 0 ? 'text-emerald-700' : 'text-red-600';
-
+// v18.1: カテゴリ行の描画（収入・支出をカテゴリごとにタップで内訳展開する部品）。
+// 「今月」の内訳ブロックと「過去12ヶ月の推移」の月別内訳の両方から呼ぶ共通部品として切り出した
+// （同じ見た目を2箇所に別々に書かない）。openCatは展開中のカテゴリキー（無ければnull）、
+// toggleClassは呼び出し側がクリックを拾うためのボタンclass名（今月用・推移用で別名にして区別する）。
+function cashCategoryRowsHtml(state, summary, openCat, toggleClass, monthLabel) {
   const catRowHtml = (g) => {
-    const open = uiState.itemOpen === g.cat;
+    const open = openCat === g.cat;
     const tone = g.amount >= 0 ? 'text-emerald-700' : 'text-red-600';
     const itemsHtml = g.items.map(it => {
       const p = it.propertyId != null ? state.properties.find(x => x.id === it.propertyId) : null;
@@ -10089,7 +10159,7 @@ function monthlyCashBox(state, uiState) {
       </div>`;
     }).join('');
     return `<div class="py-1">
-      <button class="cashbox-cat-toggle w-full flex items-center justify-between gap-2" data-cat="${g.cat}">
+      <button class="${toggleClass} w-full flex items-center justify-between gap-2" data-cat="${g.cat}">
         <span class="flex items-center gap-1 text-xs"><span class="inline-block transition-transform ${open ? 'rotate-90' : ''}">▶</span>${g.label}</span>
         <span class="tabular-nums ${tone} font-bold text-xs">${signedYen(g.amount)}</span>
       </button>
@@ -10098,16 +10168,40 @@ function monthlyCashBox(state, uiState) {
   };
   const incomeCats = summary.byCat.filter(g => g.amount > 0);
   const expenseCats = summary.byCat.filter(g => g.amount <= 0);
-  const detailHtml = `<div class="mt-1 text-xs bg-slate-50 rounded-lg p-2.5 divide-y divide-slate-200">
-    ${incomeCats.map(catRowHtml).join('') || '<div class="py-1 text-slate-400 text-[11px]">今月の収入はまだありません</div>'}
-    ${expenseCats.map(catRowHtml).join('') || '<div class="py-1 text-slate-400 text-[11px]">今月の支出はまだありません</div>'}
+  return `<div class="mt-1 text-xs bg-slate-50 rounded-lg p-2.5 divide-y divide-slate-200">
+    ${incomeCats.map(catRowHtml).join('') || `<div class="py-1 text-slate-400 text-[11px]">${monthLabel}の収入はありません</div>`}
+    ${expenseCats.map(catRowHtml).join('') || `<div class="py-1 text-slate-400 text-[11px]">${monthLabel}の支出はありません</div>`}
   </div>`;
+}
 
+// v18: 今月の収支ブロック。既存の方針（詳細は格納・パッと見は少なく）を踏襲し、
+// 常時見えるのは合計だけ・内訳と推移は既定で閉じた折りたたみにする。
+// 「💰 お金」ハブの「今月」タブ本体としてそのまま使う独立した関数。
+// uiStateは呼び出し側（openMoneyHub）が保持する { detailOpen, trendOpen, itemOpen, trendMonthOpen, trendItemOpen }。
+// クリックはHTMLを返すだけのこの関数では処理せず、呼び出し側がdata-*属性を見て
+// uiStateをトグルしてから再描画する（expenseOpenと同じ流儀）。
+function monthlyCashBox(state, uiState) {
+  const summary = L.monthlyCashSummary(state, state.month);
+  const beforeTax = L.monthlyCF(state);
+  const tax = L.afterTaxCF(state);
+  const netTone = summary.net >= 0 ? 'text-emerald-700' : 'text-red-600';
+
+  const detailHtml = cashCategoryRowsHtml(state, summary, uiState.itemOpen, 'cashbox-cat-toggle', '今月');
+
+  // v18.1: 過去12ヶ月の推移。各行をタップすると直下にその月の内訳（内訳を見る、と同じ描画）を
+  // アコーディオン展開する。開けるのは一度に1ヶ月だけ（trendMonthOpenで管理）。
   const trendRows = L.recentCashSummaries(state, 12).map(row => {
     const tone = row.net >= 0 ? 'text-emerald-700' : 'text-red-600';
-    return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(row.month)}</td>
+    const open = uiState.trendMonthOpen === row.month;
+    const headerRow = `<tr class="border-t trend-row-toggle cursor-pointer select-none hover:bg-slate-50 active:bg-slate-100" data-month="${row.month}">
+      <td class="py-0.5"><span class="inline-block w-3 transition-transform ${open ? 'rotate-90' : ''}">▶</span> ${L.fmtYM(row.month)}</td>
       <td class="text-right">${L.yen(row.income)}</td><td class="text-right">${L.yen(row.expense)}</td>
       <td class="text-right ${tone} font-bold">${signedYen(row.net)}</td></tr>`;
+    if (!open) return headerRow;
+    // 当月は既に計算済みのsummaryを再利用し、過去月はrecentCashSummariesと同じ関数で個別に出す。
+    const rowSummary = row.month === state.month ? summary : L.monthlyCashSummary(state, row.month);
+    const breakdown = cashCategoryRowsHtml(state, rowSummary, uiState.trendItemOpen, 'trend-cat-toggle', L.fmtYM(row.month));
+    return `${headerRow}<tr class="border-t"><td colspan="4" class="p-0">${breakdown}</td></tr>`;
   }).join('');
   const trendHtml = `<table class="w-full text-[11px] tabular-nums mt-1">
     <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1 text-right">収入</th><th class="pb-1 text-right">支出</th><th class="pb-1 text-right">収支</th></tr></thead>
