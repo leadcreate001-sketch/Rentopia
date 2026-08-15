@@ -228,10 +228,10 @@
          ゲーム名は初期設定ウィザードで名乗る。state が無いあいだは hidden。 -->
     <div id="hud-clock" class="flex items-center gap-2 font-bold text-sm md:text-base hidden">
       <span>📆 <span id="hud-elapsed">1年目1月</span></span>
-      <span>🎂 <span id="hud-age">-</span>歳</span>
       <!-- v8.9: スマホ版のみ。🎵🔊📖リセットを削除する代わりに、現金・行動力を常時表示にして
-           物件情報などを開いてもここだけは見えるようにする（現金・月CFは従来どおり#mobile-statusで表示）。 -->
-      <span id="hud-clock-extra"><span>💰<span id="hud-clock-cash" class="hud-money">¥0</span></span><span>📈<span id="hud-clock-cf">¥0</span></span><span>⚡<span id="hud-clock-ap">0/0</span></span></span>
+           物件情報などを開いてもここだけは見えるようにする（現金・月CFは従来どおり#mobile-statusで表示）。
+           v18: 🎂年齢は「💰 お金 → 資産」タブへ移設。💰現金はタップで「💰 お金」ハブ（今月タブ）を開く。 -->
+      <span id="hud-clock-extra"><span id="hud-clock-cash-btn" class="cursor-pointer hover:opacity-70">💰<span id="hud-clock-cash" class="hud-money">¥0</span></span><span><span class="term" data-term="monthly_cf">📈</span><span id="hud-clock-cf">¥0</span></span><span>⚡<span id="hud-clock-ap">0/0</span></span></span>
     </div>
     <div class="flex items-center gap-3">
       <button id="btn-result" class="text-lg leading-none hidden" title="リザルトを見る">🏆</button><button id="btn-bgm" class="text-lg leading-none" title="BGMの気分を変える">🎵</button>
@@ -335,6 +335,47 @@ export function monthsUntilCalMonth(month, targetCalMonth) {
   return (targetCalMonth - calMonthOf(month) + 12) % 12;
 }
 
+// === v18: 現金の動きの明細（cashLog）===
+// v17までは物件ごとの月次履歴（p.history）はあっても、税金・工事費・広告費・イベント・
+// 購入・売却・内職といった「何の収支で現金が動いたか」を後から追う手段が無かった。
+// カテゴリと表示名はここに集約し、UIは文字列を直書きせず必ずここから引く。
+export const CASH_CATEGORIES = {
+  rent:   { label: '🏠 家賃収入' },
+  sale:   { label: '💰 売却の入金' },
+  refund: { label: '🛡️ 保険金・還付' },
+  work:   { label: '🔨 内職' },
+  opex:   { label: '🧹 運営費' },
+  loan:   { label: '🏦 ローン返済' },
+  tax:    { label: '🧾 税金' },
+  repair: { label: '🔧 工事・修繕' },
+  ad:     { label: '📣 広告費' },
+  buy:    { label: '🛒 購入' },
+  event:  { label: '⚡ イベント' },
+  other:  { label: '❓ その他' },   // 記録漏れの自動計上（advanceMonthの突き合わせ）専用ではないが、
+                                    // 明細のどこにも当てはまらない動きの受け皿として使う
+};
+
+// v18: 過去12ヶ月の推移表示に1ヶ月の余裕を持たせた保持期間。セーブが肥大化しないよう、
+// これより古い月のcashLogは捨てる。
+export const CASH_LOG_RETENTION_MONTHS = 13;
+
+function trimCashLog(s) {
+  const cutoff = s.month - (CASH_LOG_RETENTION_MONTHS - 1);
+  s.cashLog = (s.cashLog || []).filter(e => e.month >= cutoff);
+}
+
+// v18: 現金操作の一本化。s.cashを動かすのと同時に、何の収支で動いたかをcashLogへ1件積む。
+// 以後、現金を動かす箇所は必ずこれを通す（40箇所以上に散らばる現金操作を1つずつ書き換えると
+// 必ずどこか漏れるため、advanceMonthの最後で「実際の現金増減とcashLogの記録額」を突き合わせ、
+// 差額をotherとして自動計上する安全網もあわせて用意してある＝advanceMonth参照）。
+export function moveCash(s, amount, cat, label, propertyId = null) {
+  s.cash += amount;
+  s.cashLog = s.cashLog || [];
+  s.cashLog.push({ month: s.month, cat, amount: Math.round(amount), label, propertyId });
+  trimCashLog(s);
+  return s;
+}
+
 // v16: 名義（個人／法人）ごとの帳簿。startRepair・fillVacancy等のアクション関数は
 // createInitialStateを経ない生のstateで呼ぶテストが多数あるため、books が無いstateで
 // 呼ばれても落ちないよう、無ければその場で既定値を作る（ensureRepairJobs と同じ考え方）。
@@ -399,7 +440,7 @@ export function monthlyTax(noiAnnualVal, deprRemainingMonths, isIncorporated) {
 export function incorporate(state) {
   const s = structuredClone(state);
   if (s.isIncorporated || s.cash < CONFIG.corporateSetupCost) return { state };
-  s.cash -= CONFIG.corporateSetupCost;
+  moveCash(s, -CONFIG.corporateSetupCost, 'other', '法人設立費用');
   s.isIncorporated = true;
   // v16: 決算月は設立月の前月（＝設立からちょうど1年で最初の決算が来る）。1月設立だけは
   // 前月が無いので12月に固定する。
@@ -940,12 +981,12 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
     bookOf(s, p.owner).expense += costs.acquisition;
   }
   if (method === 'cash') {
-    s.cash -= price + closing;
+    moveCash(s, -(price + closing), 'buy', `${p.label} を購入`, p.id);
     p.loan = null;
     p.downPaid = price;   // v15: 現金購入は全額が自己資金
   } else {
     const terms = reviewLoan(method, p, price, downRatio, s, reformPlan).terms;
-    s.cash -= Math.round(price * downRatio) + closing;
+    moveCash(s, -(Math.round(price * downRatio) + closing), 'buy', `${p.label} を購入（頭金・諸費用）`, p.id);
     p.loan = { bankKey: method, principal: loanAmount,
       rate: bankRate(method, s), years: terms?.years ?? BANKS[method].termMax, monthsPaid: 0,
       reformIncluded: reformCost || 0 };   // v15: 内訳の表示用に、いくらリフォームぶんかを残す
@@ -1062,8 +1103,19 @@ export function propertyMonthlyPL(p) {
   // 戻さないと試算税額も法人化の節税額（incorporationSaving）も過大に出る。
   const taxBaseM = noiM - Math.round(p.propTaxA / 12);
   const tax = monthlyTax(taxBaseM * 12, p.deprRemaining, p.owner === 'corp');
-  return { rentIn, vacancyLoss, opex, interest, principal: principalPay, tax,
-    cf: rentIn - opex - interest - principalPay };
+  // v18: 月CFの定義を実務のBTCF（NOI/12 − 元利返済）に揃える。固都税は年4回の実納付で
+  // opexから外したままだったが、指標としての月CFには月割で戻して引く必要がある
+  // （税の試算基準taxBaseMはすでに経費として戻してあるので、ここでは二重に引かない）。
+  const propTaxM = Math.round(p.propTaxA / 12);
+  const cf = rentIn - opex - propTaxM - interest - principalPay;
+  // v18: cf（指標）と cashDelta（実際の現金移動）は別物なので、名前を分けて両方返す。
+  //   cf        … 実務のBTCF。固都税を月割で引いた「物件の稼ぐ力」。表示・履歴・目標判定に使う
+  //   cashDelta … その月に実際に動く現金。固都税はこの月には出ていかない（年4回の実納付で
+  //               別途引かれる）ので、月割は引かない
+  // 同じ値を使い回すと、cf に新しい控除を足したときに現金まで狂う。過去に固都税で実際に
+  // その事故が起きたので、役割ごとにフィールドを分けてある。
+  return { rentIn, vacancyLoss, opex, interest, principal: principalPay, tax, propTaxM,
+    cf, cashDelta: cf + propTaxM };
 }
 
 export function bookValueV2(p) {
@@ -1231,6 +1283,20 @@ export function loanPayoffOf(property) {
       property.loan.years, property.loan.monthsPaid));
   }
   return payoff + reformLoansRemaining(property);
+}
+
+// v18: 「💰 お金」ハブの借入タブ用。全物件の物件融資・リフォームローンを1本ずつのリストに
+// フラット化する。金額はloanSummaryに委ね、ここでは再計算しない。
+export function allLoansOf(state) {
+  const out = [];
+  for (const p of state.properties) {
+    const name = p.name || p.label;
+    if (p.loan) out.push({ propertyId: p.id, name, kind: 'main', loan: p.loan, summary: loanSummary(state, p.loan) });
+    (p.reformLoans || []).forEach(l => {
+      out.push({ propertyId: p.id, name, kind: 'reform', loan: l, summary: loanSummary(state, l) });
+    });
+  }
+  return out;
 }
 // === v8.4: 売却諸費用 ===
 // v8.3までは「売却価格 − 譲渡税 − 残債」だけで手取りを出していたが、実際は売主にも実費がかかる。
@@ -1621,7 +1687,7 @@ export function settleSale(state, sale) {
   // v16: 譲渡税は即時徴収しない。個人は帳簿（book.capGainTax）に積んで翌年3月にまとめて
   // 納付、法人は総合課税なので売却益をそのまま益金（book.income）へ合流させ、決算で払う。
   // どちらも「今は税を引かず」現金へ入れ、実際の納税は s.taxSchedule 経由で後日引かれる。
-  s.cash += bd.net + capTax;   // 売却価格 − 残債 − 諸費用（譲渡税は後日別枠で納付）
+  moveCash(s, bd.net + capTax, 'sale', `${p.label} を売却`, p.id);   // 売却価格 − 残債 − 諸費用（譲渡税は後日別枠で納付）
   const book = bookOf(s, p.owner);
   if (p.owner === 'corp') book.income += gain;
   else book.capGainTax += capTax;
@@ -1850,7 +1916,7 @@ export function fillVacancy(state, propertyId, unitIndex, method, rng = Math.ran
     if (!AD_PLANS[adMonths]) return { state: s, success: false, reason: 'badPlan' };
     cost = adCost(u, adMonths);
     if (s.cash < cost) return { state: s, success: false, reason: 'noCash', cost };
-    s.cash -= cost;
+    moveCash(s, -cost, 'ad', `${p.label} の広告費`, p.id);
     addSpend(p, 'adSpend', cost);   // v15: 自主客付け('self')は現金が動かないので対象外
     bookOf(s, p.owner).expense += cost;   // v16: 広告費は発生した月にそのまま経費計上
     // 出したADは「決まるまで」効き続ける。強い方で上書きし、弱いプランへの下げは行わない。
@@ -1928,7 +1994,7 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
     const material = Math.round(cost * DIY_MATERIAL_RATE);
     // 材料費は着手時（作業量0）の1回だけ。以降のタップは行動力のみ。
     if ((u.restoreProgress || 0) <= 0) {
-      s.cash -= material; addSpend(p, 'repairSpend', material);
+      moveCash(s, -material, 'repair', `${p.label} の原状回復（DIY材料費）`, p.id); addSpend(p, 'repairSpend', material);
       bookOf(s, p.owner).expense += material;   // v16: 原状回復費は資産計上せず、発生月に経費計上
     }
     s.actionPower -= RESTORE_DIY_AP;
@@ -1944,13 +2010,13 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
   let loanAmount = 0;
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    s.cash -= (cost - loanAmount);
+    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の原状回復（自己負担分）`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
-    s.cash -= cost;
+    moveCash(s, -cost, 'repair', `${p.label} の原状回復`, p.id);
     addSpend(p, 'repairSpend', cost);
   }
   // v16: 原状回復費は借入があっても工事費の全額（cost）を発生月の経費として計上する
@@ -2194,7 +2260,7 @@ export function startRepair(state, propertyId, kind, opts = {}) {
     const material = Math.round(cost * DIY_MATERIAL_RATE);
     const prog = (p.diyProgress && p.diyProgress.kind === kind) ? p.diyProgress : null;
     if (!prog) {
-      s.cash -= material; addSpend(p, 'repairSpend', material);
+      moveCash(s, -material, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}（DIY材料費）`, p.id); addSpend(p, 'repairSpend', material);
       // v16: DIYできるのは日常メンテ・特別清掃だけ（大規模修繕は業者のみ）。どちらも
       // 資産計上せず、発生月の経費として計上する。
       bookOf(s, p.owner).expense += material;
@@ -2218,13 +2284,13 @@ export function startRepair(state, propertyId, kind, opts = {}) {
   let loanAmount = 0;
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    s.cash -= (cost - loanAmount);
+    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の${REPAIR_KINDS[kind].label}（自己負担分）`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
-    s.cash -= cost;
+    moveCash(s, -cost, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}`, p.id);
     addSpend(p, 'repairSpend', cost);
   }
   // v16: 大規模修繕は資産計上して償却するので、ここでは経費計上せず見積額だけ運ぶ
@@ -2263,7 +2329,7 @@ export function setAutoManage(state, propertyId, on) {
   if (p.autoManage && (p.careState ?? 100) < AUTO_MANAGE_CARE_FLOOR && !repairJobForGauge(p, 'care')) {
     const cost = autoManageCost(repairCost(p, 'maint'));
     if (s.cash >= cost) {
-      s.cash -= cost;
+      moveCash(s, -cost, 'repair', `${p.label} の日常メンテ（おまかせ契約）`, p.id);
       addSpend(p, 'repairSpend', cost);
       ensureRepairJobs(p).push({ kind: 'maint', monthsTotal: repairJobMonths(p, 'maint'), monthsLeft: repairJobMonths(p, 'maint'),
         startState: p.careState, auto: true });
@@ -2353,13 +2419,13 @@ export function startProfessionalRepair(state, propertyId, financed = false) {
   let loanAmount = 0;
   if (canFinance) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    s.cash -= (cost - loanAmount);
+    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の大規模修繕（自己負担分）`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
-    s.cash -= cost;
+    moveCash(s, -cost, 'repair', `${p.label} の大規模修繕`, p.id);
     addSpend(p, 'repairSpend', cost);
   }
   const monthsTotal = largeRepairMonths(p);
@@ -2410,7 +2476,7 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
     const s = structuredClone(state);
     const p = s.properties.find(x => x.id === propertyId);
     if (!prog) {
-      s.cash -= material; addSpend(p, 'valueUpSpend', material);   // 材料費は着手時の1回だけ
+      moveCash(s, -material, 'repair', `${p.label} の${plan.label}（DIY材料費）`, p.id); addSpend(p, 'valueUpSpend', material);   // 材料費は着手時の1回だけ
       // v16: バリューアップは資産計上して償却する。完了時に使う見積額（DIYでも業者価格ベース）
       // を、着手時の1回だけ物件側の別枠（jobCost）に固定する。
       p.jobCost = p.jobCost || {}; p.jobCost.valueup = cost;
@@ -2435,13 +2501,13 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
   let loanAmount = 0;
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    s.cash -= (cost - loanAmount);
+    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の${plan.label}（自己負担分）`, p.id);
     addSpend(p, 'valueUpSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
-    s.cash -= cost;
+    moveCash(s, -cost, 'repair', `${p.label} の${plan.label}`, p.id);
     addSpend(p, 'valueUpSpend', cost);
   }
   // v16: 業者発注も資産計上して償却する（ここでは経費計上しない）。見積額を運ぶ。
@@ -2516,6 +2582,41 @@ export function netWorth(state) { return Math.round(totalAssetsV2(state) - total
 export function monthlyCF(state) {
   return (state.properties || []).reduce((t, p) => t + (p.history?.at(-1)?.cf ?? 0), 0);
 }
+
+// v18: 指定した月のcashLogを集計する。income/expenseはどちらも正の額で返す
+// （支出をマイナスのまま見せると「収入・支出」の見出しと符号が食い違って読みにくいため）。
+// net = income − expense（符号つき、実際にその月に動いた現金と一致する）。
+export function monthlyCashSummary(state, month) {
+  const entries = (state.cashLog || []).filter(e => e.month === month);
+  const income = entries.filter(e => e.amount > 0).reduce((t, e) => t + e.amount, 0);
+  const expense = entries.filter(e => e.amount < 0).reduce((t, e) => t - e.amount, 0);
+  const net = income - expense;
+  const groups = new Map();
+  for (const e of entries) {
+    if (!groups.has(e.cat)) {
+      groups.set(e.cat, { cat: e.cat, label: CASH_CATEGORIES[e.cat]?.label ?? e.cat, amount: 0, items: [] });
+    }
+    const g = groups.get(e.cat);
+    g.amount += e.amount;
+    g.items.push({ label: e.label, amount: e.amount, propertyId: e.propertyId });
+  }
+  const all = [...groups.values()];
+  // 収入カテゴリを先、支出カテゴリを後に。それぞれの中では金額（絶対値）が大きい順。
+  const incomeCats = all.filter(g => g.amount > 0).sort((a, b) => b.amount - a.amount);
+  const expenseCats = all.filter(g => g.amount <= 0).sort((a, b) => a.amount - b.amount);
+  return { month, income, expense, net, byCat: [...incomeCats, ...expenseCats] };
+}
+
+// v18: 直近months ヶ月ぶんの収支サマリーを新しい順に返す（過去12ヶ月の推移表示用）。
+export function recentCashSummaries(state, months = 12) {
+  const out = [];
+  for (let m = state.month; m > state.month - months; m--) {
+    const { income, expense, net } = monthlyCashSummary(state, m);
+    out.push({ month: m, income, expense, net });
+  }
+  return out;
+}
+
 export function isClearedV2(state) {
   const g = state.goal;
   return g.type === 'networth' ? netWorth(state) >= g.amount : monthlyCF(state) >= g.amount;
@@ -2579,8 +2680,11 @@ function evTarget({ structures, minAge, minUnits, careBelow, structBelow, kind, 
 
 // choices の apply でよく使う操作
 const evFind = (s, id) => s.properties.find(x => x.id === id);
-const evPay = (n) => (s) => { s.cash -= n; return s; };
-const evPayPerUnit = (per) => (s, id) => { const p = evFind(s, id); s.cash -= per * (p?.units.length ?? 1); return s; };
+// v18: applyEventChoiceが立て替えるchoice.cost（financeable系）とは別に、apply内で
+// 直接現金を動かすイベントが大半（設備の壊れる/壊れないの二択など）。これらもcashLogに
+// 積むため、evPay/evPayPerUnit自体をmoveCash経由にする。
+const evPay = (n) => (s, id) => { moveCash(s, -n, 'event', 'イベント対応', id ?? null); return s; };
+const evPayPerUnit = (per) => (s, id) => { const p = evFind(s, id); moveCash(s, -per * (p?.units.length ?? 1), 'event', 'イベント対応', id ?? null); return s; };
 const evHitStruct = (n) => (s, id) => { const p = evFind(s, id); if (p) p.repairState = Math.max(0, p.repairState - n); return s; };
 const evHitCare = (n) => (s, id) => { const p = evFind(s, id); if (p) p.careState = Math.max(0, (p.careState ?? 100) - n); return s; };
 // v16: 手入れを「上げる」方向（清掃強化・設備更新の副次効果）
@@ -2709,7 +2813,7 @@ export function applyQuizResult(state, { correctKeys, total, comboBest, cashRewa
   const mult = quizComboMult(comboBest);
   s.skills.appraisal.exp += Math.round(5 * correct * mult);
   s.skills.negotiation.exp += 3 * correct;
-  if (cashReward) s.cash += QUIZ_CASH_PER_CORRECT * correct;
+  if (cashReward) moveCash(s, QUIZ_CASH_PER_CORRECT * correct, 'event', 'クイズ正解報酬');
   s.learnedTerms = [...new Set([...(s.learnedTerms || []), ...correctKeys])];
   if (total > 0 && correct === total) {
     s.buffs = s.buffs || [];
@@ -2749,7 +2853,7 @@ export const EVENTS = [
     condition: s => s.creditScore >= 50 && s.properties.some(p => p.loan),
     choices: [
       { label: '低金利ローンへ借り換え（-¥300,000・全金利-0.5%）', log: '借り換えで金利を圧縮した',
-        apply: s => { s.cash -= 300000; s.properties.forEach(p => { if (p.loan) p.loan.rate = Math.max(0.009, p.loan.rate - 0.005); }); return s; } },
+        apply: s => { moveCash(s, -300000, 'event', '借り換え手数料'); s.properties.forEach(p => { if (p.loan) p.loan.rate = Math.max(0.009, p.loan.rate - 0.005); }); return s; } },
       { label: '断る', log: '今回は見送った', apply: s => s } ] },
   // セミナーと大家の会は「何度でも来るもの」。お題だけ毎回変わる。
   // v8: 参加すると📚用語クイズが始まる（quiz: 'seminar' | 'oyanokai'）。
@@ -2764,9 +2868,9 @@ export const EVENTS = [
     condition: s => s.properties.length > 0,
     choices: [
       { label: '📚 参加する（行動力-15・-¥5,000）', quiz: 'oyanokai', log: '大家の会に顔を出した',
-        apply: s => { s.actionPower -= 15; s.cash -= 5000; return s; } },
+        apply: s => { s.actionPower -= 15; moveCash(s, -5000, 'event', '大家の会 参加費'); return s; } },
       { label: '顔を出すだけ（行動力-15・-¥5,000）', beginnerHidden: true, log: '大家仲間から生の情報を仕入れた（目利き+10・交渉+10 EXP）',
-        apply: s => { s.actionPower -= 15; s.cash -= 5000; s.skills.appraisal.exp += 10; s.skills.negotiation.exp += 10; return s; } },
+        apply: s => { s.actionPower -= 15; moveCash(s, -5000, 'event', '大家の会 参加費'); s.skills.appraisal.exp += 10; s.skills.negotiation.exp += 10; return s; } },
       { label: '今回は見送る', log: '家で収支表とにらめっこした', apply: s => s } ] },
 
   // --- 躯体・構造まわり（築年数が要件。新築では起きない）---
@@ -2920,7 +3024,7 @@ export const EVENTS = [
     match: evTarget({ kind: 'tou', minUnits: 4 }),
     choices: [
       { label: '月2回の契約にする（戸数×¥6,000／手入れ+10）', log: '定期清掃を手厚くした',
-        apply: (s, id) => { const p = evFind(s, id); if (p) { s.cash -= 6000 * p.units.length; p.careState = Math.min(100, (p.careState ?? 100) + 10); } return s; } },
+        apply: (s, id) => { const p = evFind(s, id); if (p) { moveCash(s, -6000 * p.units.length, 'event', 'イベント対応', id); p.careState = Math.min(100, (p.careState ?? 100) + 10); } return s; } },
       { label: '月1回に減らす（戸数×¥3,000）', log: '定期清掃を最低限にした', apply: evPayPerUnit(3000) } ] },
   { id: 'shoubou', title: '🚨 消防設備点検で是正を指摘された', cooldown: 60,
     // 一定規模以上の共同住宅は消防設備の定期点検と報告が義務。
@@ -2933,13 +3037,13 @@ export const EVENTS = [
     choices: [
       { label: 'アンテナ・ブースターを交換（-¥250,000）', log: '共聴設備を直した', apply: evPay(250000) },
       { label: '光テレビへ切り替える（-¥400,000・入居者満足↑）', log: '光テレビを導入した（手入れ+）',
-        apply: (s, id) => { s.cash -= 400000; const p = evFind(s, id); if (p) p.careState = Math.min(100, (p.careState ?? 100) + 10); return s; } } ] },
+        apply: (s, id) => { moveCash(s, -400000, 'event', 'イベント対応', id); const p = evFind(s, id); if (p) p.careState = Math.min(100, (p.careState ?? 100) + 10); return s; } } ] },
   { id: 'led_kyoyo', title: '💡 共用部の照明がまだ蛍光灯のまま', cooldown: 240,
     // 共用廊下・階段の照明があるのは一棟もの。LED化は数年で回収できる投資。
     match: evTarget({ kind: 'tou', minAge: 15, minUnits: 4 }),
     choices: [
       { label: 'LEDに交換する（戸数×¥15,000・電気代が下がる）', log: '共用部をLED化した（運営費が下がった）',
-        apply: (s, id) => { const p = evFind(s, id); if (p) { s.cash -= 15000 * p.units.length; p.mgmtFeeM = Math.round(p.mgmtFeeM * 0.9); } return s; } },
+        apply: (s, id) => { const p = evFind(s, id); if (p) { moveCash(s, -15000 * p.units.length, 'event', 'イベント対応', id); p.mgmtFeeM = Math.round(p.mgmtFeeM * 0.9); } return s; } },
       { label: '今のまま使う', log: '電気代は高いままだ', apply: s => s } ] },
   { id: 'kagi_koukan', title: '🔑 鍵が旧式のままで防犯性が低い', cooldown: 240,
     // ピッキングに弱いディスクシリンダーは築25年以前の物件に多い。
@@ -2993,7 +3097,7 @@ export const EVENTS = [
     match: evTarget({ kind: 'tou', minUnits: 4, careBelow: 70 }),
     choices: [
       { label: '警告して撤去する（行動力-10・-¥20,000）', log: '通路がすっきりした（自主管理+10 EXP）',
-        apply: s => { s.actionPower -= 10; s.cash -= 20000; s.skills.selfmgmt.exp += 10; return s; } },
+        apply: (s, id) => { s.actionPower -= 10; moveCash(s, -20000, 'event', 'イベント対応', id ?? null); s.skills.selfmgmt.exp += 10; return s; } },
       { label: '放置する（手入れ-10）', log: '見た目が悪く内見の印象も悪い', apply: evHitCare(10) } ] },
   { id: 'souon', title: '👤 入居者間で騒音トラブル', cooldown: 24,
     match: evTarget({ kind: 'tou', minUnits: 2, needOccupied: true }),
@@ -3006,7 +3110,7 @@ export const EVENTS = [
     choices: [
       { label: '広告費で即募集（-家賃2ヶ月分・空きは1戸で済む）', log: '広告が効いて痛手は1戸で済んだ',
         apply: (s, id) => { const p = evFind(s, id); if (p) { const occ = p.units.filter(u => u.occupied);
-          s.cash -= (occ[0]?.rent ?? 50000) * 2; vacateUnit(occ[0]); } return s; } },
+          moveCash(s, -(occ[0]?.rent ?? 50000) * 2, 'ad', `${p.label} の広告費（退去連鎖対応）`, id); vacateUnit(occ[0]); } return s; } },
       { label: '様子を見る（2戸空室に）', log: '2戸が空室になった', apply: evEvict(2) } ] },
   { id: 'tainou', title: '💸 家賃滞納が発覚（3ヶ月分）', cooldown: 36,
     // v16: いまの賃貸実務では入居時の家賃保証会社加入がほぼ必須になっており、滞納は
@@ -3019,11 +3123,11 @@ export const EVENTS = [
       { label: '🛡️ 家賃保証会社に代位弁済を請求（3ヶ月分を全額回収・保証会社が明渡しへ／1戸空室）',
         log: '保証会社が3ヶ月分を立て替え、明渡しに動いた',
         apply: (s, id) => { const p = evFind(s, id); const u = p?.units.find(x => x.occupied);
-          if (u) { s.cash += u.rent * 3; vacateUnit(u, { needsRestore: true }); } return s; } },
+          if (u) { moveCash(s, u.rent * 3, 'rent', `${p?.label ?? ''} 滞納家賃回収（保証会社）`, id); vacateUnit(u, { needsRestore: true }); } return s; } },
       { label: '内容証明で自分で交渉する（行動力-20・1ヶ月分だけ回収・住み続けてもらう）',
         log: '一部回収し、入居は継続してもらった（交渉+10 EXP）',
         apply: (s, id) => { const p = evFind(s, id); const u = p?.units.find(u => u.occupied);
-          s.actionPower -= 20; s.skills.negotiation.exp += 10; if (u) s.cash += u.rent; return s; } },
+          s.actionPower -= 20; s.skills.negotiation.exp += 10; if (u) moveCash(s, u.rent, 'rent', `${p?.label ?? ''} 滞納家賃回収（交渉）`, id); return s; } },
       { label: '退去してもらう（1戸空室に・未回収）', log: '滞納者に退去してもらった', apply: evEvict(1) } ] },
 
   // --- 戸建て特有 ---
@@ -3041,7 +3145,7 @@ export const EVENTS = [
     choices: [
       { label: '支払う（-¥300,000）', log: '一時金を支払った', apply: evPay(300000) },
       { label: '分割払いを交渉（-¥100,000・修繕積立が月+¥10,000）', log: '分割にしてもらった',
-        apply: (s, id) => { s.cash -= 100000; const p = evFind(s, id); if (p) p.repairReserveM += 10000; return s; } } ] },
+        apply: (s, id) => { moveCash(s, -100000, 'event', 'イベント対応', id ?? null); const p = evFind(s, id); if (p) p.repairReserveM += 10000; return s; } } ] },
   { id: 'rijikai', title: '🏢 管理組合の理事就任を打診された', cooldown: 24,
     match: evTarget({ kind: 'kubun' }),
     choices: [
@@ -3175,13 +3279,13 @@ export function applyEventChoice(state, event, choiceIndex, targetId, unitIndex 
   if (cost > 0) {
     const q = method === 'loan' ? eventLoanQuote(s, cost) : null;
     if (q && p) {
-      s.cash -= q.selfPay;
+      moveCash(s, -q.selfPay, 'event', `${p.label} イベント対応（自己負担分）`, p.id);
       p.reformLoans = p.reformLoans || [];
       p.reformLoans.push({ principal: q.amount, rate: q.rate, years: q.years, monthsPaid: 0 });
       addSpend(p, 'troubleSpend', q.selfPay);
       addSpend(p, 'reformBorrowed', q.amount);
     } else {
-      s.cash -= cost;
+      moveCash(s, -cost, 'event', p ? `${p.label} イベント対応` : 'イベント対応', p?.id ?? null);
       if (p) addSpend(p, 'troubleSpend', cost);
     }
     // v16: イベントの出費は資産計上せず、借入の有無に関わらず全額（cost）を発生月の経費にする。
@@ -3269,11 +3373,11 @@ export function doWork(state, rng = Math.random) {
   s.actionPower -= 1;
   // v3.9: 金額幅(1,000〜10,000円)は維持しつつ低額を引きやすく偏らせ、平均を約2,000円（旧5,500円の約37%）に。
   const earned = (10 + Math.floor(Math.pow(rng(), 6) * 91)) * 100;
-  s.cash += earned;
+  moveCash(s, earned, 'work', '内職');
   return { state: s, earned };
 }
 
-export function createInitialState({ attr, goalType, goalAmount, goalYears, seedCash, age, difficulty }) {
+export function createInitialState({ attr, goalType, goalAmount, goalYears, seedCash, age, difficulty, salaryAnnual }) {
   const emp = attr === 'employee';
   // v8: 難易度による下駄は「ウィザードで選んだ値」に対して掛ける。プリセットの縮小（goalScale）と
   // 期限の延長（yearsBonus）はウィザード側の提示値で済ませてあるので、ここでは掛けない。
@@ -3288,7 +3392,8 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
     cash: clampedSeed, month: 0, attr, age: clampedAge, startAge: clampedAge,
     difficulty: diffKey,
     // v17: 給与所得との損益通算に使う年収。月次では現金に加算しない（種銭は doWork で稼ぐ）。
-    salaryAnnual: emp ? CONFIG.salaryEmployee : CONFIG.salarySelf,
+    // v18: ウィザードで金額を選ばせる。省略時（テスト等）は従来どおり属性から決める。
+    salaryAnnual: salaryAnnual ?? (emp ? CONFIG.salaryEmployee : CONFIG.salarySelf),
     creditScore: (emp ? CONFIG.creditEmployee : CONFIG.creditSelf) + d.creditBonus,
     baseActionPower: emp ? 100 : 120, actionPower: emp ? 100 : 120,
     goal: { type: goalType, amount: goalAmount, years: clampedYears },
@@ -3311,6 +3416,7 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
       corp: { year: calYearOf(0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
     },
     taxSchedule: [],
+    cashLog: [],   // v18: 現金の動きの明細（moveCash参照）。直近CASH_LOG_RETENTION_MONTHSヶ月ぶんだけ保持する
     taxableSalesByYear: {},   // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高（建物分）
     salesSearch: { spent: 0, threshold: null },
     nextPropertyId: 1,
@@ -3363,7 +3469,8 @@ export function transferToCorp(state, propertyId) {
   const capTax = Math.round(gain * capGainTaxRate(s, p));
   const acqCost = Math.round(price * CONFIG.corpTransferCostRate);
   if (s.cash < capTax + acqCost) return { state, done: false, reason: 'cash' };
-  s.cash -= capTax + acqCost;
+  if (capTax > 0) moveCash(s, -capTax, 'tax', `${p.label} 法人へ移転（譲渡税）`, p.id);
+  if (acqCost > 0) moveCash(s, -acqCost, 'buy', `${p.label} 法人へ移転（取得コスト）`, p.id);
   p.owner = 'corp';
   p.boughtPrice = price;
   p.boughtMonth = s.month;
@@ -3517,7 +3624,7 @@ function autoManageMonth(s, p, logs) {
     if (!u.needsRestore || u.restoreJob) continue;
     const cost = autoManageCost(restoreCost(p, u));
     if (s.cash < cost) { short = true; continue; }
-    s.cash -= cost;
+    moveCash(s, -cost, 'repair', `${nm} の原状回復（おまかせ契約）`, p.id);
     addSpend(p, 'repairSpend', cost);
     bookOf(s, p.owner).expense += cost;   // v16: おまかせの原状回復も発生月の経費
     u.restoreJob = { monthsTotal: 1, monthsLeft: 1, auto: true };
@@ -3530,7 +3637,7 @@ function autoManageMonth(s, p, logs) {
   if (!repairJobForGauge(p, 'care') && (p.careState ?? 100) < AUTO_MANAGE_CARE_FLOOR) {
     const cost = autoManageCost(repairCost(p, 'maint'));
     if (s.cash >= cost) {
-      s.cash -= cost;
+      moveCash(s, -cost, 'repair', `${nm} の日常メンテ（おまかせ契約）`, p.id);
       addSpend(p, 'repairSpend', cost);
       bookOf(s, p.owner).expense += cost;   // v16: おまかせの日常メンテも発生月の経費
       const months = repairJobMonths(p, 'maint');
@@ -4044,11 +4151,55 @@ function closeCorpBooks(s) {
   book.income = 0; book.expense = 0; book.year = year + 1;
 }
 
+// v18: 「今年ここまでの帳簿」を年換算し、見込みの年間税負担を出す。closePersonalBooks /
+// closeCorpBooks（実際の確定申告・決算処理）とは別物で、繰越損失・青色申告控除・土地利子の
+// 除外・不動産取得税といった細部は追わず、指示どおりincomeTaxOf(課税所得)+住民税+個人事業税
+// （個人）／corporateTaxOf(課税所得)+均等割（法人）だけで見積もる簡易な「見込み」計算にする
+// （年の途中では繰越損失の適用有無なども確定しないため、精緻にしても見込み以上にはならない）。
+function estimateAnnualTax(s) {
+  const monthsElapsed = calMonthOf(s.month);   // 1〜12（暦年のうち何ヶ月分の実績があるか）
+  const personalBook = s.books?.personal ?? { income: 0, expense: 0 };
+  const corpBook = s.books?.corp ?? { income: 0, expense: 0 };
+  const annualize = (v) => Math.round(v * 12 / monthsElapsed);
+
+  // 個人: 給与所得と合算（損益通算）した課税所得に累進課税＋住民税。事業的規模なら個人事業税も。
+  const netPersonal = annualize(personalBook.income - personalBook.expense);
+  const salaryIncome = salaryIncomeOf(s);
+  const taxableIncome = Math.max(0, salaryIncome + netPersonal - BASIC_DEDUCTION);
+  const incomeTax = incomeTaxOf(taxableIncome);
+  const withheldTax = incomeTaxOf(Math.max(0, salaryIncome - BASIC_DEDUCTION));
+  const residentTax = Math.round(taxableIncome * RESIDENT_TAX_RATE);
+  const withheldResident = Math.round(Math.max(0, salaryIncome - BASIC_DEDUCTION) * RESIDENT_TAX_RATE);
+  let personalTax = (incomeTax - withheldTax) + (residentTax - withheldResident);
+  if (isBusinessScale(s)) {
+    personalTax += Math.round(Math.max(0, netPersonal - BUSINESS_TAX_DEDUCTION) * BUSINESS_TAX_RATE);
+  }
+
+  // 法人: 課税所得に法人税率＋均等割（法人化していなければ0）。
+  const netCorp = annualize(corpBook.income - corpBook.expense);
+  const corpTax = s.isIncorporated ? corporateTaxOf(Math.max(0, netCorp)) + CORP_PER_CAPITA_TAX : 0;
+
+  return personalTax + corpTax;
+}
+
+// v18: ポートフォリオ全体で1つの税引後CF（月換算・年の途中は見込み）を返す。
+// 損益通算で還付になる年はannualTaxがマイナスになり、afterTaxがbeforeTaxを上回る
+// （実務でも起こりうるのでそのまま返す）。
+export function afterTaxCF(state) {
+  const beforeTax = monthlyCF(state);
+  const annualTax = estimateAnnualTax(state);
+  const afterTax = beforeTax - annualTax / 12;
+  return { beforeTax, afterTax, annualTax, estimated: true };
+}
+
 export function advanceMonth(state, rng = Math.random) {
   let s = structuredClone(state);
   const logs = [];
   const diff = difficultyOf(s);   // v8: 劣化・イベント頻度・客付けに難易度の係数が乗る
   s.month += 1;
+  // v18: 月初（この関数に入った時点）の現金を控えておき、月末に実際の増減とcashLogの
+  // 記録額を突き合わせる（下の集計ブロック参照）。ここより後に増える現金操作だけを対象にする。
+  const cashAtMonthStart = s.cash;
   for (const sale of [...(s.pendingSales || [])].filter(x => x.settleMonth <= s.month)) {
     const r = settleSale(s, sale); s = r.state; logs.push(...r.logs);
   }
@@ -4076,7 +4227,16 @@ export function advanceMonth(state, rng = Math.random) {
     }
     notifyLongVacancy(s, p);   // v8.6: 長引く空室の原因を教える
     const pl = propertyMonthlyPL(p);
-    s.cash += pl.cf;
+    // v18: 現金には cashDelta（実際にこの月動く額）を使う。pl.cf は固都税の月割を引いた
+    // 指標（実務のBTCF）で、固都税そのものは年4回の実額（下の四半期処理）でしか出ていかない。
+    // ここで pl.cf を使うと月割と実額で固都税を二重に引くことになる。
+    // cashDelta = rentIn − opex − interest − principal（固都税の月割ぶんは相殺されて消える）
+    // なので、内訳ごとにmoveCashへ分けて積んでも合計はcashDeltaと必ず一致する。
+    const nm = p.name || p.label;
+    moveCash(s, pl.rentIn, 'rent', `${nm} の家賃収入`, p.id);
+    if (pl.opex > 0) moveCash(s, -pl.opex, 'opex', `${nm} の運営費`, p.id);
+    const debtService = pl.interest + pl.principal;
+    if (debtService !== 0) moveCash(s, -debtService, 'loan', `${nm} のローン返済`, p.id);
     // v16: 名義ごとの帳簿に月次で積む（発生主義）。元金返済（pl.principal）はここに混ぜない
     // （デッドクロスの正体なので絶対に経費にしない）。固都税は納付月に関係なく毎月1/12を
     // 計上し、実際の納付は年4回（下の四半期処理）で別に引く。
@@ -4113,7 +4273,7 @@ export function advanceMonth(state, rng = Math.random) {
     if (rng() < troubleChanceFor(p) * diff.eventMult) {   // v6: 築年帯で傾斜（旧: 全物件3%固定）
       const base = CONFIG.troubleMin + rng() * (CONFIG.troubleMax - CONFIG.troubleMin);
       const c = Math.round(troubleRepairCost(base, skillLevel(s.skills.selfmgmt.exp)));
-      s.cash -= c;
+      moveCash(s, -c, 'repair', `${nm} の突発修繕`, p.id);
       addSpend(p, 'troubleSpend', c);
       book.expense += c;   // v16: 突発修繕は資産計上せず、発生月の経費にする
       logs.push(`${p.label} で突発修繕（-${yen(c)}）`);
@@ -4206,7 +4366,7 @@ export function advanceMonth(state, rng = Math.random) {
         (p.areaKey ?? 'local') === areaKey && calYearOf(s.month) >= (p.propTaxFromYear ?? 0));
       if (!payable.length) continue;
       const total = payable.reduce((t, p) => t + propTaxQuarterAmount(p.propTaxA, periodIdx), 0);
-      s.cash -= total;
+      moveCash(s, -total, 'tax', `固定資産税 第${periodIdx}期（${PROP_TAX_AREA_LABEL[areaKey]}${payable.length}物件）`);
       logs.push(`🏛️ 固定資産税 第${periodIdx}期（${PROP_TAX_AREA_LABEL[areaKey]}${payable.length}物件・${yen(total)}）`);
     }
   }
@@ -4217,7 +4377,13 @@ export function advanceMonth(state, rng = Math.random) {
   // 精算（closePersonalBooks/closeCorpBooks）でそこから引かせる。
   s.taxSchedule = s.taxSchedule || [];
   for (const x of s.taxSchedule.filter(t => t.month === s.month)) {
-    s.cash -= x.amount;
+    // v18: 還付（amountがマイナス＝現金が増える）は「税金」ではなく「保険金・還付」に入れる。
+    // 同じ🧾税金の行にプラスで混ぜると「税金 +33,860円」というプラスの税金みたいな表示になり、
+    // 明細をパッと見たときに読み違える。納付と還付は別の行に分ける。
+    // ラベルは締め処理側で「所得税の還付」のように既に還付だと分かる形で作られていることがある。
+    // 二重に「の還付」を付けないよう、含まれていないときだけ補う。
+    const refundLabel = x.label.includes('還付') ? x.label : `${x.label}の還付`;
+    moveCash(s, -x.amount, x.amount < 0 ? 'refund' : 'tax', x.amount < 0 ? refundLabel : x.label);
     if (x.kind === 'income_tax_prepay') ensureBooks(s).personal.prepaidIncomeTax = (ensureBooks(s).personal.prepaidIncomeTax ?? 0) + x.amount;
     if (x.kind === 'corp_tax_interim') ensureBooks(s).corp.prepaidCorpTax = (ensureBooks(s).corp.prepaidCorpTax ?? 0) + x.amount;
     logs.push(x.amount < 0 ? `🧾 ${x.label}（+${yen(-x.amount)}）` : `🧾 ${x.label}を納付（${yen(x.amount)}）`);
@@ -4276,6 +4442,24 @@ export function advanceMonth(state, rng = Math.random) {
       `${r.icon} ${r.label} が解放された。${r.desc}`);
     logs.push(`${r.icon} ${r.label} が解放された`);
   }
+  // v18: cashLogの取りこぼし対策。advanceMonthは現金を動かす箇所が非常に多く、1つでも
+  // moveCashを通し忘れると明細の合計が実際の残高とズレる（＝一番信用を失う形）。そこで
+  // 月初に控えた現金と月末の実際の現金を突き合わせ、差額を other として自動計上する。
+  // これで明細の合計は常に実際の残高と一致することが保証される（漏れがあっても嘘の数字にはならない）。
+  {
+    const loggedThisMonth = (s.cashLog || [])
+      .filter(e => e.month === s.month)
+      .reduce((t, e) => t + e.amount, 0);
+    const actualDelta = s.cash - cashAtMonthStart;
+    const gap = Math.round(actualDelta - loggedThisMonth);
+    if (gap !== 0) {
+      s.cashLog = s.cashLog || [];
+      s.cashLog.push({ month: s.month, cat: 'other', amount: gap, label: 'その他', propertyId: null });
+    }
+    // v18: その月にmoveCashが1回も呼ばれない（物件も無くイベントも起きない）月があっても、
+    // 保持期間の切り捨てが月送りのたびに必ず効くよう、ここで毎回トリムする。
+    trimCashLog(s);
+  }
   s.actionPower = s.baseActionPower;
   return { state: s, logs, pendingEvent, newlyUnlocked };
 }
@@ -4310,6 +4494,8 @@ export function migrateSave(state) {
   // v17: 給与所得との損益通算に使う年収。旧セーブには無いのでattrから同じ規則で補う。
   if (typeof s.salaryAnnual !== 'number') s.salaryAnnual = s.attr === 'employee' ? CONFIG.salaryEmployee : CONFIG.salarySelf;
   if (!Array.isArray(s.taxSchedule)) s.taxSchedule = [];
+  // v18: 現金の動きの明細。旧セーブには無いので空で始める（過去の実績は復元できない）。
+  if (!Array.isArray(s.cashLog)) s.cashLog = [];
   // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高。旧セーブには無いので空で始める
   // （過去の売却実績は復元できないが、免税事業者スタートは安全側＝プレイヤー有利な既定値）。
   if (!s.taxableSalesByYear || typeof s.taxableSalesByYear !== 'object') s.taxableSalesByYear = {};
@@ -4896,6 +5082,13 @@ export const TERMS = {
     calc: '月CF ＝ 月の家賃収入 − 運営費 − ローン返済 − 税金',
     here: '画面上部の「月CF」がこれ。ここがプラスでないと、持っているだけで現金が減っていく。',
     hint: '1戸あたり月5,000〜15,000円あれば健全とされる。' },
+  // v18: ヘッダーの📈月CF専用の用語ヘルプ。月CF・税引後CF・今月の収支の3つは似た数字で
+  // 混同しやすいので、ここで違いを明記する（「💰 お金 → 今月」のexplainLineと同じ内容）。
+  monthly_cf: { scope: 'real', group: '収益', label: '月CF',
+    def: '物件が毎月生む力を表す指標。ヘッダーに常時表示され、目標の達成判定はこの数字で行われる。',
+    calc: '月CF ＝ NOI ÷ 12 − 元利返済',
+    here: '実際に動いた現金は「💰 お金 → 今月」で見られる（税・工事・購入も含むので月CFとは一致しない）。税まで引いた見込みは同じ画面の「税引後CF」。',
+    hint: '月CFがプラスでも、納税や大きな工事が重なった月は今月の収支がマイナスになることがある。' },
   vacancy_loss: { scope: 'real', reading: 'くうしつそん', group: '収益', label: '空室損',
     def: '空室のせいで取り損ねている家賃。',
     calc: '空室損 ＝ 空いている部屋の家賃を合計 × 12ヶ月',
@@ -5135,7 +5328,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -8022,7 +8215,7 @@ function showSetup() {
   // v7.7: 完了済みでも次回の初期値は常にON。更新でチュートリアル内容が変わっても
   // 毎回手動でチェックし直す必要がないようにする（外すのは自由）。
   const data = { difficulty: 'beginner', attr: 'employee', age: 30, seed: 10_000_000, goalType: 'networth', goalAmount: 100_000_000, years: 20,
-    tutorial: true };
+    salaryAnnual: L.CONFIG.salaryEmployee, tutorial: true };   // v18: salaryAnnualの初期値はdata.attrの初期値'employee'に合わせる
   // v8: 初心者モードは目標プリセットを半分にして、最初の成功体験までを近くする。
   const BASE_PRESETS = {
     networth: [[30_000_000, '3,000万'], [100_000_000, '1億'], [300_000_000, '3億']],
@@ -8033,7 +8226,7 @@ function showSetup() {
     return scale === 1 ? [v, l] : [Math.round(v * scale), L.yen(Math.round(v * scale))];
   });
   let step = 0;
-  const TOTAL = 7;   // v8: 先頭に難易度選択を足して 6 → 7
+  const TOTAL = 8;   // v18: 「本業の年収」ステップを属性選択の直後に追加して 7 → 8
   const frame = (title, flavor, inner, opts = {}) => `
     <div class="bg-white rounded-xl p-6 w-full max-w-md space-y-4 max-h-[90vh] overflow-y-auto" style="max-height:90dvh">
       <div class="flex items-center justify-between text-[11px] text-slate-500">
@@ -8061,7 +8254,9 @@ function showSetup() {
         <button class="wz-diff border-2 rounded-xl p-3 text-left ${data.difficulty === 'normal' ? 'border-navy bg-slate-50' : ''}" data-v="normal">
           <div class="font-bold">🔥 中上級者向け</div>
           <div class="text-xs text-slate-600">補正なし。躯体も手入れも容赦なく落ち、やり直しは効かない。<b>現実の厳しさで勝負する。</b></div></button></div>`;
-      m.appendChild(el(frame('どう遊ぶ？', 'あとから変えることはできない。', inner)));
+      // v18: 「あとから変えることはできない。」はゲーム開始後の意味だが、ウィザード内で
+      // 戻れないことの説明と誤解されるため文言を変更。
+      m.appendChild(el(frame('どう遊ぶ？', '開始後は変えられない。', inner)));
       m.querySelectorAll('.wz-diff').forEach(b => b.addEventListener('click', () => {
         data.difficulty = b.dataset.v;
         // プリセットが変わるので、目標額もその難易度の「まん中」に引き直す。期限にも下駄を履かせる。
@@ -8069,8 +8264,8 @@ function showSetup() {
         data.years = 20 + L.DIFFICULTY[data.difficulty].yearsBonus;
         step = 1; draw();
       }));
-      m.querySelector('#wz-next')?.addEventListener('click', () => { step = 1; draw(); });
-      return;
+      // v18: 「← 戻る」の配線を末尾の共通処理へ任せるため早期returnを外した
+      // （step0/1はカード選択で自動遷移する挙動は維持しつつ、次へボタンの配線は共通処理に統一）。
     } else if (step === 1) {
       inner = `<div class="grid grid-cols-1 gap-2">
         <button class="wz-attr border-2 rounded-xl p-3 text-left ${data.attr === 'employee' ? 'border-navy bg-slate-50' : ''}" data-v="employee">
@@ -8078,10 +8273,39 @@ function showSetup() {
         <button class="wz-attr border-2 rounded-xl p-3 text-left ${data.attr === 'self' ? 'border-navy bg-slate-50' : ''}" data-v="self">
           <div class="font-bold">🛠️ 自営業</div><div class="text-xs text-slate-600">${term('credit_score', '信用度')}10・${term('action_power', '行動力')}120。<b>自由な時間は最大の資本。</b></div></button></div>`;
       m.appendChild(el(frame('あなたは、何者だ？', '大家への道はここから始まる。', inner)));
-      m.querySelectorAll('.wz-attr').forEach(b => b.addEventListener('click', () => { data.attr = b.dataset.v; step = 2; draw(); }));
-      m.querySelector('#wz-next')?.addEventListener('click', () => { step = 2; draw(); });
-      return;
+      m.querySelectorAll('.wz-attr').forEach(b => b.addEventListener('click', () => {
+        data.attr = b.dataset.v;
+        // v18: 次ステップ（年収）の初期値は属性から決まるので、属性を選び直したら追従させる。
+        data.salaryAnnual = data.attr === 'employee' ? L.CONFIG.salaryEmployee : L.CONFIG.salarySelf;
+        step = 2; draw();
+      }));
     } else if (step === 2) {
+      const salaryMax = 15_000_000;
+      inner = `<div class="text-center text-2xl font-black mb-1">
+          <span id="wz-salary-v">${data.salaryAnnual === 0 ? '専業（給与所得なし）' : L.yen(data.salaryAnnual)}</span></div>
+        <input id="wz-salary" type="range" min="0" max="${salaryMax}" step="500000" value="${data.salaryAnnual}" class="w-full">
+        <div id="wz-salary-calc" class="text-xs text-slate-500 mt-1 space-y-0.5"></div>`;
+      m.appendChild(el(frame('本業の年収は？', '3月の還付・追加納税を左右する数字だ。', inner)));
+      const sai = m.querySelector('#wz-salary');
+      const calcBox = m.querySelector('#wz-salary-calc');
+      const updSalary = () => {
+        data.salaryAnnual = Number(sai.value);
+        m.querySelector('#wz-salary-v').textContent = data.salaryAnnual === 0 ? '専業（給与所得なし）' : L.yen(data.salaryAnnual);
+        if (data.salaryAnnual === 0) {
+          calcBox.innerHTML = '<div>損益通算の相手がいないので、不動産所得だけで課税されます</div>';
+        } else {
+          const salaryIncome = L.salaryIncomeOf({ salaryAnnual: data.salaryAnnual });
+          const incomeTax = L.incomeTaxOf(Math.max(0, salaryIncome - L.BASIC_DEDUCTION));
+          calcBox.innerHTML = `
+            <div>給与所得（控除後） ${L.yen(salaryIncome)}</div>
+            <div>この年収だけなら所得税 ${L.yen(incomeTax)}／年</div>
+            <div>不動産が赤字ならこの一部が3月に還付され、黒字なら上の税率帯が乗る</div>`;
+        }
+      };
+      sai.addEventListener('input', updSalary);
+      updSalary();
+      collect = () => { data.salaryAnnual = Number(sai.value); return true; };
+    } else if (step === 3) {
       inner = `<div class="text-center text-3xl font-black mb-1"><span id="wz-age-v">${data.age}</span><span class="text-lg">歳</span></div>
         <input id="wz-age" type="range" min="18" max="79" value="${data.age}" class="w-full">
         <div class="text-xs text-slate-500 mt-1">融資は80歳までに完済できる期間しか組めない。若さも、また資本。</div>`;
@@ -8089,7 +8313,7 @@ function showSetup() {
       const ai = m.querySelector('#wz-age');
       ai.addEventListener('input', () => { m.querySelector('#wz-age-v').textContent = ai.value; });
       collect = () => { data.age = Math.max(18, Math.min(79, Number(ai.value) || 30)); return true; };
-    } else if (step === 3) {
+    } else if (step === 4) {
       // 0〜5,000万を50万円刻みのスライダーで（プリセットボタンも併設）
       inner = `<div class="text-center text-2xl font-black mb-1"><span id="wz-seed-v">${L.yen(data.seed)}</span></div>
         <input id="wz-seed" type="range" min="0" max="${L.CONFIG.seedMax}" step="500000" value="${data.seed}" class="w-full">
@@ -8107,7 +8331,7 @@ function showSetup() {
       si.addEventListener('input', upd);
       m.querySelectorAll('.wz-seedp').forEach(b => b.addEventListener('click', () => { si.value = b.dataset.v; upd(); }));
       collect = () => { data.seed = Number(si.value); return true; };
-    } else if (step === 4) {
+    } else if (step === 5) {
       inner = `<div class="flex gap-2">
           <label class="flex-1 border-2 rounded-xl p-2 text-sm text-center ${data.goalType === 'networth' ? 'border-navy bg-slate-50 font-bold' : ''}"><input type="radio" name="wz-goaltype" value="networth" ${data.goalType === 'networth' ? 'checked' : ''} class="mr-1">純資産</label>
           <label class="flex-1 border-2 rounded-xl p-2 text-sm text-center ${data.goalType === 'cashflow' ? 'border-navy bg-slate-50 font-bold' : ''}"><input type="radio" name="wz-goaltype" value="cashflow" ${data.goalType === 'cashflow' ? 'checked' : ''} class="mr-1">月間CF</label></div>
@@ -8141,7 +8365,7 @@ function showSetup() {
       }));
       setupSlider(); renderP();
       collect = () => { data.goalAmount = Math.max(1, Number(gi.value)); return true; };
-    } else if (step === 5) {
+    } else if (step === 6) {
       const maxYears = L.maxYearsForAge(data.age);
       if (data.years > maxYears) data.years = maxYears;
       inner = `<div class="text-center text-3xl font-black mb-1"><span id="wz-years-v">${data.years}</span><span class="text-lg">年</span></div>
@@ -8157,6 +8381,7 @@ function showSetup() {
       const startCash = Math.round(data.seed * d.seedMult);
       inner = `<div class="bg-slate-50 rounded-xl p-4 text-sm leading-relaxed">
           <b>${data.age}歳の${attrLabel}</b>、手元の種銭は<b>${L.yen(startCash)}</b>。<br>
+          本業の年収は<b>${data.salaryAnnual === 0 ? '専業（給与所得なし）' : L.yen(data.salaryAnnual)}</b>。<br>
           目標は <b>${data.goalType === 'networth' ? '純資産' : '月間CF'} ${L.yen(data.goalAmount)}</b> を <b>${data.years}年以内</b> に。<br>
           さあ、メガ大家への道を歩みはじめよう。</div>
         <div class="text-xs ${data.difficulty === 'beginner' ? 'text-emerald-700' : 'text-red-600'} font-bold">
@@ -8170,7 +8395,8 @@ function showSetup() {
       if (!collect()) return;
       if (step < TOTAL - 1) { step += 1; draw(); return; }
       state = L.createInitialState({ attr: data.attr, age: data.age, goalType: data.goalType,
-        goalAmount: data.goalAmount, goalYears: data.years, seedCash: data.seed, difficulty: data.difficulty });
+        goalAmount: data.goalAmount, goalYears: data.years, seedCash: data.seed, difficulty: data.difficulty,
+        salaryAnnual: data.salaryAnnual });
       // v8: 初心者は用語ヘルプを既定でON（点線をなぞれば意味が読める状態から始める）
       if (data.difficulty === 'beginner') setTermsOff(false);
       m.classList.add('hidden'); m.innerHTML = ''; save(); navReset(); resetMapView(); render();
@@ -8398,7 +8624,7 @@ function renderHeaderClock() {
   box.classList.toggle('hidden', !state);
   if (!state) return;
   box.querySelector('#hud-elapsed').textContent = calText(state);
-  box.querySelector('#hud-age').textContent = state.age ?? '-';
+  // v18: 🎂年齢はヘッダーから外し、「💰 お金 → 資産」タブへ移設した（bsElapsedRowが表示する）。
   // v8.9: スマホ版はここ（ヘッダー）だけが常に見えるので、現金・行動力もここに常時表示する。
   box.querySelector('#hud-clock-cash').textContent = L.yen(state.cash);
   // v8.17: 月CFも追加。プラス/マイナスで色分けする（他の月CF表示と同じhud-money/hud-badを流用）。
@@ -8474,13 +8700,13 @@ function renderPanelLeft() {
         <div class="flex justify-between"><span class="hud-sub">総資産</span><b>${L.yen(L.totalAssetsV2(state))}</b></div>
         <div class="flex justify-between"><span class="hud-sub">総負債</span><b class="hud-bad">${L.yen(L.totalDebt(state))}</b></div>
         <div class="flex justify-between"><span class="hud-sub">税リスク</span><span class="${risk === '低' ? 'text-sky-400' : risk === '中' ? 'hud-accent' : 'hud-bad'} font-bold">${risk}</span></div>
-        <button id="btn-books" class="w-full text-[11px] font-bold hud-accent underline text-left mt-1">🧾 帳簿・納税</button>
+        <button id="btn-money" class="w-full text-[11px] font-bold hud-accent underline text-left mt-1">💰 お金</button>
       </div>
     </div>
   `));
   c.querySelectorAll('.kpi-btn').forEach(b => b.addEventListener('click', () => openKpiModal(b.dataset.kpi)));
   c.querySelector('#btn-bs-toggle').addEventListener('click', () => { bsDetailOpen = !bsDetailOpen; renderPanelLeft(); });
-  c.querySelector('#btn-books').addEventListener('click', () => openBooksModal());
+  c.querySelector('#btn-money').addEventListener('click', () => openMoneyHub('month'));
 }
 
 // v8.1: 法人化の損得を数字で出す。箇条書きの「こう変わります」だけでは、
@@ -8522,46 +8748,16 @@ let listingsScrollTop = 0;
 
 // 左上の4KPIアイコン（💰🏠📈📊）をタップすると、それぞれの内訳・詳細を表示する。
 function openKpiModal(which, keepBulk = false) {
+  // v18: 資産スナップショットは「💰 お金」ハブの資産タブへ統合した。旧来の呼び出し元
+  // （PC左パネル・スマホ資産ボタン）を壊さないよう、ここで委譲するだけにする。
+  if (which === 'cash') { openMoneyHub('assets'); return; }
   navGo({ key: `kpi:${which}`, open: () => openKpiModal(which, keepBulk) });   // v15: 履歴に登録
   if (which === 'props' && !keepBulk) bulkMode = false;
   const m = document.getElementById('kpi-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   let title = '', body = '';
-  if (which === 'cash') {
-    title = '💰 資産スナップショット';
-    // v15: 売却した物件の記録への入口。法人化ブロックより上に置き、資産の全体像を見た流れで
-    // 「これまで売った分」も振り返れるようにする。
-    const soldRecs = state.soldRecords || [];
-    const soldSum = L.soldSummary(state);
-    const soldBlock = soldRecs.length
-      ? `<button id="kpi-sold" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-3 flex items-center justify-between px-3">
-          <span>📜 売却した物件の記録（${soldRecs.length}件）</span>
-          <span class="${soldSum.totalPl >= 0 ? 'text-emerald-700' : 'text-red-600'}">通算 ${signedYen(soldSum.totalPl)} ›</span>
-        </button>`
-      : `<div class="text-[11px] text-slate-500 mt-3">まだ売却した物件はありません</div>`;
-    // v8: スマホではこのモーダルがバランスシートそのものなので、先頭に経過年数と年齢を出す。
-    // v15: 続けて保有件数／総戸数も出す。件数だけだと規模感が薄く、戸数まで見えて初めて実感が出る。
-    // v16: 経過年数の行はPC左パネルと共通化（bsElapsedRow）。次の納税予定もここに同時に乗る。
-    const unitTotal = state.properties.reduce((t, p) => t + p.units.length, 0);
-    body = `${bsElapsedRow('light')}
-    <div class="text-[11px] text-slate-500 border-b pb-1 mb-2">
-      保有 <b>${state.properties.length}件</b>／総戸数 <b>${unitTotal}戸</b></div>
-    <table class="w-full text-sm">
-      <tr><td>手元現金</td><td class="text-right font-bold">${L.yen(state.cash)}</td></tr>
-      <tr class="border-t"><td>総資産（現金＋物件時価）</td><td class="text-right">${L.yen(L.totalAssetsV2(state))}</td></tr>
-      <tr><td>総負債（残債）</td><td class="text-right text-red-600">-${L.yen(L.totalDebt(state))}</td></tr>
-      <tr class="border-t font-bold"><td>${term('net_worth', '純資産')}</td><td class="text-right text-emerald">${L.yen(L.netWorth(state))}</td></tr>
-    </table>
-    <button id="kpi-books" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-3">🧾 帳簿・納税</button>
-    ${soldBlock}
-    ${!state.isIncorporated ? `<div class="mt-4 pt-4 border-t">
-      <h3 class="font-bold text-sm mb-1">🏢 法人化</h3>
-      <p class="text-[11px] text-slate-500 mb-2">設立費用 ${L.yen(L.CONFIG.corporateSetupCost)}。以降、NOIへの課税が法人税率（${L.CONFIG.corporateTaxRate * 100}%）に固定されます。</p>
-      ${incorporationPitch()}
-      <button id="btn-incorporate" class="w-full bg-navy text-white rounded py-2 text-sm ${state.cash < L.CONFIG.corporateSetupCost ? 'opacity-40' : ''}" ${state.cash < L.CONFIG.corporateSetupCost ? 'disabled' : ''}>法人を設立する</button>
-    </div>` : '<div class="mt-4 pt-4 border-t text-sm font-bold text-navy">🏢 法人化済み</div>'}`;
-  } else if (which === 'props') {
+  if (which === 'props') {
     // v3.5: 売却センター。名義・売出中・修繕中・入居状況をバッジで常時表示し、複数まとめて査定できる。
     const corpN = state.properties.filter(p => p.owner === 'corp').length;
     const persN = state.properties.length - corpN;
@@ -8681,15 +8877,6 @@ function openKpiModal(which, keepBulk = false) {
   const bodyEl = boxEl.querySelector('.overflow-y-auto');
   if (which === 'props') bodyEl.scrollTop = kpiPropsScrollTop;
   boxEl.querySelector('#kpi-close').addEventListener('click', () => { kpiPropsScrollTop = 0; close(); });
-  if (which === 'cash' && !state.isIncorporated && state.cash >= L.CONFIG.corporateSetupCost) {
-    boxEl.querySelector('#btn-incorporate').addEventListener('click', () => {
-      const r = L.incorporate(state);
-      state = r.state;
-      pushLog('🏢 法人を設立した（法人名義の購入・法人への移転が可能に）');
-      save(); render(); close();
-      playIncorporationCelebration();
-    });
-  }
   boxEl.querySelectorAll('.kpi-prop').forEach(b => b.addEventListener('click', () => {
     if (bulkMode) return;   // まとめて査定中は行クリックで詳細を開かない（チェック操作を優先）
     kpiPropsScrollTop = bodyEl.scrollTop;
@@ -8704,10 +8891,8 @@ function openKpiModal(which, keepBulk = false) {
   boxEl.querySelector('#kpi-bulk-toggle')?.addEventListener('click', () => {
     bulkMode = !bulkMode; kpiPropsScrollTop = bodyEl.scrollTop; close(); openKpiModal('props', true);
   });
-  // v15: 売却記録は資産スナップショット／所有物件一覧のどちらからも同じモーダルへ飛ばす。
+  // v15: 売却記録は所有物件一覧から同じモーダルへ飛ばす（資産タブ側は「💰お金」ハブに移設済み）。
   // 戻り先はコールバックで渡し、記録モーダルの「← 戻る」で元の画面に戻れるようにする。
-  boxEl.querySelector('#kpi-books')?.addEventListener('click', () => { close(); openBooksModal(); });
-  boxEl.querySelector('#kpi-sold')?.addEventListener('click', () => { close(); openSoldRecordsModal(() => openKpiModal('cash')); });
   boxEl.querySelector('#kpi-sold-link')?.addEventListener('click', () => { close(); openSoldRecordsModal(() => openKpiModal('props', true)); });
   // 「全て選択」：件数が増えると1件ずつのチェックが苦行になるので一括で入れ／解除できるようにする。
   // 下のチェック列と同じ見た目・同じ左位置（カードのborder1px + p-2）に置いて「この列の親」だと分かるようにする。
@@ -8858,25 +9043,16 @@ function openSoldRecordsModal(back) {
 
 // v16: 帳簿・納税の画面。今年の損益と税額の概算・繰越損失・納税予定・経費の内訳をまとめる。
 // 型は売却記録モーダル（openSoldRecordsModal）と同じ：body直下のオーバーレイ＋標準ヘッダー。
+// v18: 帳簿・納税の中身は「💰 お金」ハブの税金タブへ統合した。旧 openBooksModal の呼び出し元
+// （危険バナー等）を壊さないよう、ここでハブを開くだけの薄いラッパとして残す。
 function openBooksModal() {
-  navGo({ key: 'books', open: () => openBooksModal() });   // v16: 履歴に登録
-  const overlay = el(`<div id="lm-books-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header" style="align-items:safe center;">
-    <div class="bg-white rounded-xl w-full max-w-md max-h-[80vh] flex flex-col modal-card" style="max-height:80dvh">
-      <div class="p-4 border-b shrink-0 flex justify-between items-center gap-2">
-        <div class="flex items-center gap-2 min-w-0">
-          <button id="books-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
-          <h2 class="font-bold text-base truncate">🧾 帳簿・納税</h2>
-        </div>
-        <button id="books-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
-      </div>
-      <div id="books-body" class="p-4 overflow-y-auto min-h-0 flex-1"></div>
-    </div>
-  </div>`);
-  document.body.appendChild(overlay);
-  const close = () => overlay.remove();
-  const body = overlay.querySelector('#books-body');
-  let expenseOpen = false;   // v16: 経費の内訳の折りたたみ。開いたまま他を触っても保持する。
+  openMoneyHub('tax');
+}
 
+// v18: 「💰 お金」ハブの税金タブ。旧 openBooksModal の中身をそのまま移設。
+// 今月の収支ブロック（monthlyCashBox）は独立した「今月」タブへ切り出したので、ここには含めない。
+// uiStateは呼び出し側（openMoneyHub）が保持する { expenseOpen }。
+function taxTabHtml(state, uiState) {
   // (a) 今年の損益＋税額の概算。個人・法人で計算式が違うため引数isCorpで分岐する。
   const yearCard = (label, book, isCorp) => {
     const net = book.income - book.expense;
@@ -8974,79 +9150,223 @@ function openBooksModal() {
     </div>`;
   };
 
-  const draw = () => {
-    const scroll = body.scrollTop;
-    const personalCard = yearCard(`👤 個人 ${state.books.personal.year}年目の損益（1〜12月で締め）`, state.books.personal, false);
-    const corpCard = state.isIncorporated
-      ? yearCard(`🏢 法人 ${state.books.corp.year}年目の損益（決算 ${state.corpFiscalMonth}月）`, state.books.corp, true) : '';
-    const carryLossHtml = carryLossCard('個人', state.books.personal, L.PERSONAL_CARRY_LOSS_YEARS)
-      + (state.isIncorporated ? carryLossCard('法人', state.books.corp, L.CORP_CARRY_LOSS_YEARS) : '');
+  const personalCard = yearCard(`👤 個人 ${state.books.personal.year}年目の損益（1〜12月で締め）`, state.books.personal, false);
+  const corpCard = state.isIncorporated
+    ? yearCard(`🏢 法人 ${state.books.corp.year}年目の損益（決算 ${state.corpFiscalMonth}月）`, state.books.corp, true) : '';
+  const carryLossHtml = carryLossCard('個人', state.books.personal, L.PERSONAL_CARRY_LOSS_YEARS)
+    + (state.isIncorporated ? carryLossCard('法人', state.books.corp, L.CORP_CARRY_LOSS_YEARS) : '');
 
-    // (c) 納税の予定。合計が手元現金を超えていれば警告する。
-    const schedule = [...(state.taxSchedule || [])].sort((a, b) => a.month - b.month);
-    const scheduleTotal = schedule.reduce((t, x) => t + x.amount, 0);
-    const scheduleHtml = schedule.length
-      ? `<table class="w-full text-xs">
-          <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1">名目</th><th class="pb-1 text-right">金額</th><th class="pb-1"></th></tr></thead>
-          <tbody>${schedule.map(x => {
-            const left = x.month - state.month;
-            // v17: 予定納税・中間納付の払い過ぎは還付（マイナス金額）になる。そのまま「-¥xxx」と
-            // 出すと減額のように見えて紛らわしいので、「還付 +¥xxx」と現金が増える表記にする。
-            const amountHtml = x.amount < 0
-              ? `<span class="text-emerald-700 font-bold">還付 +${L.yen(-x.amount)}</span>`
-              : L.yen(x.amount);
-            return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(x.month)}</td><td>${x.label}</td><td class="text-right">${amountHtml}</td><td class="text-right text-slate-500 text-[10.5px] pl-1">${left <= 0 ? '今月' : `あと${left}ヶ月`}</td></tr>`;
-          }).join('')}</tbody>
-          <tfoot><tr class="border-t-2 font-bold"><td colspan="2" class="py-1">合計</td><td colspan="2" class="text-right py-1">${L.yen(scheduleTotal)}</td></tr></tfoot>
-        </table>
-        ${scheduleTotal > state.cash ? '<div class="text-red-600 text-[11px] font-bold mt-2">⚠️ 納税予定の合計が手元現金を超えています</div>' : ''}`
-      : '<div class="text-slate-500 text-xs">まだ納税予定はありません（12月に暦年を締めると確定します）</div>';
+  // (c) 納税の予定。合計が手元現金を超えていれば警告する。
+  const schedule = [...(state.taxSchedule || [])].sort((a, b) => a.month - b.month);
+  const scheduleTotal = schedule.reduce((t, x) => t + x.amount, 0);
+  const scheduleHtml = schedule.length
+    ? `<table class="w-full text-xs">
+        <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1">名目</th><th class="pb-1 text-right">金額</th><th class="pb-1"></th></tr></thead>
+        <tbody>${schedule.map(x => {
+          const left = x.month - state.month;
+          // v17: 予定納税・中間納付の払い過ぎは還付（マイナス金額）になる。そのまま「-¥xxx」と
+          // 出すと減額のように見えて紛らわしいので、「還付 +¥xxx」と現金が増える表記にする。
+          const amountHtml = x.amount < 0
+            ? `<span class="text-emerald-700 font-bold">還付 +${L.yen(-x.amount)}</span>`
+            : L.yen(x.amount);
+          return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(x.month)}</td><td>${x.label}</td><td class="text-right">${amountHtml}</td><td class="text-right text-slate-500 text-[10.5px] pl-1">${left <= 0 ? '今月' : `あと${left}ヶ月`}</td></tr>`;
+        }).join('')}</tbody>
+        <tfoot><tr class="border-t-2 font-bold"><td colspan="2" class="py-1">合計</td><td colspan="2" class="text-right py-1">${L.yen(scheduleTotal)}</td></tr></tfoot>
+      </table>
+      ${scheduleTotal > state.cash ? '<div class="text-red-600 text-[11px] font-bold mt-2">⚠️ 納税予定の合計が手元現金を超えています</div>' : ''}`
+    : '<div class="text-slate-500 text-xs">まだ納税予定はありません（12月に暦年を締めると確定します）</div>';
 
-    // (d) 経費の内訳。「元金返済は経費にならない」がデッドクロスの正体なので必ず明記する。
-    const capexRemain = state.properties.reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount * c.monthsLeft, 0), 0);
-    const capexMonthly = state.properties.reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount, 0), 0);
-    const expenseDetailHtml = `<div class="mt-1 text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
-      <div>運営費（管理費・修繕積立・管理会社への手数料）</div>
-      <div>固定資産税</div>
-      <div>支払利息</div>
-      <div>減価償却費</div>
-      <div>原状回復・日常メンテ・広告費・突発修繕</div>
-      <div>資本的支出の償却</div>
-      <div class="font-bold text-red-600 pt-1.5 mt-1 border-t">※ 元金返済は経費になりません（利益が出ているのに現金が減っていく「デッドクロス」の正体はこれです）</div>
-      ${capexRemain > 0 ? `<div class="pt-1.5 mt-1 border-t">資産計上した工事の未償却残 ${L.yen(capexRemain)}（毎月 ${L.yen(capexMonthly)} ずつ経費になります）</div>` : ''}
-    </div>`;
+  // (d) 経費の内訳。「元金返済は経費にならない」がデッドクロスの正体なので必ず明記する。
+  const capexRemain = state.properties.reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount * c.monthsLeft, 0), 0);
+  const capexMonthly = state.properties.reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount, 0), 0);
+  const expenseDetailHtml = `<div class="mt-1 text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
+    <div>運営費（管理費・修繕積立・管理会社への手数料）</div>
+    <div>固定資産税</div>
+    <div>支払利息</div>
+    <div>減価償却費</div>
+    <div>原状回復・日常メンテ・広告費・突発修繕</div>
+    <div>資本的支出の償却</div>
+    <div class="font-bold text-red-600 pt-1.5 mt-1 border-t">※ 元金返済は経費になりません（利益が出ているのに現金が減っていく「デッドクロス」の正体はこれです）</div>
+    ${capexRemain > 0 ? `<div class="pt-1.5 mt-1 border-t">資産計上した工事の未償却残 ${L.yen(capexRemain)}（毎月 ${L.yen(capexMonthly)} ずつ経費になります）</div>` : ''}
+  </div>`;
 
-    // (e) 消費税の課税事業者判定。「大きく売った2年後に課税事業者になる」時間差が要点なので、
-    // 基準期間（2年前）の課税売上高と合わせて出す。
-    const baseYear = L.calYearOf(state.month) - 2;
-    const baseSales = state.taxableSalesByYear?.[baseYear] ?? 0;
-    const isPayer = L.isConsumptionTaxPayer(state);
-    const consumptionTaxLine = `<div class="border rounded-lg p-3 mb-3 text-xs ${isPayer ? 'bg-amber-50' : ''}">
-      <div class="font-bold text-sm mb-1">🧾 消費税</div>
-      ${isPayer
-        ? `<div>あなたは<b>課税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}）。今後の建物売却で消費税を預かり、後日納付します。</div>`
-        : `<div class="text-slate-600">あなたは<b>免税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}／${L.yen(L.CONSUMPTION_TAX_THRESHOLD)}超で2年後から課税事業者）。</div>`}
-    </div>`;
+  // (e) 消費税の課税事業者判定。「大きく売った2年後に課税事業者になる」時間差が要点なので、
+  // 基準期間（2年前）の課税売上高と合わせて出す。
+  const baseYear = L.calYearOf(state.month) - 2;
+  const baseSales = state.taxableSalesByYear?.[baseYear] ?? 0;
+  const isPayer = L.isConsumptionTaxPayer(state);
+  const consumptionTaxLine = `<div class="border rounded-lg p-3 mb-3 text-xs ${isPayer ? 'bg-amber-50' : ''}">
+    <div class="font-bold text-sm mb-1">🧾 消費税</div>
+    ${isPayer
+      ? `<div>あなたは<b>課税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}）。今後の建物売却で消費税を預かり、後日納付します。</div>`
+      : `<div class="text-slate-600">あなたは<b>免税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}／${L.yen(L.CONSUMPTION_TAX_THRESHOLD)}超で2年後から課税事業者）。</div>`}
+  </div>`;
 
-    body.innerHTML = `
-      ${personalCard}
-      ${corpCard}
-      ${carryLossHtml}
-      ${consumptionTaxLine}
-      <div class="border rounded-lg p-3 mb-3">
-        <div class="font-bold text-sm mb-2">📅 納税の予定</div>
-        ${scheduleHtml}
+  return `
+    ${personalCard}
+    ${corpCard}
+    ${carryLossHtml}
+    ${consumptionTaxLine}
+    <div class="border rounded-lg p-3 mb-3">
+      <div class="font-bold text-sm mb-2">📅 納税の予定</div>
+      ${scheduleHtml}
+    </div>
+    <div>${collapseHeader('books-toggle-expense', uiState.expenseOpen, '💰 今年の経費の内訳', '')}</div>
+    ${uiState.expenseOpen ? `<div class="mt-1">${expenseDetailHtml}</div>` : ''}
+  `;
+}
+
+// v18: 「💰 お金」ハブの資産タブ。旧 openKpiModal('cash')（資産スナップショット）の中身をそのまま移設。
+// ヘッダーから外した🎂年齢は bsElapsedRow が経過年数と一緒に出すので、ここに自然に集約される。
+function assetsTabHtml(state) {
+  // 売却した物件の記録への入口。法人化ブロックより上に置き、資産の全体像を見た流れで
+  // 「これまで売った分」も振り返れるようにする。
+  const soldRecs = state.soldRecords || [];
+  const soldSum = L.soldSummary(state);
+  const soldBlock = soldRecs.length
+    ? `<button id="mh-sold" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-3 flex items-center justify-between px-3">
+        <span>📜 売却した物件の記録（${soldRecs.length}件）</span>
+        <span class="${soldSum.totalPl >= 0 ? 'text-emerald-700' : 'text-red-600'}">通算 ${signedYen(soldSum.totalPl)} ›</span>
+      </button>`
+    : `<div class="text-[11px] text-slate-500 mt-3">まだ売却した物件はありません</div>`;
+  // 保有件数／総戸数。件数だけだと規模感が薄く、戸数まで見えて初めて実感が出る。
+  const unitTotal = state.properties.reduce((t, p) => t + p.units.length, 0);
+  return `${bsElapsedRow('light')}
+  <div class="text-[11px] text-slate-500 border-b pb-1 mb-2">
+    保有 <b>${state.properties.length}件</b>／総戸数 <b>${unitTotal}戸</b></div>
+  <table class="w-full text-sm">
+    <tr><td>手元現金</td><td class="text-right font-bold">${L.yen(state.cash)}</td></tr>
+    <tr class="border-t"><td>総資産（現金＋物件時価）</td><td class="text-right">${L.yen(L.totalAssetsV2(state))}</td></tr>
+    <tr><td>総負債（残債）</td><td class="text-right text-red-600">-${L.yen(L.totalDebt(state))}</td></tr>
+    <tr class="border-t font-bold"><td>${term('net_worth', '純資産')}</td><td class="text-right text-emerald">${L.yen(L.netWorth(state))}</td></tr>
+    <tr class="border-t"><td>${term('credit_score', '信用度')}</td><td class="text-right">${state.creditScore}</td></tr>
+  </table>
+  <button id="mh-props" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-3">🏠 保有物件一覧（${state.properties.length}件）</button>
+  ${soldBlock}
+  ${!state.isIncorporated ? `<div class="mt-4 pt-4 border-t">
+    <h3 class="font-bold text-sm mb-1">🏢 法人化</h3>
+    <p class="text-[11px] text-slate-500 mb-2">設立費用 ${L.yen(L.CONFIG.corporateSetupCost)}。以降、NOIへの課税が法人税率（${L.CONFIG.corporateTaxRate * 100}%）に固定されます。</p>
+    ${incorporationPitch()}
+    <button id="btn-incorporate" class="w-full bg-navy text-white rounded py-2 text-sm ${state.cash < L.CONFIG.corporateSetupCost ? 'opacity-40' : ''}" ${state.cash < L.CONFIG.corporateSetupCost ? 'disabled' : ''}>法人を設立する</button>
+  </div>` : '<div class="mt-4 pt-4 border-t text-sm font-bold text-navy">🏢 法人化済み</div>'}`;
+}
+
+// v18: 「💰 お金」ハブの借入タブ。全物件のローン（物件融資・リフォームローン）を1つの表にする。
+// 個々の完済スケジュールは物件詳細（openLoanSchedule）にあるので、ここでは1行1ローンの要約だけ出す。
+function loansTabHtml(state) {
+  const loans = L.allLoansOf(state);
+  if (!loans.length) return '<div class="text-slate-500 text-sm">借入はありません</div>';
+  const totalBalance = loans.reduce((t, x) => t + x.summary.balance, 0);
+  const totalMonthlyPay = loans.reduce((t, x) => t + x.summary.monthlyPay, 0);
+  // 今年の支払利息は、各ローンの返済予定表から「今年」（stateと同じ暦年）かつ返済済みの回だけ合計する
+  // （L.loanSummary自体には年ごとの実績値が無いため、既存のamortizationScheduleから導く）。
+  const thisYear = L.calYearOf(state.month);
+  const totalInterestThisYear = loans.reduce((t, x) => {
+    const rows = L.amortizationSchedule(x.loan, x.summary.startMonth);
+    return t + rows.filter(r => r.paid && L.calYearOf(r.month) === thisYear).reduce((s, r) => s + r.interest, 0);
+  }, 0);
+  const rows = loans.map(x => {
+    const { summary: sm } = x;
+    return `<button class="mh-loan-row w-full border rounded-lg p-2.5 text-left text-xs hover:bg-slate-50" data-id="${x.propertyId}">
+      <div class="font-bold text-sm">${x.name}（${sm.bankLabel}）</div>
+      <div class="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-slate-600">
+        <span>残債 <b class="text-red-600">${L.yen(sm.balance)}</b></span>
+        <span>金利 <b>${(sm.rate * 100).toFixed(2)}%</b></span>
+        <span>月々 <b>${L.yen(sm.monthlyPay)}</b></span>
+        <span>完済 <b>${L.fmtYM(sm.payoffMonth)}</b></span>
       </div>
-      <div>${collapseHeader('books-toggle-expense', expenseOpen, '💰 今年の経費の内訳', '')}</div>
-      ${expenseOpen ? `<div class="mt-1">${expenseDetailHtml}</div>` : ''}
-    `;
-    body.querySelector('.books-toggle-expense')?.addEventListener('click', () => { expenseOpen = !expenseOpen; draw(); });
-    body.scrollTop = scroll;
-  };
+    </button>`;
+  }).join('');
+  return `<div class="border rounded-lg p-3 mb-3">
+    <div class="grid grid-cols-3 gap-2 text-center">
+      <div><div class="text-[10.5px] text-slate-500">総借入残高</div><div class="font-bold text-sm text-red-600">${L.yen(totalBalance)}</div></div>
+      <div><div class="text-[10.5px] text-slate-500">毎月の返済額</div><div class="font-bold text-sm">${L.yen(totalMonthlyPay)}</div></div>
+      <div><div class="text-[10.5px] text-slate-500">今年の支払利息</div><div class="font-bold text-sm">${L.yen(totalInterestThisYear)}</div></div>
+    </div>
+  </div>
+  <div class="space-y-1.5">${rows}</div>`;
+}
 
+// v18: ヘッダー・PC左パネル/スマホ資産モーダル・帳簿納税画面に散っていた全体のお金の数字を
+// 1つのハブへ統合する。物件単位の数字（物件詳細の収支タブ・返済予定表）はそのまま物件側に残す。
+// 既存の openBooksModal と同じ型（オーバーレイ＋ヘッダー固定＋本文スクロール）に、
+// openLoanSchedule と同じタブUIを組み合わせる。
+function openMoneyHub(initialTab = 'month') {
+  let activeTab = initialTab;
+  navGo({ key: 'money', open: () => openMoneyHub(activeTab) });   // v18: 履歴に登録
+  const overlay = el(`<div id="lm-money-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header" style="align-items:safe center;">
+    <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+      <div class="p-3 border-b shrink-0">
+        <div class="flex justify-between items-center gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <button id="money-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
+            <h2 class="font-bold text-base truncate">💰 お金</h2>
+          </div>
+          <button id="money-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
+        </div>
+      </div>
+      <div id="money-tabs" class="flex gap-1 px-3 pt-2 bg-slate-100 text-xs shrink-0 overflow-x-auto"></div>
+      <div id="money-body" class="p-4 overflow-y-auto min-h-0 flex-1"></div>
+    </div>
+  </div>`);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const tabs = [
+    { key: 'month', label: '💴 今月' },
+    { key: 'assets', label: '📊 資産' },
+    { key: 'tax', label: '🧾 税金' },
+    { key: 'loans', label: '🏦 借入' },
+  ];
+  const cashBoxState = { detailOpen: false, trendOpen: false, itemOpen: null };   // 「今月」タブの折りたたみ状態
+  const taxState = { expenseOpen: false };   // 「税金」タブの経費内訳の折りたたみ
+  const draw = () => {
+    const tabsBox = overlay.querySelector('#money-tabs');
+    tabsBox.innerHTML = tabs.map(t => `<button class="mh-tab shrink-0 px-3 py-1.5 rounded-t-lg font-bold transition-colors ${t.key === activeTab ? 'bg-white text-navy shadow-sm' : 'text-slate-500 hover:bg-slate-200'}" data-key="${t.key}">${t.label}</button>`).join('');
+    const body = overlay.querySelector('#money-body');
+    const scroll = body.scrollTop;
+    if (activeTab === 'month') {
+      body.innerHTML = monthlyCashBox(state, cashBoxState);
+      body.querySelector('.cashbox-toggle-detail')?.addEventListener('click', () => { cashBoxState.detailOpen = !cashBoxState.detailOpen; draw(); });
+      body.querySelector('.cashbox-toggle-trend')?.addEventListener('click', () => { cashBoxState.trendOpen = !cashBoxState.trendOpen; draw(); });
+      body.querySelectorAll('.cashbox-cat-toggle').forEach(btn => btn.addEventListener('click', () => {
+        cashBoxState.itemOpen = cashBoxState.itemOpen === btn.dataset.cat ? null : btn.dataset.cat;
+        draw();
+      }));
+    } else if (activeTab === 'assets') {
+      body.innerHTML = assetsTabHtml(state);
+      body.querySelector('#mh-props')?.addEventListener('click', () => { close(); openKpiModal('props', true); });
+      body.querySelector('#mh-sold')?.addEventListener('click', () => { close(); openSoldRecordsModal(() => openMoneyHub('assets')); });
+      if (!state.isIncorporated && state.cash >= L.CONFIG.corporateSetupCost) {
+        body.querySelector('#btn-incorporate')?.addEventListener('click', () => {
+          const r = L.incorporate(state);
+          state = r.state;
+          pushLog('🏢 法人を設立した（法人名義の購入・法人への移転が可能に）');
+          save(); render(); close();
+          playIncorporationCelebration();
+        });
+      }
+    } else if (activeTab === 'tax') {
+      body.innerHTML = taxTabHtml(state, taxState);
+      body.querySelector('.books-toggle-expense')?.addEventListener('click', () => { taxState.expenseOpen = !taxState.expenseOpen; draw(); });
+    } else if (activeTab === 'loans') {
+      body.innerHTML = loansTabHtml(state);
+      body.querySelectorAll('.mh-loan-row').forEach(b => b.addEventListener('click', () => {
+        const propId = parsePropId(b.dataset.id);
+        close();
+        openLoanSchedule(propId, () => openMoneyHub('loans'));
+      }));
+    }
+    body.scrollTop = scroll;
+    tabsBox.querySelectorAll('.mh-tab').forEach(b => b.addEventListener('click', () => {
+      if (b.dataset.key === activeTab) return;
+      activeTab = b.dataset.key;
+      navGo({ key: 'money', open: () => openMoneyHub(activeTab) });   // タブを切り替えても戻り先は「お金」ハブのまま
+      draw();
+    }));
+  };
   draw();
-  overlay.querySelector('#books-close').addEventListener('click', close);
-  overlay.querySelector('#books-back').addEventListener('click', () => {
+  overlay.querySelector('#money-close').addEventListener('click', close);
+  overlay.querySelector('#money-back').addEventListener('click', () => {
     if (navStack.length > 1) navBack(); else close();
   });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
@@ -9745,6 +10065,79 @@ function collapseHeader(cls, open, label, summaryHtml) {
   </button>`;
 }
 
+// v18: 今月の収支ブロック。既存の方針（詳細は格納・パッと見は少なく）を踏襲し、
+// 常時見えるのは合計だけ・内訳と推移は既定で閉じた折りたたみにする。
+// 「💰 お金」ハブの「今月」タブ本体としてそのまま使う独立した関数。
+// uiStateは呼び出し側（openMoneyHub）が保持する { detailOpen, trendOpen, itemOpen }。
+// クリックはHTMLを返すだけのこの関数では処理せず、呼び出し側がdata-*属性を見て
+// uiStateをトグルしてから再描画する（expenseOpenと同じ流儀）。
+function monthlyCashBox(state, uiState) {
+  const summary = L.monthlyCashSummary(state, state.month);
+  const beforeTax = L.monthlyCF(state);
+  const tax = L.afterTaxCF(state);
+  const netTone = summary.net >= 0 ? 'text-emerald-700' : 'text-red-600';
+
+  const catRowHtml = (g) => {
+    const open = uiState.itemOpen === g.cat;
+    const tone = g.amount >= 0 ? 'text-emerald-700' : 'text-red-600';
+    const itemsHtml = g.items.map(it => {
+      const p = it.propertyId != null ? state.properties.find(x => x.id === it.propertyId) : null;
+      const nm = p ? (p.name || p.label) : null;
+      return `<div class="flex justify-between text-[11px] text-slate-600 py-0.5">
+        <span>${nm ? `${nm} ${it.label}` : it.label}</span>
+        <span class="tabular-nums">${signedYen(it.amount)}</span>
+      </div>`;
+    }).join('');
+    return `<div class="py-1">
+      <button class="cashbox-cat-toggle w-full flex items-center justify-between gap-2" data-cat="${g.cat}">
+        <span class="flex items-center gap-1 text-xs"><span class="inline-block transition-transform ${open ? 'rotate-90' : ''}">▶</span>${g.label}</span>
+        <span class="tabular-nums ${tone} font-bold text-xs">${signedYen(g.amount)}</span>
+      </button>
+      ${open ? `<div class="pl-4 mt-0.5">${itemsHtml}</div>` : ''}
+    </div>`;
+  };
+  const incomeCats = summary.byCat.filter(g => g.amount > 0);
+  const expenseCats = summary.byCat.filter(g => g.amount <= 0);
+  const detailHtml = `<div class="mt-1 text-xs bg-slate-50 rounded-lg p-2.5 divide-y divide-slate-200">
+    ${incomeCats.map(catRowHtml).join('') || '<div class="py-1 text-slate-400 text-[11px]">今月の収入はまだありません</div>'}
+    ${expenseCats.map(catRowHtml).join('') || '<div class="py-1 text-slate-400 text-[11px]">今月の支出はまだありません</div>'}
+  </div>`;
+
+  const trendRows = L.recentCashSummaries(state, 12).map(row => {
+    const tone = row.net >= 0 ? 'text-emerald-700' : 'text-red-600';
+    return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(row.month)}</td>
+      <td class="text-right">${L.yen(row.income)}</td><td class="text-right">${L.yen(row.expense)}</td>
+      <td class="text-right ${tone} font-bold">${signedYen(row.net)}</td></tr>`;
+  }).join('');
+  const trendHtml = `<table class="w-full text-[11px] tabular-nums mt-1">
+    <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1 text-right">収入</th><th class="pb-1 text-right">支出</th><th class="pb-1 text-right">収支</th></tr></thead>
+    <tbody>${trendRows}</tbody>
+  </table>`;
+
+  // v18: 月CF・税引後CF・今月の収支の3つは似た数字で混同しやすいので、内訳か推移を
+  // 開いたときだけ違いを1行で説明する（常時は出さず、パッと見の情報量を増やさない）。
+  const explainLine = (uiState.detailOpen || uiState.trendOpen)
+    ? `<div class="text-[10.5px] text-slate-500 mt-1.5 pt-1.5 border-t">
+        月CF＝物件が毎月生む力（目標の判定はこちら）／税引後CF＝税まで引いた見込み／今月の収支＝実際に動いた現金
+      </div>`
+    : '';
+
+  return `<div class="border rounded-lg p-3 mb-3">
+    <div class="flex items-center justify-between gap-2">
+      <div class="font-bold text-sm">💴 今月の収支</div>
+      <div class="font-black text-lg tabular-nums ${netTone}">${signedYen(summary.net)}</div>
+    </div>
+    <div class="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+      月CF ${L.yen(beforeTax)}／税引後CF ${L.yen(Math.round(tax.afterTax))}${tax.estimated ? '（見込み）' : ''}
+    </div>
+    <div class="mt-2">${collapseHeader('cashbox-toggle-detail', uiState.detailOpen, '内訳を見る', '')}</div>
+    ${uiState.detailOpen ? detailHtml : ''}
+    <div class="mt-2">${collapseHeader('cashbox-toggle-trend', uiState.trendOpen, '過去12ヶ月の推移', '')}</div>
+    ${uiState.trendOpen ? trendHtml : ''}
+    ${explainLine}
+  </div>`;
+}
+
 function overviewTab(p, from, opts = {}) {
   if (from === 'owned') {
     const lastCf = p.history.at(-1)?.cf;
@@ -9989,6 +10382,7 @@ function monthlyPlTable(p) {
     ${td(L.yen(h.rentIn), 'in', true)}
     ${td(h.vacancyLoss ? `-${L.yen(h.vacancyLoss)}` : '—', 'loss', true)}
     ${td(`-${L.yen(h.opex)}`, 'cost', true)}
+    ${td(`-${L.yen(h.propTaxM ?? 0)}`, 'cost', false)}
     ${td(`-${L.yen(h.interest)}`, 'cost', false)}
     ${td(`-${L.yen(h.principal)}`, 'cost', false)}
     ${td(h.tax ? `-${L.yen(h.tax)}` : '—', 'cost', false)}
@@ -9999,7 +10393,7 @@ function monthlyPlTable(p) {
     <table class="w-full text-[11px] whitespace-nowrap tabular-nums border-collapse">
       <thead class="sticky top-0"><tr>
         ${th('月', 'head', false)}${th('家賃', 'in', true)}${th('空室損', 'loss', true)}
-        ${th('運営費', 'cost', true)}${th('利息', 'cost', false)}${th('元金', 'cost', false)}${th('税(試算)', 'cost', false)}
+        ${th('運営費', 'cost', true)}${th('固都税', 'cost', false)}${th('利息', 'cost', false)}${th('元金', 'cost', false)}${th('税(試算)', 'cost', false)}
         ${th('CF', 'result', true)}${th('残高', 'bal', true)}
       </tr></thead>
       <tbody>${rows}</tbody>
@@ -13443,6 +13837,9 @@ document.getElementById('btn-result')?.addEventListener('click', () => openResul
 document.getElementById('btn-reset').addEventListener('click', () => {
   if (confirm('データをリセットしますか？')) { localStorage.removeItem(SAVE_KEY); location.reload(); }
 });
+
+// v18: ヘッダーの💰現金をタップすると「💰 お金」ハブが開く（既定は「今月」タブ）。
+document.getElementById('hud-clock-cash-btn')?.addEventListener('click', () => openMoneyHub('month'));
 
 const btnMute = document.getElementById('btn-mute');
 if (btnMute) {
