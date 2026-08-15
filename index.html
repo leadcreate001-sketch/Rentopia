@@ -289,8 +289,8 @@ export const CONFIG = {
   baseRate: 0.03,          // 融資基準金利
   rateFloor: 0.009,        // 適用金利の下限
   deadCrossTaxRate: 0.40,  // 償却切れ後のNOI課税率
-  capGainTaxShort: 0.39,   // 譲渡税（保有5年以内）
-  capGainTaxLong: 0.20,    // 譲渡税（5年超）
+  capGainTaxShort: 0.3963, // 譲渡税（保有5年以内）: 所得税30%+復興特別0.63%+住民税9%
+  capGainTaxLong: 0.20315, // 譲渡税（5年超）: 所得税15%+復興特別0.315%+住民税5%
   defaultTermYears: 25,    // 融資期間デフォルト
   creditEmployee: 60,      // 信用度 初期（サラリーマン）
   creditSelf: 10,          // 信用度 初期（自営業）
@@ -305,8 +305,13 @@ export const CONFIG = {
   ageLoanPenaltyStart: 60, // この年齢からLTVが徐々に縮む
   reformLoanYears: 10,     // リフォームローン期間
   corporateTaxRate: 0.30,  // 法人税率（簡易）
-  corporateSetupCost: 2_000_000, // 法人設立費用
+  corporateSetupCost: 300_000, // 法人設立費用（株式会社の設立実費：登録免許税15万+定款認証5万+定款印紙4万+実費）
   corpTransferCostRate: 0.05,    // 個人→法人移転時の取得コスト（不動産取得税・登記費用相当）
+  // v17: 給与所得との損益通算のための給与年収（属性別の固定値）。月次では現金に加算しない
+  // （v3で「月次給与の自動加算は廃止」と決めた設計はそのまま）。年末調整・確定申告の税額
+  // 計算にだけ使い、差額が翌年3月に現金として動く。
+  salaryEmployee: 5_000_000,   // サラリーマン
+  salarySelf: 3_500_000,       // 自営業
 };
 
 export function yen(n) {
@@ -336,8 +341,10 @@ export function monthsUntilCalMonth(month, targetCalMonth) {
 function ensureBooks(s) {
   if (!s.books) {
     s.books = {
-      personal: { year: calYearOf(s.month), income: 0, expense: 0, capGainTax: 0, carryLoss: [] },
-      corp: { year: calYearOf(s.month), income: 0, expense: 0, carryLoss: [] },
+      // v17: prepaidIncomeTax/prepaidCorpTaxは予定納税・中間納付で前払いした額を積んでおき、
+      // 次の確定申告／決算で「税額−前払い額」を納付予定にするための積算値。
+      personal: { year: calYearOf(s.month), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0 },
+      corp: { year: calYearOf(s.month), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
     };
   }
   return s.books;
@@ -412,9 +419,9 @@ export function canFinance(creditScore, dscrValue) {
 }
 // v8.5: 諸費用は項目ごとの実額（purchaseCosts）で出す。property を渡さない古い呼び出しでも
 // 建物割合0.5の標準的な物件として計算できるようにしてある。
-export function requiredCash({ price, ltv, useLoan, property = null, month = null }) {
+export function requiredCash({ price, ltv, useLoan, property = null, month = null, bankKey = null }) {
   const loanAmount = useLoan ? Math.round(price * ltv) : 0;
-  const closing = closingCostOf(property, price, loanAmount, month);
+  const closing = closingCostOf(property, price, loanAmount, month, bankKey);
   return useLoan ? price * (1 - ltv) + closing : price + closing;
 }
 
@@ -482,11 +489,15 @@ export function structuralDecay(property) {
 export const DIFFICULTY = {
   beginner: { label: '初心者向け', seedMult: 1.5, creditBonus: 10, rateAdj: -0.003, decayMult: 0.7,
               eventMult: 0.6, fillBonus: 0.10, rewind: 1, quizForced: true,
-              diyEasy: true, goalScale: 0.5, yearsBonus: 5, quizSeconds: 54 },
+              diyEasy: true, goalScale: 0.5, yearsBonus: 5, quizSeconds: 54,
+              // v17: 予定納税・法人税の中間納付・個人事業税は納税の山を年3〜5回に増やすため、
+              // 初心者向けでは積まない（固都税4期・住民税4期・翌年3月の所得税・法人決算だけになる）。
+              skipPrepaidTax: true },
   normal:   { label: '中上級者向け', seedMult: 1.0, creditBonus: 0, rateAdj: 0, decayMult: 1.0,
               eventMult: 1.0, fillBonus: 0, rewind: 0, quizForced: false,
               // v8.4: 用語を読んで考える時間としては短すぎたので3倍にした（12→36 / 18→54）
-              diyEasy: false, goalScale: 1.0, yearsBonus: 0, quizSeconds: 36 },
+              diyEasy: false, goalScale: 1.0, yearsBonus: 0, quizSeconds: 36,
+              skipPrepaidTax: false },
 };
 // state を持たない純関数（generateProperty 等）からも呼ぶので、undefined でも落ちないようにする。
 export function difficultyOf(state) { return DIFFICULTY[state?.difficulty] || DIFFICULTY.normal; }
@@ -753,12 +764,10 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
     mgmtFeeM: isKubun ? Math.round(lr(10000, 20000)) : Math.round(rentTotalM * 0.03),
     repairReserveM: isKubun ? Math.round(lr(5000, 15000)) : Math.round(rentTotalM * 0.02),
     pmFeeRate: 0.05,
-    // v8.20: 固都税は評価額（売買価格ではない）が課税標準。標準税率1.4%（固定資産税）を適用。
-    // v8.21: 一律3万円の下限は実務に無い数字だったため撤廃。実務の下限は「免税点」
-    // （土地30万円未満・家屋20万円未満の評価額はその区分が非課税）であって定額の最低税額
-    // ではない。評価額自体が構造・築年・土地単価の下限で既に極端に小さくならない設計のため、
-    // 下限なしでも不自然に0円へ張り付くことはない。
-    propTaxA: Math.round(assessedVal * PROPERTY_TAX_RATE),
+    // v8.20: 固都税は評価額（売買価格ではない）が課税標準。
+    // v17: propertyTaxAnnual(property) は property.assessedLand/assessedBldg を読むため、
+    // オブジェクトが組み上がった後（下のsellerUrgency設定の直前）で計算して上書きする。
+    propTaxA: 0,   // 下で propertyTaxAnnual(p) の結果に上書きする（暫定値）
     // v6: 🏚躯体（大規模修繕でのみ回復）と 🧹手入れ（日常メンテで100%まで回復）の2ゲージ
     repairState: Math.round(g.wake ? lr(0, 40) : lr(40, 90)),
     careState: Math.round(g.wake ? lr(20, 60) : lr(70, 100)),
@@ -787,6 +796,14 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
     },
     repairJobs: [],   // v15: 修繕工事はゲージごとに複数本を同時進行できる（旧: 単数のrepairJob）
   };
+  p.propTaxA = propertyTaxAnnual(p).total;
+  // v17: 売主区分。建物価格の消費税課税・非課税を分ける。訳あり物件（junkFlags持ち）は
+  // 相続・売り急ぎ等の個人所有がほぼ実態なので必ず個人。一棟もの（戸建て・区分以外＝
+  // apart/tekkotsu/rc）は宅建業者・投資法人所有の割合が高いので25%、戸建て・区分は
+  // 個人所有が主体なので5%の確率で法人にする。
+  const isKodateOrKubun = normalKey === 'kodate' || normalKey === 'kubun';
+  p.sellerType = p.junkFlags.length > 0 ? 'individual'
+    : rng() < (isKodateOrKubun ? 0.05 : 0.25) ? 'corp' : 'individual';
   // v3.8: 売主事情。売り急ぎ（相続・資金繰り等）の売主は深い指値にも応じやすい（レアな掘り出し物・訳ありはやや高め）
   // v12: opts.forceUrgency は抽選をスキップして必ず売り急ぎにする（レアな掘り出し物用）
   const urgent = opts.forceUrgency || rng() < (g.wake ? 0.15 : 0.07);
@@ -895,7 +912,7 @@ export function makeOffer(state, propertyId, cutRate, rng = Math.random) {
   return { state: s, accepted: false, price: 0, penalized, counterProposal };
 }
 
-export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price, owner = 'personal', reformPlan = null }) {
+export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price, owner = 'personal', reformPlan = null, rng = Math.random }) {
   const s = structuredClone(state);
   const i = s.market.findIndex(x => x.id === propertyId);
   const p = s.market[i];
@@ -907,8 +924,21 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
   // reformPlan省略時はreformCost=0になり、以降の計算は従来どおり。
   const reformCost = (method !== 'cash' && reformPlan) ? purchaseReformTotal(p, reformPlan) : 0;
   const loanAmount = method === 'cash' ? 0 : Math.round(price * (1 - downRatio)) + reformCost;
-  const closing = closingCostOf(p, price, loanAmount, s.month);
+  // v17: 融資事務手数料は銀行ごとの型（定率／定額）なので、実際に選んだ銀行を渡す
+  // （現金購入はbankKeyがあっても loanAmount=0 で loanFee=0 のまま変わらない）。
+  const costs = purchaseCosts(p, price, loanAmount, s.month, method !== 'cash' ? method : null);
+  const closing = costs.total;
   p.acquisitionCost = closing;   // 自己資金回収率の計算に使うので実額を残す
+  // v17: 不動産取得税は決済時には引かず、登記から3〜6ヶ月後（実務どおりランダム）に
+  // s.taxScheduleへ積んで後日引き落とす。帳簿上は取得した年の経費（租税公課）として
+  // 購入月に即計上する（納付月ではなく発生月で計上する発生主義）。
+  if (costs.acquisition > 0) {
+    const delay = ACQ_TAX_DELAY_MIN + Math.floor(rng() * (ACQ_TAX_DELAY_MAX - ACQ_TAX_DELAY_MIN + 1));
+    s.taxSchedule = s.taxSchedule || [];
+    s.taxSchedule.push({ month: s.month + delay, kind: 'acquisition_tax',
+      amount: costs.acquisition, label: '不動産取得税' });
+    bookOf(s, p.owner).expense += costs.acquisition;
+  }
   if (method === 'cash') {
     s.cash -= price + closing;
     p.loan = null;
@@ -1107,23 +1137,47 @@ export const LONG_TERM_MONTHS = 60;   // これを超えて保有すると長期
 export function heldMonthsOf(state, property) {
   return Math.max(0, (state.month ?? 0) - (property.boughtMonth ?? state.month ?? 0));
 }
-export function isLongTermHold(state, property) {
-  return heldMonthsOf(state, property) > LONG_TERM_MONTHS;
+// v17: 短期/長期の判定は「保有月数」ではなく「譲渡した年の1月1日時点で所有期間が5年を超えるか」
+// （実務の譲渡所得税の判定基準）。取得日から譲渡日までの実日数ではないため、たとえば
+// 1年目4月取得・6年目10月譲渡（保有66ヶ月）でも、6年目1月1日時点ではまだ57ヶ月しか経っておらず
+// 短期のまま。長期になるのは所有期間が60ヶ月を超える最初の1月1日（この例では7年目1月）から。
+function heldMonthsAtSaleYearJan1(state, property) {
+  const jan1 = Math.floor((state.month ?? 0) / 12) * 12;
+  return Math.max(0, jan1 - (property.boughtMonth ?? 0));
 }
-// 長期になるまであと何ヶ月か（法人名義・すでに長期なら0）
+export function isLongTermHold(state, property) {
+  return heldMonthsAtSaleYearJan1(state, property) > LONG_TERM_MONTHS;
+}
+// 長期になるまであと何ヶ月か（法人名義・すでに長期なら0）。1月1日基準の判定なので、
+// 単純な残り月数ではなく「所有期間が60ヶ月を超える最初の1月1日」まで通し月で数え上げる。
 export function monthsToLongTerm(state, property) {
   if (property.owner === 'corp' || isLongTermHold(state, property)) return 0;
-  return LONG_TERM_MONTHS + 1 - heldMonthsOf(state, property);
+  const boughtMonth = property.boughtMonth ?? 0;
+  let jan1 = Math.floor((state.month ?? 0) / 12) * 12;
+  while (Math.max(0, jan1 - boughtMonth) <= LONG_TERM_MONTHS) jan1 += 12;
+  return jan1 - (state.month ?? 0);
 }
 // v3.5: 法人名義は保有期間に関係なく法人税率（短期転売の5年ルールは個人のみ）
+// v17: 税率の表示。復興特別所得税を乗せたことで税率が 39.63% / 20.315% と端数を持つように
+// なり、Math.round(rate*100) では「短期40%」「長期20%」と実在しない税率が出て、プレイヤーが
+// 自分で計算した額と請求額が合わなくなる。小数第3位まで出し、末尾の0は落とす
+// （39.63% ／ 20.315% ／ 法人の 30%）。
+export function fmtTaxRate(rate) {
+  return `${Number((rate * 100).toFixed(3))}%`;
+}
+
 export function capGainTaxRate(state, property) {
   if (property.owner === 'corp') return CONFIG.corporateTaxRate;
   return isLongTermHold(state, property) ? CONFIG.capGainTaxLong : CONFIG.capGainTaxShort;
 }
-// 課税対象益は「売却価格 − 簿価」。簿価は減価償却で毎月下がるので、
+// 課税対象益は「売却価格 −（取得費＋譲渡費用）」。取得費＝簿価（購入代金−償却累計）＋購入時諸費用、
+// 譲渡費用＝売却時の仲介手数料・印紙税・抵当権抹消費用（saleCosts）。簿価は減価償却で毎月下がるので、
 // 画面に出ている「購入差額（時価−購入価格）」よりも大きくなるのが普通。
+// v17: 譲渡費用と購入時諸費用（acquisitionCost）を控除していなかったため課税所得が過大だった。
+// net（手取り）は従来どおり price - tax - payoff - costs.total のままなので、譲渡費用をここで
+// 引いても手取り計算では二重控除にならない（tax算出の元になるgainだけが減る）。
 export function capGainOf(property, price) {
-  return Math.max(0, price - bookValueV2(property));
+  return Math.max(0, price - (bookValueV2(property) + (property.acquisitionCost ?? 0)) - saleCosts(property, price).total);
 }
 export function capGainTaxOf(state, property, price) {
   return Math.round(capGainOf(property, price) * capGainTaxRate(state, property));
@@ -1190,6 +1244,14 @@ export function loanPayoffOf(property) {
 // 現地調査等の実費が速算式の報酬を上回りやすいための特例）。このゲームは訳あり物件が
 // 主戦場のため、対象価格帯では特例の法定上限をそのまま適用する。
 export const CONSUMPTION_TAX = 0.10;
+// v17: 消費税の課税事業者判定。住宅の家賃は非課税売上なので賃貸経営だけなら基本は免税事業者だが、
+// 建物の売却は課税取引。その年の課税売上高（建物分）が1,000万円を超えると、2年後（基準期間）
+// から課税事業者になり、以後の建物売却分の消費税を納付する義務が生じる（settleSaleが積む）。
+export const CONSUMPTION_TAX_THRESHOLD = 10_000_000;
+export function isConsumptionTaxPayer(state) {
+  const baseYear = calYearOf(state.month) - 2;
+  return (state.taxableSalesByYear?.[baseYear] ?? 0) > CONSUMPTION_TAX_THRESHOLD;
+}
 export const LOW_PRICE_BROKER_FEE_MAX_PRICE = 8_000_000;   // 特例の対象上限（税抜価格）
 export const LOW_PRICE_BROKER_FEE_CAP = 330_000;            // 特例の報酬上限（30万円＋消費税10%）
 export function brokerFee(price) {
@@ -1226,6 +1288,37 @@ export const REG_TAX_LAND = 0.015;            // 登録免許税（所有権移�
 export const REG_TAX_BLDG = 0.020;            // 登録免許税（所有権移転・建物）
 export const REG_TAX_MORTGAGE = 0.004;        // 登録免許税（抵当権設定・借入額に対して）
 export const ACQUISITION_TAX_RATE = 0.03;     // 不動産取得税（評価額に対して）
+// v17: 不動産取得税は「評価額×3%」まとめ計算だと、宅地の課税標準1/2特例（建物には無い）と
+// 免税点（土地: 課税標準10万円未満、売買家屋: 課税標準12万円未満は非課税）が抜けて過大だった。
+export const ACQ_LAND_TAXBASE_RATE = 0.5;
+export const ACQ_EXEMPT_LAND = 100_000;
+export const ACQ_EXEMPT_BLDG = 120_000;
+// property.assessedValue（または assessedLand）を持つ場合は assessedValueBreakdown で土地・建物を
+// 分けて求め、持たない場合（購入諸費用のテスト用スタブ・移行前の旧セーブ）は従来どおり
+// assessedValueOf(property, price) を bldgRatio で按分する（assessedValueOf自身のフォールバック
+// 判定と揃える。property オブジェクトの有無ではなく assessedValue の有無で分岐する点に注意）。
+export function acquisitionTaxOf(property, price) {
+  let landAssessed, bldgAssessed;
+  if (property?.assessedValue != null || property?.assessedLand != null) {
+    const bd = assessedValueBreakdown(property);
+    landAssessed = bd.land;
+    bldgAssessed = bd.bldg;
+  } else {
+    const assessed = assessedValueOf(property, price);
+    const bldgRatio = property?.bldgRatio ?? 0.5;
+    landAssessed = assessed * (1 - bldgRatio);
+    bldgAssessed = assessed * bldgRatio;
+  }
+  const landBase = landAssessed * ACQ_LAND_TAXBASE_RATE;
+  const bldgBase = bldgAssessed;
+  const land = landBase < ACQ_EXEMPT_LAND ? 0 : Math.round(landBase * ACQUISITION_TAX_RATE);
+  const bldg = bldgBase < ACQ_EXEMPT_BLDG ? 0 : Math.round(bldgBase * ACQUISITION_TAX_RATE);
+  return { land, bldg, total: land + bldg };
+}
+// v17: 不動産取得税は登記から3〜6ヶ月後に納税通知書が届く（実務）。決済直後は現金を使い切れて
+// しまうので、buyPropertyV2はこのレンジでランダムに納付月を決めてs.taxScheduleへ積む。
+export const ACQ_TAX_DELAY_MIN = 3;
+export const ACQ_TAX_DELAY_MAX = 6;
 // v8.9で下限額（司法書士5万円・融資事務手数料3.3万円）を一度撤廃したが、v8.20で復活。
 // 極端に安い訳あり物件では諸費用が価格の何割にもなりうるが、それ自体は実務の実態
 // （評価額が価格と独立になった今は登録免許税・不動産取得税だけでも既に相応の負担になる）。
@@ -1233,9 +1326,16 @@ export const ACQUISITION_TAX_RATE = 0.03;     // 不動産取得税（評価額�
 export function scrivenerFee(price) {
   return Math.round(Math.min(100_000, Math.max(50_000, price * 0.004)) / 1000) * 1000;
 }
-export function loanArrangementFee(loanAmount) {
+// v17: 「上限11万円」は実務と乖離していた（実際のアパートローンは借入額×2.2%の定率型が
+// 主流で上限が無い）。銀行ごとの型（BANKS[bankKey].feeType）に従う——公庫だけ一律1万円の
+// 定額（公庫は融資手数料がほぼ無い実務に合わせる）、それ以外は定率2.2%（上限なし）。
+// bankKey省略時（銀行を特定しない従来の呼び出し）は定率で計算する。
+export const LOAN_FEE_RATE = 0.022;
+export const LOAN_FEE_FLAT = 10_000;
+export function loanArrangementFee(loanAmount, bankKey = null) {
   if (loanAmount <= 0) return 0;
-  return Math.round(Math.min(110_000, Math.max(33_000, loanAmount * 0.022)) / 1000) * 1000;
+  if (BANKS[bankKey]?.feeType === 'flat') return LOAN_FEE_FLAT;
+  return Math.round(loanAmount * LOAN_FEE_RATE);
 }
 
 // v8.9: 固定資産税評価額（公課証明書相当）。以前は「売買価格の6割」という一律推定だったため、
@@ -1314,6 +1414,26 @@ export function assessedValueBreakdown(property) {
   return { totalSqm, landSqm, remain, bldgUnitPrice, landUnitPrice, land, bldg, total: land + bldg };
 }
 
+// v17: 固定資産税（1.4%）＋都市計画税（0.3%）を、住宅用地の特例（土地のみ・建物には無い）を
+// 反映して計算する。小規模住宅用地（住戸1戸あたり200㎡まで）は固定資産税の課税標準1/6・
+// 都市計画税1/3、それを超える一般住宅用地は固定資産税1/3・都市計画税2/3。
+// 敷地面積・戸数が混在する（例: 5戸×200㎡=1000㎡を敷地が超える）場合は面積按分で混ぜる。
+export const CITY_PLANNING_TAX_RATE = 0.003;
+export const SMALL_RESIDENTIAL_LAND_SQM = 200;
+export function propertyTaxAnnual(property) {
+  const bd = assessedValueBreakdown(property);
+  const units = (property.units || []).length || 1;
+  const landSqm = bd.landSqm;
+  const smallSqm = Math.min(landSqm, units * SMALL_RESIDENTIAL_LAND_SQM);
+  const smallRatio = landSqm > 0 ? smallSqm / landSqm : 1;
+  const generalRatio = 1 - smallRatio;
+  const landFixed = Math.round(bd.land * (smallRatio / 6 + generalRatio / 3) * PROPERTY_TAX_RATE);
+  const landCity = Math.round(bd.land * (smallRatio / 3 + generalRatio * 2 / 3) * CITY_PLANNING_TAX_RATE);
+  const bldgFixed = Math.round(bd.bldg * PROPERTY_TAX_RATE);
+  const bldgCity = Math.round(bd.bldg * CITY_PLANNING_TAX_RATE);
+  return { landFixed, landCity, bldgFixed, bldgCity, total: landFixed + landCity + bldgFixed + bldgCity };
+}
+
 // 価格だけからの簡易推定（旧方式）。property.assessedValue を持たないテスト用スタブ・
 // 移行前の旧セーブに対するフォールバックとしてのみ使う。
 export function assessedValue(price) { return Math.round(price * ASSESSED_VALUE_RATE); }
@@ -1324,6 +1444,29 @@ export function assessedValueOf(property, price) {
   return property?.assessedValue ?? assessedValue(price);
 }
 
+// v17: 火災保険料（初回5年一括）。融資を受ける条件として加入が事実上必須なので、
+// 現金購入でも購入諸費用に含める。課税標準ではなく実務どおり建物評価額（時価ではない）が
+// 基準。構造ごとに燃えにくさで料率が違う（木造が最も高い）。既存の更新イベント
+// kasai_hoken（戸数×年12,000円）とは別枠で併存させる——これは購入時の初回5年分、
+// イベントはその後の更新にあたる。
+export const FIRE_INSURANCE_RATE_BY_STRUCTURE = { '木造': 0.0025, 'S': 0.0015, 'RC': 0.0010 };
+export const FIRE_INSURANCE_YEARS = 5;
+export function fireInsuranceOf(property, price) {
+  const structure = property?.structure ?? '木造';
+  const rate = FIRE_INSURANCE_RATE_BY_STRUCTURE[structure] ?? FIRE_INSURANCE_RATE_BY_STRUCTURE['木造'];
+  // acquisitionTaxOf と同じ分岐: 内訳（assessedLand/assessedBldg）を持つ物件はそこから、
+  // 持たないテスト用スタブ・旧セーブはassessedValueOf×bldgRatioの按分で代用する。
+  let bldgAssessed;
+  if (property?.assessedValue != null || property?.assessedLand != null) {
+    bldgAssessed = assessedValueBreakdown(property).bldg;
+  } else {
+    const assessed = assessedValueOf(property, price);
+    const bldgRatio = property?.bldgRatio ?? 0.5;
+    bldgAssessed = assessed * bldgRatio;
+  }
+  return Math.round(bldgAssessed * rate * FIRE_INSURANCE_YEARS);
+}
+
 // 買主が負担する諸費用の内訳。loanAmount が0なら抵当権設定と融資事務手数料はかからない
 //（現金購入のほうが諸費用も安い、という当たり前の差が出る）。
 // v16: month（購入する通し月）を渡すと、固定資産税の日割精算金（propTaxSettle）を含める。
@@ -1331,26 +1474,39 @@ export function assessedValueOf(property, price) {
 // 別途は納めない（買った年はpropTaxFromYearの判定で課税対象から外れる）。代わりに
 // 引渡月〜年末ぶんを売主へ日割りで精算する。month省略時（従来の呼び出し）は0円のまま
 // で、既存の挙動を1円も変えない。
-export function purchaseCosts(property, price, loanAmount = 0, month = null) {
+// v17: bankKey を渡すと融資事務手数料が銀行の型（定率／定額）に従う。省略時（従来の
+// 呼び出し）は定率型として計算する（loanArrangementFeeのデフォルトと揃える）。
+export function purchaseCosts(property, price, loanAmount = 0, month = null, bankKey = null) {
   const assessed = assessedValueOf(property, price);
   const bldgRatio = property?.bldgRatio ?? 0.5;
   const broker = brokerFee(price);
   const stamp = stampDuty(price);
   const regTransfer = Math.round(assessed * (1 - bldgRatio) * REG_TAX_LAND
                                + assessed * bldgRatio * REG_TAX_BLDG);
-  const acquisition = Math.round(assessed * ACQUISITION_TAX_RATE);
+  const acquisition = acquisitionTaxOf(property, price).total;
   const scrivener = scrivenerFee(price);
   const regMortgage = loanAmount > 0 ? Math.round(loanAmount * REG_TAX_MORTGAGE) : 0;
-  const loanFee = loanArrangementFee(loanAmount);
+  const loanFee = loanArrangementFee(loanAmount, bankKey);
   const propTaxSettle = month != null
     ? Math.round((property?.propTaxA ?? 0) * (12 - calMonthOf(month) + 1) / 12)
     : 0;
+  // v17: 火災保険（初回5年一括）。現金購入でも決済時に必ず払う実額なのでtotalに含める。
+  const insurance = fireInsuranceOf(property, price);
+  // v17: 売主が法人・宅建業者（sellerType==='corp'）なら建物価格に消費税10%がかかる
+  // （個人間売買は非課税）。土地は常に非課税なので建物分（price×bldgRatio）だけに乗せる。
+  // 買主が払った消費税は税込経理で取得価額に含まれる（total→acquisitionCostに乗るので自動的に反映）。
+  const consumptionTax = property?.sellerType === 'corp' ? Math.round(price * bldgRatio * CONSUMPTION_TAX) : 0;
+  // v17: 不動産取得税は決済時に徴収されず、登記から3〜6ヶ月後に納税通知書が届く実務に合わせ、
+  // total（決済時に実際に出ていく現金）からは外す。内訳（acquisition）は購入画面の
+  // 「いくらかかるか」の表示用に残し、実際の予定はbuyPropertyV2がs.taxScheduleへ積む。
   return { broker, stamp, regTransfer, acquisition, scrivener, regMortgage, loanFee, propTaxSettle,
-    total: broker + stamp + regTransfer + acquisition + scrivener + regMortgage + loanFee + propTaxSettle };
+    insurance, consumptionTax,
+    total: broker + stamp + regTransfer + scrivener + regMortgage + loanFee + propTaxSettle
+      + insurance + consumptionTax };
 }
 // 購入諸費用の合計だけが欲しい場面（必要現金の計算など）で使う薄いラッパ。
-export function closingCostOf(property, price, loanAmount = 0, month = null) {
-  return purchaseCosts(property, price, loanAmount, month).total;
+export function closingCostOf(property, price, loanAmount = 0, month = null, bankKey = null) {
+  return purchaseCosts(property, price, loanAmount, month, bankKey).total;
 }
 
 // 売主が負担する諸費用の内訳。
@@ -1470,8 +1626,29 @@ export function settleSale(state, sale) {
   if (p.owner === 'corp') book.income += gain;
   else book.capGainTax += capTax;
   if (p.loan) { const rel = s.bankRelations?.[p.loan.bankKey]; if (rel) rel.paidOff += 1; }
-  const taxLabel = p.owner === 'corp' ? '法人30%'
-    : `${bd.longTerm ? '長期' : '短期'}${Math.round(bd.rate * 100)}%`;
+  // v17: 建物の売却は消費税の課税取引。免税・課税の判定は「今年より2年前（基準期間）」の
+  // 課税売上高で決まるので、まず今回の売却で消費税を納めるかどうかを（今年の売上を積む前に）判定する。
+  const isPayer = isConsumptionTaxPayer(s);
+  const bldgPortion = Math.round(sale.price * (p.bldgRatio ?? 0.5));
+  s.taxableSalesByYear = s.taxableSalesByYear || {};
+  const saleYear = calYearOf(s.month);
+  s.taxableSalesByYear[saleYear] = (s.taxableSalesByYear[saleYear] ?? 0) + bldgPortion;
+  if (isPayer) {
+    const ctaxAmount = Math.round(bldgPortion * CONSUMPTION_TAX);
+    let dueMonth;
+    if (p.owner === 'corp') {
+      // 法人の決算スケジュールに合わせ、決算月（未法人化なら12月扱い）の2ヶ月後に納付する。
+      const cm = calMonthOf(s.month), fm = s.corpFiscalMonth ?? 12;
+      const closeYear = cm <= fm ? saleYear : saleYear + 1;
+      dueMonth = monthIndexOf(closeYear, fm) + 2;
+    } else {
+      dueMonth = monthIndexOf(saleYear + 1, 3);   // 個人は翌年3月にまとめて納付
+    }
+    s.taxSchedule = s.taxSchedule || [];
+    s.taxSchedule.push({ month: dueMonth, kind: 'consumption_tax', amount: ctaxAmount, label: '消費税' });
+  }
+  const taxLabel = p.owner === 'corp' ? `法人${fmtTaxRate(CONFIG.corporateTaxRate)}`
+    : `${bd.longTerm ? '長期' : '短期'}${fmtTaxRate(bd.rate)}`;
   logs.push(`${p.label} を ${yen(sale.price)} で売却（${taxLabel} 譲渡税 ${yen(capTax)}（翌年3月/決算にまとめて納付）・諸費用 ${yen(costs.total)}・残債精算 ${yen(payoff)}・手取り ${yen(bd.net)}）`);
   s.stats = s.stats || { buys: 0, sales: 0, profitSales: 0, junkFlips: 0, hadLoan: false };
   s.stats.sales += 1;
@@ -2242,7 +2419,7 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
     const done = (prog ? prog.done : 0) + diyWorkStep(plan.diyStep, s, opts.qualityMult);
     s.skills.selfmgmt.exp += 10;
     if (done >= DIY_WORK_TOTAL) {
-      applyValueUp(p, plan.rentMult);
+      applyValueUp(p, plan.rentMult, s);
       p.diyProgress = null;
       return { state: s, started: true, diy: true, cost: prog ? 0 : material, done: true };
     }
@@ -2281,16 +2458,22 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
 // 退去した瞬間（vacateUnit）に適用する。
 // 時価（timeValue）は建物そのものが良くなった結果なので、従来どおり即時に上がる。
 export const VALUE_UP_CAPEX_MONTHS = 180;   // v16: バリューアップの償却は一律15年（DIY/業者共通）
-export function applyValueUp(p, rentMult) {
+// v17: 1件60万円未満の工事は税務上「修繕費」として一括経費にできる（資本的支出の金額基準）。
+// 60万円以上だけ従来どおり資産計上して償却する。s を渡すと bookOf(s, p.owner) に即時経費計上する
+// （呼び出し元は必ず structuredClone 済みの state を渡すこと）。
+export const CAPEX_THRESHOLD = 600_000;
+export function applyValueUp(p, rentMult, s = null) {
   p.units.forEach(u => setUnitRent(u, (u.pendingRent ?? u.rent) * rentMult));
   p.timeValue = Math.round(p.timeValue * rentMult);
   p.valueUpLevel = (p.valueUpLevel || 0) + 1;
   // v16: バリューアップ費用は一括経費にせず、資産計上して15年（180ヶ月）で償却する。
   // 見積額は startValueUp が物件側の別枠（p.jobCost.valueup）に運んでいる。
   const amount = p.jobCost?.valueup ?? 0;
-  if (amount > 0) {
+  if (amount >= CAPEX_THRESHOLD) {
     p.capex = p.capex || [];
     p.capex.push({ amount, monthlyAmount: Math.round(amount / VALUE_UP_CAPEX_MONTHS), monthsLeft: VALUE_UP_CAPEX_MONTHS });
+  } else if (amount > 0 && s) {
+    bookOf(s, p.owner).expense += amount;   // v17: 60万円未満は完了月の経費として即時計上
   }
   if (p.jobCost) delete p.jobCost.valueup;
 }
@@ -2353,6 +2536,15 @@ export function taxRiskLevelV2(state) {
 
 const isKodateP = p => p.genreKey === 'kodate' || p.genreKey === 'w_kodate';
 const isKubunP = p => p.genreKey === 'kubun' || p.genreKey === 'w_kubun';
+
+// v17: 個人事業税・青色申告65万控除の要件になる「事業的規模（5棟10室基準）」。
+// 法人名義の物件は個人事業税の対象外なので、個人名義（owner==='personal'）だけで数える。
+export function isBusinessScale(state) {
+  const personal = (state.properties || []).filter(p => p.owner === 'personal');
+  const kodateCount = personal.filter(isKodateP).length;
+  const totalUnits = personal.reduce((t, p) => t + (p.units?.length ?? 0), 0);
+  return kodateCount >= 5 || totalUnits >= 10;
+}
 
 // 物件条件のビルダー。指定しなかった項目は無条件。
 // kind: 'kodate'=戸建て / 'kubun'=区分 / 'tou'=一棟もの / 'notKubun'=区分以外（建物全体を自分で管理する物件）
@@ -2884,10 +3076,12 @@ export const EVENTS = [
   { id: 'kakutei_shinkoku', title: '🧾 確定申告の時期', cooldown: 11,
     // 毎年2月。青色申告（複式簿記）なら65万円、簡易帳簿なら10万円が所得から引ける。
     // 手間（行動力）と控除額のトレードオフで、翌年3月の納税額がそのまま変わる。
+    // v17: 65万円控除は事業的規模（5棟10室以上）が要件。満たない年はこの選択肢自体を出さない。
     condition: s => calMonthOf(s.month) === 2 && (s.properties || []).length > 0,
     choices: [
-      { label: '📗 青色申告（複式簿記）で申告する（行動力-30・控除65万円）',
+      { label: '📗 青色申告（複式簿記）で申告する（行動力-30・控除65万円・5棟10室以上の事業的規模が条件）',
         log: '複式簿記で青色申告した（控除65万円）',
+        choiceIf: s => isBusinessScale(s),
         apply: s => { s.actionPower -= 30; s.blueReturnDeduction = BLUE_RETURN_FULL; return s; } },
       { label: '📘 簡易帳簿で済ませる（行動力-10・控除10万円）',
         log: '簡易帳簿で申告した（控除10万円）',
@@ -3093,6 +3287,8 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
     // 「現在33歳（開始30歳）」と何年ぶん歳を取ったかを見せるために保持する。
     cash: clampedSeed, month: 0, attr, age: clampedAge, startAge: clampedAge,
     difficulty: diffKey,
+    // v17: 給与所得との損益通算に使う年収。月次では現金に加算しない（種銭は doWork で稼ぐ）。
+    salaryAnnual: emp ? CONFIG.salaryEmployee : CONFIG.salarySelf,
     creditScore: (emp ? CONFIG.creditEmployee : CONFIG.creditSelf) + d.creditBonus,
     baseActionPower: emp ? 100 : 120, actionPower: emp ? 100 : 120,
     goal: { type: goalType, amount: goalAmount, years: clampedYears },
@@ -3110,10 +3306,12 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
     // v16: 名義ごとの帳簿（所得税・法人税の課税計算に使う）。決まった月にまとめて納付するので、
     // 予定は taxSchedule に積む。
     books: {
-      personal: { year: calYearOf(0), income: 0, expense: 0, capGainTax: 0, carryLoss: [] },
-      corp: { year: calYearOf(0), income: 0, expense: 0, carryLoss: [] },
+      // v17: landInterestは土地取得の借入金利子（損益通算できない部分）を年間で別枠集計する。
+      personal: { year: calYearOf(0), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0 },
+      corp: { year: calYearOf(0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
     },
     taxSchedule: [],
+    taxableSalesByYear: {},   // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高（建物分）
     salesSearch: { spent: 0, threshold: null },
     nextPropertyId: 1,
     unlockedRegions: ['main'],   // v9-A: 解放済みの陸地。開発区・競売区・海外は条件を満たすと増える
@@ -3156,10 +3354,13 @@ export function transferToCorp(state, propertyId) {
   const s = structuredClone(state);
   const p = s.properties.find(x => x.id === propertyId);
   const price = p.timeValue;
-  const book = bookValueV2(p);
-  const gain = Math.max(0, price - book);
-  const heldYears = (s.month - (p.boughtMonth ?? s.month)) / 12;
-  const capTax = Math.round(gain * (heldYears <= 5 ? CONFIG.capGainTaxShort : CONFIG.capGainTaxLong));
+  // v17: 個人→法人の移転も税務上は「時価での売買」なので、譲渡益・短期長期の判定は
+  // 通常の売却とまったく同じ関数を通す。以前はここだけ独自に
+  // 「price − 簿価」「保有年数5年以下なら短期」と別式を持っており、
+  // 取得費諸費用・譲渡費用の控除が効かず、長期判定も譲渡年1月1日基準になっていなかった
+  // （同じ取引が経路によって違う税額になる状態だった）。
+  const gain = capGainOf(p, price);
+  const capTax = Math.round(gain * capGainTaxRate(s, p));
   const acqCost = Math.round(price * CONFIG.corpTransferCostRate);
   if (s.cash < capTax + acqCost) return { state, done: false, reason: 'cash' };
   s.cash -= capTax + acqCost;
@@ -3617,8 +3818,13 @@ export function propertyAdviceLines(property) {
 
 // === v16: 税制（固定資産税の年4回納付・所得税/住民税・法人税・繰越損失）===
 
-// 固定資産税の納付月（6・9・12・2月）と、それぞれ第何期にあたるか。
-const PROP_TAX_PAY_MONTHS = { 6: 1, 9: 2, 12: 3, 2: 4 };
+// 固定資産税の納付月と、それぞれ第何期にあたるか。
+// v17: 全国一律ではなく、エリアによって納期が違う（urban=東京23区型、local=市町村の多数派）。
+const PROP_TAX_PAY_MONTHS_BY_AREA = {
+  urban: { 6: 1, 9: 2, 12: 3, 2: 4 },
+  local: { 4: 1, 7: 2, 12: 3, 2: 4 },
+};
+const PROP_TAX_AREA_LABEL = { urban: '都心', local: '地方' };
 // 4期に等分すると端数が出るため、第1期（6月）に寄せて4回の合計を年額と必ず一致させる。
 function propTaxQuarterAmount(propTaxA, periodIdx) {
   const base = Math.floor(propTaxA / 4);
@@ -3643,8 +3849,30 @@ export function incomeTaxOf(taxableIncome) {
   const [, rate, deduction] = INCOME_TAX_BRACKETS.find(([limit]) => taxableIncome <= limit);
   return Math.round((taxableIncome * rate - deduction) * 1.021);
 }
+// v17: 給与所得控除（令和2年分以降）。年収から「みなし経費」を引いて給与所得を出す。
+export function salaryDeduction(income) {
+  if (income <= 1_625_000) return 550_000;
+  if (income <= 1_800_000) return Math.round(income * 0.40) - 100_000;
+  if (income <= 3_600_000) return Math.round(income * 0.30) + 80_000;
+  if (income <= 6_600_000) return Math.round(income * 0.20) + 440_000;
+  if (income <= 8_500_000) return Math.round(income * 0.10) + 1_100_000;
+  return 1_950_000;
+}
+export function salaryIncomeOf(state) {
+  const annual = state.salaryAnnual ?? 0;
+  return Math.max(0, annual - salaryDeduction(annual));
+}
+// v17: 基礎控除。社会保険料控除・扶養控除等の他の所得控除は簡略化して省略する
+// （用語ヘルプ「損益通算」にその旨を明記）。
+export const BASIC_DEDUCTION = 480_000;
 export const RESIDENT_TAX_RATE = 0.10;
 export const PERSONAL_CARRY_LOSS_YEARS = 3;   // 個人の繰越損失は3年
+// v17: 前年の所得税額（譲渡税は含まない）がこれ以上なら、翌年7月・11月に1/3ずつ予定納税する。
+export const PREPAY_THRESHOLD = 150_000;
+// v17: 不動産貸付業の個人事業税（第1種・法定業種）。事業的規模（5棟10室）で課税され、
+// 事業主控除290万円を引いた額に5%がかかる。8月・11月の年2回納付。
+export const BUSINESS_TAX_RATE = 0.05;
+export const BUSINESS_TAX_DEDUCTION = 2_900_000;
 
 // v16: 法人税（簡易実効税率）。800万円以下23%・超える部分33%。赤字でも均等割が別途かかる。
 export const CORP_LOW_RATE = 0.23;
@@ -3657,6 +3885,9 @@ export function corporateTaxOf(income) {
 }
 export const CORP_PER_CAPITA_TAX = 70_000;   // 均等割（赤字でも必ずかかる）
 export const CORP_CARRY_LOSS_YEARS = 10;     // 法人の繰越損失は10年（個人より長い）
+// v17: 前事業年度の法人税額（均等割込み）がこれを超えると、決算月の8ヶ月後に前期実績の
+// 1/2を中間納付する（事業年度開始から6ヶ月経過後2ヶ月以内の実務ルールをそのまま反映）。
+export const CORP_INTERIM_THRESHOLD = 200_000;
 
 // 繰越損失を古い順に充当し、使い切った分は配列から外す。戻り値は充当後の課税所得。
 function applyCarryLoss(carryLoss, taxableIncome) {
@@ -3670,42 +3901,110 @@ function applyCarryLoss(carryLoss, taxableIncome) {
   return { taxableIncome: remain, carryLoss: carryLoss.filter(l => l.amount > 0) };
 }
 
-// v16: 個人（books.personal）の年次締め。暦年12月に呼ぶ。所得税・譲渡税は翌年3月に1回、
+// v17: 個人（books.personal）の年次締め。暦年12月に呼ぶ。所得税・譲渡税は翌年3月に1回、
 // 住民税は翌年6・8・10月と翌々年1月に1/4ずつ（端数は第1期）納付予定として積む。
+// v17で給与所得との損益通算を組み込んだ。月次の給与は現金に加算しない（v3で決めた
+// 「種銭はdoWorkで稼ぐ」設計を戻さない）ので、給与の手取りは生活費と相殺されるものとして
+// 扱い、確定申告での税額の差だけがここで3月の現金に反映される。
 function closePersonalBooks(s) {
   const book = ensureBooks(s).personal;
   const year = book.year;
-  const net = book.income - book.expense;
-  // v16: 3年で期限切れの繰越損失を先に整理してから、今年の分を積む／使う。
+  const net = book.income - book.expense;   // 1. 不動産所得（通算前）
+  // v16: 3年で期限切れの繰越損失を先に整理する。
   // 「year年に生じた損失は、year+1〜year+3の3年間だけ使える（year+4の締めではもう無い）」
   // という意味なので、経過年数（currentYear-year）が3以上になったら捨てる。
   book.carryLoss = (book.carryLoss || []).filter(l => (year - l.year) < PERSONAL_CARRY_LOSS_YEARS);
+
+  // v17: 2. 不動産所得が赤字なら、土地取得のための借入金利子に対応する部分は
+  // 損益通算できない（実務どおり）。外した分は繰越損失にも回さない（切り捨て）。
+  let combined = net;
   if (net < 0) {
-    book.carryLoss.push({ year, amount: -net });
+    const deficitAbs = -net;
+    const landExcluded = Math.min(deficitAbs, book.landInterest ?? 0);
+    combined = Math.min(0, net + landExcluded);
   }
-  let taxableIncome = Math.max(0, net - (s.blueReturnDeduction ?? 0));
-  const applied = applyCarryLoss(book.carryLoss, taxableIncome);
-  taxableIncome = applied.taxableIncome;
-  book.carryLoss = applied.carryLoss;
+  // 3. 青色申告特別控除（黒字のときだけ。赤字に控除は乗らない）
+  if (combined > 0) {
+    combined = Math.max(0, combined - (s.blueReturnDeduction ?? 0));
+  }
+  // 4. 繰越損失の充当（黒字なら過去の損失を消費）／積立（赤字ならその金額を積む。
+  //    土地利子で切り捨てた後の額なので、切り捨て分は繰り越されない＝既存どおりの考え方）。
+  if (combined < 0) {
+    book.carryLoss.push({ year, amount: -combined });
+  } else if (combined > 0) {
+    const applied = applyCarryLoss(book.carryLoss, combined);
+    combined = applied.taxableIncome;
+    book.carryLoss = applied.carryLoss;
+  }
 
+  // v17: 5. 総所得＝給与所得＋通算後の不動産所得（マイナスもありうる＝ここが損益通算）。
+  // 6. 課税所得＝総所得−基礎控除（マイナスにはしない）。
+  const salaryIncome = salaryIncomeOf(s);
+  const totalIncome = salaryIncome + combined;
+  const taxableIncome = Math.max(0, totalIncome - BASIC_DEDUCTION);
+  // 7. 確定申告の所得税。8. 源泉徴収済み＝給与所得だけで計算した所得税（年末調整済みとみなす）。
   const incomeTax = incomeTaxOf(taxableIncome);
+  const withheldTax = incomeTaxOf(Math.max(0, salaryIncome - BASIC_DEDUCTION));
   const residentTax = Math.round(taxableIncome * RESIDENT_TAX_RATE);
+  const withheldResident = Math.round(Math.max(0, salaryIncome - BASIC_DEDUCTION) * RESIDENT_TAX_RATE);
   const nextYear = year + 1;
+  const diff = difficultyOf(s);   // v17: 初心者向けは予定納税・個人事業税を積まない
 
-  if (incomeTax + book.capGainTax > 0) {
-    s.taxSchedule.push({ month: monthIndexOf(nextYear, 3), kind: 'income_tax',
-      amount: incomeTax + book.capGainTax, label: '所得税・譲渡税' });
+  // v17: 予定納税の基準額は「確定申告の所得税−源泉徴収済み」（実務の予定納税基準額に相当）。
+  // これが15万円以上なら、翌年7月・11月に1/3ずつ前払いさせる。前払いした額はprepaidIncomeTax
+  // へ積み、翌年3月の確定申告で税額から差し引く（引き落とし時にadvanceMonthが加算する）。
+  const taxBase = incomeTax - withheldTax;
+  if (!diff.skipPrepaidTax && taxBase >= PREPAY_THRESHOLD) {
+    const prepay = Math.round(taxBase / 3);
+    s.taxSchedule.push({ month: monthIndexOf(nextYear, 7), kind: 'income_tax_prepay',
+      amount: prepay, label: '所得税の予定納税' });
+    s.taxSchedule.push({ month: monthIndexOf(nextYear, 11), kind: 'income_tax_prepay',
+      amount: prepay, label: '所得税の予定納税' });
   }
-  if (residentTax > 0) {
-    const base = Math.floor(residentTax / 4);
-    const first = residentTax - base * 3;   // 端数は第1期（6月）に寄せる
+
+  // v17: 9. 翌年3月は「確定申告の所得税−源泉徴収済み−今年に納めた予定納税額」を精算し、
+  // 11. 譲渡税（分離課税なので総所得には合流させない）をそのまま足す。払い過ぎで差額が
+  // マイナスになる場合はマイナス金額のまま積む（advanceMonthのs.cash -= amountで現金が増え、
+  // 還付として扱われる）。
+  const marchAmount = taxBase + book.capGainTax - (book.prepaidIncomeTax ?? 0);
+  if (marchAmount !== 0) {
+    s.taxSchedule.push({ month: monthIndexOf(nextYear, 3), kind: 'income_tax',
+      amount: marchAmount, label: marchAmount > 0 ? '所得税・譲渡税' : '所得税の還付' });
+  }
+  book.prepaidIncomeTax = 0;
+
+  // v17: 10. 住民税も同じ考え方。給与から特別徴収済みの分との差額を翌年6・8・10月と
+  // 翌々年1月の4期に積む。差額がマイナス（還付）なら4期に分けず、第1期（6月）に1回で積む
+  // （マイナスを4期に配ると読みにくいため）。
+  const residentDiff = residentTax - withheldResident;
+  if (residentDiff > 0) {
+    const base = Math.floor(residentDiff / 4);
+    const first = residentDiff - base * 3;   // 端数は第1期（6月）に寄せる
     const periods = [[nextYear, 6, first], [nextYear, 8, base], [nextYear, 10, base], [nextYear + 1, 1, base]];
     for (const [y, m, amount] of periods) {
       if (amount > 0) s.taxSchedule.push({ month: monthIndexOf(y, m), kind: 'resident_tax', amount, label: '住民税' });
     }
+  } else if (residentDiff < 0) {
+    s.taxSchedule.push({ month: monthIndexOf(nextYear, 6), kind: 'resident_tax',
+      amount: residentDiff, label: '住民税の還付' });
   }
 
-  book.income = 0; book.expense = 0; book.capGainTax = 0; book.year = nextYear;
+  // v17: 12. 個人事業税（不動産貸付業・第1種・税率5%）。基準は給与と無関係の税なので
+  // 通算前の不動産所得（青色申告特別控除を引く前＝net）を使う。事業的規模（5棟10室）の
+  // ときだけ、事業主控除290万円を引いてかけ、翌年8月・11月に半分ずつ納める
+  // （端数は第1期＝8月に寄せる）。個人事業税自体は翌年の必要経費になるが、帳簿が一段
+  // 複雑になるためここでは経費に入れない。
+  if (!diff.skipPrepaidTax && isBusinessScale(s)) {
+    const businessTax = Math.round(Math.max(0, net - BUSINESS_TAX_DEDUCTION) * BUSINESS_TAX_RATE);
+    if (businessTax > 0) {
+      const second = Math.floor(businessTax / 2);
+      const first = businessTax - second;   // 端数は第1期（8月）に寄せる
+      s.taxSchedule.push({ month: monthIndexOf(nextYear, 8), kind: 'business_tax', amount: first, label: '個人事業税' });
+      if (second > 0) s.taxSchedule.push({ month: monthIndexOf(nextYear, 11), kind: 'business_tax', amount: second, label: '個人事業税' });
+    }
+  }
+
+  book.income = 0; book.expense = 0; book.capGainTax = 0; book.landInterest = 0; book.year = nextYear;
   s.blueReturnDeduction = 0;
 }
 
@@ -3726,7 +4025,21 @@ function closeCorpBooks(s) {
 
   // 均等割は赤字でも必ずかかる。
   const tax = corporateTaxOf(taxableIncome) + CORP_PER_CAPITA_TAX;
-  s.taxSchedule.push({ month: s.month + 2, kind: 'corp_tax', amount: tax, label: '法人税等（決算）' });
+  // v17: 決算の納付は「今回の税額−前期の中間納付額」を精算する形にする（マイナスなら還付）。
+  const settleAmount = tax - (book.prepaidCorpTax ?? 0);
+  if (settleAmount !== 0) {
+    s.taxSchedule.push({ month: s.month + 2, kind: 'corp_tax',
+      amount: settleAmount, label: settleAmount > 0 ? '法人税等（決算）' : '法人税等の還付' });
+  }
+  book.prepaidCorpTax = 0;
+
+  // v17: 中間申告。今回の税額（均等割込み）が20万円超なら、決算月の8ヶ月後に前期実績の
+  // 1/2を中間納付する。初心者向けは前払い系の税を積まないので対象外。
+  const diff = difficultyOf(s);
+  if (!diff.skipPrepaidTax && tax > CORP_INTERIM_THRESHOLD) {
+    s.taxSchedule.push({ month: s.month + 8, kind: 'corp_tax_interim',
+      amount: Math.round(tax / 2), label: '法人税の中間納付' });
+  }
 
   book.income = 0; book.expense = 0; book.year = year + 1;
 }
@@ -3770,6 +4083,11 @@ export function advanceMonth(state, rng = Math.random) {
     const book = bookOf(s, p.owner);
     book.income += pl.rentIn;
     book.expense += pl.opex + Math.round(p.propTaxA / 12) + pl.interest;
+    // v17: 土地取得のための借入金利子は損益通算できない（経費には従来どおり全額入れる）。
+    // 通算の可否判定にだけ使うので、法人（給与との通算が無い）は集計しない。
+    if (p.owner !== 'corp') {
+      book.landInterest = (book.landInterest ?? 0) + Math.round(pl.interest * (1 - (p.bldgRatio ?? 0.5)));
+    }
     if (p.deprRemaining > 0) {
       book.expense += Math.round(monthlyDepreciation(p.boughtPrice ?? p.price, p.bldgRatio,
         deprMonthsFor(p.structure, p.builtAge)));
@@ -3821,10 +4139,13 @@ export function advanceMonth(state, rng = Math.random) {
           // v16: 大規模修繕費用は一括経費にせず、建物の残存耐用年数で償却する。見積額は
           // startRepair/startProfessionalRepair/buyPropertyV2 が物件側の別枠（jobCost）で運んでいる。
           const capexAmount = p.jobCost?.large ?? 0;
-          if (capexAmount > 0) {
+          // v17: 60万円未満は修繕費として完了月に一括経費、60万円以上だけ資産計上して償却
+          if (capexAmount >= CAPEX_THRESHOLD) {
             const months = Math.max(1, usefulLifeRemaining(p.structure, p.builtAge) * 12);
             p.capex = p.capex || [];
             p.capex.push({ amount: capexAmount, monthlyAmount: Math.round(capexAmount / months), monthsLeft: months });
+          } else if (capexAmount > 0) {
+            book.expense += capexAmount;
           }
           if (p.jobCost) delete p.jobCost.large;
           pushNotification(s, 'repair_done', p.id, nm, `${nm} の大規模修繕が完了しました（躯体100%・資産価値上昇）`);
@@ -3850,7 +4171,7 @@ export function advanceMonth(state, rng = Math.random) {
     if (p.valueUpJob) {
       p.valueUpJob.monthsLeft -= 1;
       if (p.valueUpJob.monthsLeft <= 0) {
-        applyValueUp(p, p.valueUpJob.rentMult);   // DIY完了時と同じ処理を使う
+        applyValueUp(p, p.valueUpJob.rentMult, s);   // DIY完了時と同じ処理を使う
         p.valueUpJob = null;
         const nm = p.name || p.label;
         // v16: 入居中の部屋は退去するまで家賃が上がらないので、通知の文言もそう書く。
@@ -3871,27 +4192,35 @@ export function advanceMonth(state, rng = Math.random) {
   }
   if (s.month % 12 === 0) { s.properties.forEach(p => { p.builtAge += 1; }); s.age = (s.age ?? 30) + 1; }
 
-  // === v16: 固定資産税の実納付（年4回：6・9・12・2月） ===
+  // === v16: 固定資産税の実納付（年4回） ===
   // 課税対象は1/1時点の所有者（購入した年は前所有者が払うので、propTaxFromYearで対象外にする）。
-  // 端数は第1期（6月）に寄せ、4回の合計が必ず年額と一致するようにする。
+  // 端数は第1期に寄せ、4回の合計が必ず年額と一致するようにする。
+  // v17: 納期はエリア別（urban=6・9・12・2月／local=4・7・12・2月）なので、その月が納期に
+  // あたる物件だけをエリアごとに集めて合計する。ログはエリアの納期グループごとに1行。
   {
     const cm = calMonthOf(s.month);
-    const periodIdx = PROP_TAX_PAY_MONTHS[cm];
-    if (periodIdx) {
-      const payable = s.properties.filter(p => calYearOf(s.month) >= (p.propTaxFromYear ?? 0));
-      if (payable.length) {
-        const total = payable.reduce((t, p) => t + propTaxQuarterAmount(p.propTaxA, periodIdx), 0);
-        s.cash -= total;
-        logs.push(`🏛️ 固定資産税 第${periodIdx}期（${payable.length}物件・${yen(total)}）`);
-      }
+    for (const areaKey of Object.keys(PROP_TAX_PAY_MONTHS_BY_AREA)) {
+      const periodIdx = PROP_TAX_PAY_MONTHS_BY_AREA[areaKey][cm];
+      if (!periodIdx) continue;
+      const payable = s.properties.filter(p =>
+        (p.areaKey ?? 'local') === areaKey && calYearOf(s.month) >= (p.propTaxFromYear ?? 0));
+      if (!payable.length) continue;
+      const total = payable.reduce((t, p) => t + propTaxQuarterAmount(p.propTaxA, periodIdx), 0);
+      s.cash -= total;
+      logs.push(`🏛️ 固定資産税 第${periodIdx}期（${PROP_TAX_AREA_LABEL[areaKey]}${payable.length}物件・${yen(total)}）`);
     }
   }
 
-  // === v16: 納付予定（所得税・住民税・法人税等）の引き落とし ===
+  // === v16/v17: 納付予定（所得税・住民税・法人税等・予定納税・中間納付・個人事業税・不動産取得税）の引き落とし ===
+  // v17: マイナス金額（払い過ぎの還付）はs.cash -= amountでそのまま現金が増える形になる。
+  // 予定納税・中間納付は前払いした額をbooksのprepaid*へ積んでおき、次の確定申告／決算の
+  // 精算（closePersonalBooks/closeCorpBooks）でそこから引かせる。
   s.taxSchedule = s.taxSchedule || [];
   for (const x of s.taxSchedule.filter(t => t.month === s.month)) {
     s.cash -= x.amount;
-    logs.push(`🧾 ${x.label}を納付（${yen(x.amount)}）`);
+    if (x.kind === 'income_tax_prepay') ensureBooks(s).personal.prepaidIncomeTax = (ensureBooks(s).personal.prepaidIncomeTax ?? 0) + x.amount;
+    if (x.kind === 'corp_tax_interim') ensureBooks(s).corp.prepaidCorpTax = (ensureBooks(s).corp.prepaidCorpTax ?? 0) + x.amount;
+    logs.push(x.amount < 0 ? `🧾 ${x.label}（+${yen(-x.amount)}）` : `🧾 ${x.label}を納付（${yen(x.amount)}）`);
   }
   s.taxSchedule = s.taxSchedule.filter(t => t.month !== s.month);
 
@@ -3970,11 +4299,20 @@ export function migrateSave(state) {
   // v16: 名義ごとの帳簿・納付予定・法人の決算月。旧セーブには無いので既定値で補う。
   if (!s.books) {
     s.books = {
-      personal: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, capGainTax: 0, carryLoss: [] },
-      corp: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, carryLoss: [] },
+      personal: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0 },
+      corp: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
     };
   }
+  // v17: v16までのセーブにはprepaidIncomeTax/prepaidCorpTaxが無いので既定値で補う。
+  if (typeof s.books.personal.prepaidIncomeTax !== 'number') s.books.personal.prepaidIncomeTax = 0;
+  if (typeof s.books.corp.prepaidCorpTax !== 'number') s.books.corp.prepaidCorpTax = 0;
+  if (typeof s.books.personal.landInterest !== 'number') s.books.personal.landInterest = 0;
+  // v17: 給与所得との損益通算に使う年収。旧セーブには無いのでattrから同じ規則で補う。
+  if (typeof s.salaryAnnual !== 'number') s.salaryAnnual = s.attr === 'employee' ? CONFIG.salaryEmployee : CONFIG.salarySelf;
   if (!Array.isArray(s.taxSchedule)) s.taxSchedule = [];
+  // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高。旧セーブには無いので空で始める
+  // （過去の売却実績は復元できないが、免税事業者スタートは安全側＝プレイヤー有利な既定値）。
+  if (!s.taxableSalesByYear || typeof s.taxableSalesByYear !== 'object') s.taxableSalesByYear = {};
   if (s.isIncorporated && s.corpFiscalMonth == null) s.corpFiscalMonth = 12;
   if (s.corpFiscalMonth === undefined) s.corpFiscalMonth = null;
   // v8.2: すでに壊れているセーブを読み込み時に直す。
@@ -4011,6 +4349,9 @@ export function migrateSave(state) {
     // v16: 固定資産税の課税対象年。旧セーブは判定式を持たないので「常に課税対象」= 0 にする。
     if (p.propTaxFromYear === undefined) p.propTaxFromYear = 0;
     if (p.region === undefined) p.region = 'main';   // v9-A: 旧セーブの物件はすべて本土
+    // v17: 旧セーブには売主区分が無い。個人扱い（消費税なし）で始める——旧セーブ保有者に
+    // 遡って消費税を追加請求しないための既定値（試作段階でセーブ保有者はいないが念のため）。
+    if (p.sellerType === undefined) p.sellerType = 'individual';
     // v8.9: 固定資産税評価額。旧セーブには無いので、構造・延床面積・築年から算出して埋める。
     if (p.assessedValue === undefined) p.assessedValue = estimateAssessedValue(p.structure, p.builtAge, totalFloorSqm(p), p.areaKey);
     // v8.21: 内訳（土地・建物）は表示用に新規追加したフィールド。assessedValueだけ既にある
@@ -4025,7 +4366,9 @@ export function migrateSave(state) {
     // v8.21: 固都税は評価額の純関数（他のメカニクスから書き換えられることはない）なので、
     // 常に評価額×税率で揃え直す。旧・一律3万円下限で生成された物件のpropTaxAも、
     // ここで実際の評価額ベースの額に更新される（内訳表示と実際の負担額を一致させるため）。
-    p.propTaxA = Math.round(p.assessedValue * PROPERTY_TAX_RATE);
+    // v17: 単純な評価額×1.4%から、住宅用地の特例・都市計画税込みの propertyTaxAnnual に置き換え。
+    // 既存セーブとの互換は不要なので無条件に上書きする。
+    p.propTaxA = propertyTaxAnnual(p).total;
     // v6: 修繕度の2ゲージ化。旧セーブは1本しか持たないので、手入れは躯体と同じ値から始める。
     if (p.careState === undefined) p.careState = p.repairState;
     if (p.autoManage === undefined) p.autoManage = false;
@@ -4106,11 +4449,16 @@ export const MIN_LOAN_RATIO = 0.20;
 // 信金は termMax 20→25 に伸ばして棲み分けを保つ（信金のアパートローンは実際25年程度まである）。
 // 期間の梯子は 公庫20 ＜ ノンバンク25 ≒ 信金25 ＜ 地銀30。公庫の maxLoan 4,800万は据え置きで、
 // 「少額・築古には強いが大きくは出ない」という公庫の性格はここで担保する。
+// v17: feeType（融資事務手数料の型）とguaranteeRate（保証料の金利上乗せ）を追加。
+// 公庫は融資手数料がほぼ無く・保証も不要（無保証）なので両方とも最も軽い。ノンバンクは
+// 保証料込みの高金利4.0%が最初から乗っている前提なので上乗せしない。信金・地銀は
+// 信用保証協会・保証会社の保証料を金利+0.2%で表現する（一括前払いだと定率手数料と
+// 合わせて借入額の4%超になり序盤が重すぎるため、金利上乗せに寄せてある）。
 export const BANKS = {
-  kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:10, termMax:20, ltvMax:0.80, maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0 },
-  chigin:  { key:'chigin',  label:'地方銀行',         baseRate:0.018, termMin:10, termMax:30, ltvMax:0.80, maxLoan:Infinity,   minLoan:3_000_000, minCredit:50, wakeOk:false, areaLimit:null,    lifeStrict:true,   minPrice:10_000_000 },
-  shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:'local', lifeStrict:'soft', minPrice:0 },
-  nonbank: { key:'nonbank', label:'ノンバンク',       baseRate:0.040, termMin:10, termMax:25, ltvMax:0.90, maxLoan:Infinity,   minLoan:  500_000, minCredit:25, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0 },
+  kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:10, termMax:20, ltvMax:0.80, maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'flat', guaranteeRate:0 },
+  chigin:  { key:'chigin',  label:'地方銀行',         baseRate:0.018, termMin:10, termMax:30, ltvMax:0.80, maxLoan:Infinity,   minLoan:3_000_000, minCredit:50, wakeOk:false, areaLimit:null,    lifeStrict:true,   minPrice:10_000_000, feeType:'rate', guaranteeRate:0.002 },
+  shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:'local', lifeStrict:'soft', minPrice:0, feeType:'rate', guaranteeRate:0.002 },
+  nonbank: { key:'nonbank', label:'ノンバンク',       baseRate:0.040, termMin:10, termMax:25, ltvMax:0.90, maxLoan:Infinity,   minLoan:  500_000, minCredit:25, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'rate', guaranteeRate:0 },
 };
 
 // この案件でその銀行が扱う最低の借入額。どちらの下限で弾かれたかを msg に出したいので、
@@ -4147,7 +4495,10 @@ export function bankRate(bankKey, state) {
   const negLv = skillLevel(state.skills.negotiation.exp);
   const cut = (effectiveCredit(state) / 100) * 0.005 + negotiationRateCut(negLv) + Math.min(rel.paidOff * 0.001, 0.005);
   // v8: 難易度による金利の下駄。交渉・信用による引き下げ幅の上限（-0.7%）とは別枠で乗せる。
-  return Math.max(b.baseRate - cut, b.baseRate - 0.007) + difficultyOf(state).rateAdj;
+  // v17: 保証料（BANKS[bankKey].guaranteeRate）は交渉で消える性質のものではないので、
+  // 下限クランプを適用した後に足す（クランプの内側に混ぜると交渉・信用で保証料まで
+  // 値引きされてしまう）。
+  return Math.max(b.baseRate - cut, b.baseRate - 0.007) + difficultyOf(state).rateAdj + (b.guaranteeRate ?? 0);
 }
 
 export function reviewLoan(bankKey, property, price, downRatio, state, reformPlan = null) {
@@ -4225,7 +4576,8 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   const d = dscr(noiForReview, monthlyPay * 12);
   if (d < CONFIG.minDscr) reasons.push({ code: 'DSCR_LOW', msg: `収支が返済に対して弱い（DSCR ${d.toFixed(2)} < ${CONFIG.minDscr}）` });
 
-  const requiredCash = Math.round(price * downRatio) + closingCostOf(property, price, loanAmount, state.month);
+  // v17: 融資事務手数料は銀行ごとの型に従うので、審査対象の銀行(bankKey)を渡す。
+  const requiredCash = Math.round(price * downRatio) + closingCostOf(property, price, loanAmount, state.month, bankKey);
   if (state.cash < requiredCash) reasons.push({ code: 'NO_CASH', msg: `自己資金が足りない（必要 ${yen(requiredCash)} / 手元 ${yen(state.cash)}）` });
 
   const approved = reasons.length === 0;
@@ -4608,19 +4960,26 @@ export const TERMS = {
     hint: '法人名義なら30%で済む。償却が切れる前に法人化するか、売却を考える。' },
   capital_gains_tax: { scope: 'real', reading: 'じょうとぜい', group: '税・会計', label: '譲渡税',
     def: '物件を売って出た利益にかかる税金。',
-    calc: '譲渡税 ＝（売却価格 − 取得費 − 償却済み額）× 税率。個人は保有5年以内39%・5年超20%、法人は一律30%。',
+    calc: '譲渡税 ＝（売却価格 −（簿価＋購入時諸費用）− 売却諸費用）× 税率。個人は短期39.63%・長期20.315%（復興特別所得税込み）、法人は一律30%。長期になるのは「売った年の1月1日時点で所有5年超」のときで、買ってちょうど5年ではまだ短期。',
     here: '個人名義は保有5年以内だと税率がほぼ倍になる。法人名義には5年ルールがない。',
     hint: '短期転売を狙うなら法人化を検討する。5年目前なら、あと数ヶ月待つだけで手取りが大きく変わる。' },
+  loss_offset: { scope: 'real', reading: 'そんえきつうさん', group: '税・会計', label: '損益通算',
+    def: '不動産所得が赤字のとき、その赤字を給与所得など他の所得から差し引いて税額を計算できる制度。給与は毎月現金には反映されないが、確定申告で税額が下がる（黒字なら逆に給与と合算されて累進税率が上がる）形でここに現れる。',
+    calc: '課税所得 ＝ max(0, 給与所得 ＋ 通算後の不動産所得 − 基礎控除48万円)。ただし赤字のうち「土地取得のための借入金利子」に対応する部分（支払利息 ×（1−建物比率））は通算できず、繰越損失にも回せない（実務どおり切り捨て）。',
+    here: '帳簿・納税画面の個人カードで、給与所得・通算後の不動産所得・総所得・課税所得と、確定申告の所得税−源泉徴収済みの差引（追加納税／還付）を確認できる。',
+    hint: '不動産が赤字の年は3月に還付が入りやすい。逆に黒字が大きくなると給与と合算されてブラケットが上がり、不動産所得だけで計算するより税額が重くなる。社会保険料控除など他の所得控除は簡略化のため省略している。' },
   toroku_menkyozei: { scope: 'real', reading: 'とうろくめんきょぜい', group: '売買', label: '登録免許税',
     def: '登記をするときにかかる税金。所有権の移転や、抵当権の設定でかかる。',
     calc: '所有権移転＝評価額×1.5%（土地）／2.0%（建物）。抵当権設定＝借入額×0.4%。',
     here: '購入時の諸費用に入っている。融資を使うと抵当権設定のぶんが上乗せされる。',
     hint: '現金で買えば抵当権設定登記が要らないぶん、諸費用が安く済む。' },
+  // v17: 宅地の課税標準1/2特例（建物には無い）と免税点（土地: 課税標準10万円未満、
+  // 家屋: 課税標準12万円未満は非課税）を実装したので、その内容に合わせて記述を更新。
   fudosan_shutokuzei: { scope: 'real', reading: 'ふどうさんしゅとくぜい', group: '売買', label: '不動産取得税',
     def: '不動産を取得したときに一度だけかかる都道府県税。',
-    calc: '評価額 × 3%（住宅・土地の標準税率）。',
+    calc: '土地: 評価額×1/2（宅地の課税標準の特例）×3%、建物: 評価額×3%。課税標準が土地10万円未満・建物12万円未満（免税点）ならその区分は非課税。',
     here: '購入時の諸費用に含めている。実際は取得の数ヶ月後に納税通知が届く。',
-    hint: '売買価格ではなく評価額が基準なので、価格の2%弱に収まることが多い。' },
+    hint: '売買価格ではなく評価額が基準。土地は1/2特例があるぶん、単純な評価額×3%より軽い。' },
   hyoka_gaku: { scope: 'real', reading: 'こていしさんぜいひょうかがく', group: '売買', label: '固定資産税評価額',
     def: '税金の計算に使われる、市町村が決めた不動産の評価額。売買価格とは別物。',
     calc: 'このゲームでは構造・延床面積・築年・エリア（土地単価）から算出し、売買価格とは連動させていない。',
@@ -4718,11 +5077,12 @@ export const TERMS = {
     calc: '毎月一律 2.0 ずつ下がる（築年数・構造には関係しない）。日常メンテで100%に戻る。',
     here: '客付けの決まりやすさと退去率に効く。管理会社へおまかせすれば自動で維持される。',
     hint: '100%から70%まで15ヶ月。50%を切ると退去率が1.5倍に跳ねる。' },
+  // v17: 都市計画税・住宅用地の軽減を実装したので、その内容に合わせて記述を更新。
   koto_zei: { scope: 'real', reading: 'こととぜい', group: '管理', label: '固都税',
     def: '固定資産税と都市計画税。物件を持っているだけで毎年かかる。',
-    calc: '年間の固都税 ＝ 固定資産税評価額 × 1.4%（都市計画税・住宅用地の軽減は簡略化のため考慮していない）',
+    calc: '固定資産税＝評価額×1.4%、都市計画税＝評価額×0.3%。住宅用地は土地のみ軽減（住戸1戸あたり200㎡までの小規模住宅用地は固定資産税1/6・都市計画税1/3、それを超える一般住宅用地は1/3・2/3）。建物には軽減が無い。',
     here: '運営費に含まれている。空室でも容赦なくかかる固定費。評価額基準なので売買価格が下がっても軽くならない。物件詳細の内訳表示から計算過程を確認できる。',
-    hint: '評価額は売買価格と別物（訳あり物件では価格より評価額が高いこともある）。安く買えたからと油断せず、評価額ベースで試算しておく。実務の下限は「免税点」（土地30万円未満・家屋20万円未満は非課税）であって定額の最低税額ではないため、このゲームも一律の下限は設けていない。' },
+    hint: '評価額は売買価格と別物（訳あり物件では価格より評価額が高いこともある）。安く買えたからと油断せず、評価額ベースで試算しておく。' },
   action_power: { scope: 'game', group: '管理', label: '行動力',
     def: 'その月に動ける量。翌月へ進むと全回復する。',
     calc: '働く＝1／物件を探す＝1／買付＝10／自主客付け＝30／査定＝5／工事の発注＝5／DIY＝1回10〜15。',
@@ -4747,7 +5107,8 @@ export function minRequiredCash(property, state, price = property.price) {
     for (let down = 0.05; down <= 0.95; down += 0.01) {
       const r = reviewLoan(bankKey, property, price, down, state);
       if (r.reasons.some(x => x.code !== 'NO_CASH')) continue;
-      const cash = Math.round(price * down) + closingCostOf(property, price, Math.round(price * (1 - down)), state.month);
+      // v17: 融資事務手数料は銀行ごとの型に従うので、比較対象の銀行(bankKey)を渡す。
+      const cash = Math.round(price * down) + closingCostOf(property, price, Math.round(price * (1 - down)), state.month, bankKey);
       if (!best || cash < best.cash) best = { cash, bankKey, label: BANKS[bankKey].label, downRatio: down, financed: true };
       break;
     }
@@ -4774,7 +5135,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, CONSUMPTION_TAX, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, scrivenerFee, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, assessedValue, assessedValueOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, monthlyCF, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -7694,7 +8055,9 @@ function showSetup() {
         <button class="wz-diff border-2 rounded-xl p-3 text-left ${data.difficulty === 'beginner' ? 'border-navy bg-slate-50' : ''}" data-v="beginner">
           <div class="font-bold">🌱 初心者向け</div>
           <div class="text-xs text-slate-600">種銭1.5倍・${term('credit_score', '信用度')}+10・金利-0.3%・劣化とトラブルが緩やか。<b>先月へ1回だけ戻せるお守り付き。</b></div>
-          <div class="text-[11px] text-emerald-700 mt-0.5">勉強会では📚用語クイズが出る（正解で経験値と人脈報酬）</div></button>
+          <div class="text-[11px] text-emerald-700 mt-0.5">勉強会では📚用語クイズが出る（正解で経験値と人脈報酬）</div>
+          <!-- v17: 予定納税・法人税の中間納付・個人事業税は納税の山を増やすため、初心者向けには出さない -->
+          <div class="text-[11px] text-emerald-700 mt-0.5">予定納税・個人事業税などの前払いの税は発生しません</div></button>
         <button class="wz-diff border-2 rounded-xl p-3 text-left ${data.difficulty === 'normal' ? 'border-navy bg-slate-50' : ''}" data-v="normal">
           <div class="font-bold">🔥 中上級者向け</div>
           <div class="text-xs text-slate-600">補正なし。躯体も手入れも容赦なく落ち、やり直しは効かない。<b>現実の厳しさで勝負する。</b></div></button></div>`;
@@ -8136,7 +8499,7 @@ function incorporationPitch() {
         ? '物件を買ってからでよいでしょう。'
         : `NOIへの課税は${term('dead_cross', 'デッドクロス')}（${term('depreciation', '減価償却')}切れ）後にしか発生しません。`
           + `いちばん早い物件で<b>あと${soonest}ヶ月</b>です。`}
-      <div class="mt-1">売却時の${term('capital_gains_tax', '譲渡税')}を短期39%→30%にしたい場合は、早めの設立にも意味があります。</div>
+      <div class="mt-1">売却時の${term('capital_gains_tax', '譲渡税')}を短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}→${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}にしたい場合は、早めの設立にも意味があります。</div>
     </div>`;
   }
   const years = payback == null ? null : Math.round(payback * 10) / 10;
@@ -8528,16 +8891,63 @@ function openBooksModal() {
         <div class="text-[11px] text-slate-500 mt-0.5">※ 赤字でも均等割 ${L.yen(L.CORP_PER_CAPITA_TAX)} はかかります。</div>`;
     } else {
       const deduction = state.blueReturnDeduction || 0;
-      const taxableIncome = Math.max(0, net - deduction - carryLossSum);
+      // v17: 不動産所得が赤字のとき、土地取得のための借入金利子ぶんは損益通算できない
+      // （closePersonalBooksと同じ考え方。切り捨てた分は繰越損失にも回らない）。
+      const landInterest = book.landInterest || 0;
+      let combined = net;
+      let landExcludedAmount = 0;
+      if (net < 0) {
+        landExcludedAmount = Math.min(-net, landInterest);
+        combined = Math.min(0, net + landExcludedAmount);
+      }
+      if (combined > 0) combined = Math.max(0, combined - deduction);
+      // 繰越損失の充当は本来は古い年度から順に消費するが、ここは見込み表示なので
+      // （既存の課税所得見込みと同じ簡略化で）合計だけ引く。
+      const propertyIncome = combined > 0 ? Math.max(0, combined - carryLossSum) : combined;
+
+      // v17: 給与所得との損益通算。月次の給与は現金に加算しない（種銭はdoWorkで稼ぐ）ので、
+      // ここに出る「差引」だけが翌年3月に現金として動く。
+      const salaryIncome = L.salaryIncomeOf(state);
+      const totalIncome = salaryIncome + propertyIncome;   // マイナスもありうる（＝損益通算）
+      const taxableIncome = Math.max(0, totalIncome - L.BASIC_DEDUCTION);
       const incomeTax = L.incomeTaxOf(taxableIncome);
+      const withheldTax = L.incomeTaxOf(Math.max(0, salaryIncome - L.BASIC_DEDUCTION));
       const residentTax = Math.round(taxableIncome * L.RESIDENT_TAX_RATE);
+      const diffAmount = incomeTax - withheldTax;   // 譲渡税は分離課税なのでここには含めない
+
+      // v17: 個人事業税は事業的規模（5棟10室）が要件。基準は通算前の不動産所得（net）。
+      // 要件を満たすかどうかと見込み額を1行足す（初心者向けは前払い系の税を積まないので、
+      // 事業的規模でも実際には発生しない旨を注記する）。
+      const scale = L.isBusinessScale(state);
+      const skipPrepaid = L.difficultyOf(state).skipPrepaidTax;
+      const businessTaxLine = skipPrepaid
+        ? `<div class="text-[11px] text-slate-500 mt-1">🏢 事業的規模: ${scale ? 'はい' : 'いいえ'}（初心者向けなので個人事業税・予定納税は発生しません）</div>`
+        : (() => {
+            const bizTax = scale ? Math.round(Math.max(0, net - L.BUSINESS_TAX_DEDUCTION) * L.BUSINESS_TAX_RATE) : 0;
+            return `<div class="text-[11px] text-slate-500 mt-1">🏢 事業的規模（5棟10室以上）: ${scale ? `はい（概算の個人事業税 ${L.yen(bizTax)}）` : 'いいえ（個人事業税の対象外）'}</div>`;
+          })();
       taxLines = `
         ${deduction > 0
           ? `<div class="text-[11px] text-emerald-700 mt-2">📗 青色申告控除 -${L.yen(deduction)}</div>`
           : `<div class="text-[11px] text-amber-600 mt-2">⚠️ 今年はまだ確定申告していません（2月のイベントで選べます）</div>`}
-        <div class="text-[11px] text-slate-500 mt-1">課税所得の見込み ${L.yen(taxableIncome)}</div>
-        <div class="text-sm mt-0.5">概算の所得税 <b>${L.yen(incomeTax)}</b> ／ 住民税 <b>${L.yen(residentTax)}</b></div>
-        ${book.capGainTax > 0 ? `<div class="text-[11px] text-slate-500 mt-1">売却益にかかる譲渡税 ${L.yen(book.capGainTax)}（分離課税・翌年3月納付）</div>` : ''}`;
+        <div class="mt-2 text-xs bg-slate-50 rounded-lg p-2.5 space-y-1">
+          <div class="font-bold text-[11px] text-slate-600 mb-1">📄 給与との損益通算（見込み）</div>
+          <div class="flex justify-between"><span>給与年収</span><span>${L.yen(state.salaryAnnual ?? 0)}</span></div>
+          <div class="flex justify-between"><span>給与所得（控除後）</span><span>${L.yen(salaryIncome)}</span></div>
+          <div class="flex justify-between"><span>不動産所得（通算後）</span><span class="${propertyIncome >= 0 ? '' : 'text-red-600'}">${signedYen(propertyIncome)}</span></div>
+          ${landExcludedAmount > 0 ? `<div class="text-[10.5px] text-amber-600">↳ 土地取得の借入金利子 ${L.yen(landExcludedAmount)} ぶんは通算できず切り捨て</div>` : ''}
+          <div class="flex justify-between border-t pt-1 mt-1"><span>総所得</span><span>${signedYen(totalIncome)}</span></div>
+          <div class="flex justify-between"><span>課税所得</span><span>${L.yen(taxableIncome)}</span></div>
+          <div class="flex justify-between"><span>確定申告の所得税</span><span>${L.yen(incomeTax)}</span></div>
+          <div class="flex justify-between"><span>源泉徴収済み</span><span>${L.yen(withheldTax)}</span></div>
+          <div class="flex justify-between font-bold border-t pt-1 mt-1">
+            <span>差引（3月）</span>
+            <span class="${diffAmount > 0 ? '' : 'text-emerald-700'}">${diffAmount > 0 ? `追加納税 ${L.yen(diffAmount)}` : diffAmount < 0 ? `還付 +${L.yen(-diffAmount)}` : L.yen(0)}</span>
+          </div>
+        </div>
+        <div class="text-sm mt-2">概算の住民税 <b>${L.yen(residentTax)}</b></div>
+        ${book.capGainTax > 0 ? `<div class="text-[11px] text-slate-500 mt-1">売却益にかかる譲渡税 ${L.yen(book.capGainTax)}（分離課税・総所得には合流せず翌年3月に別途加算）</div>` : ''}
+        ${businessTaxLine}`;
     }
     return `<div class="border rounded-lg p-3 mb-3">
       <div class="font-bold text-sm mb-1">${label}</div>
@@ -8580,7 +8990,12 @@ function openBooksModal() {
           <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1">名目</th><th class="pb-1 text-right">金額</th><th class="pb-1"></th></tr></thead>
           <tbody>${schedule.map(x => {
             const left = x.month - state.month;
-            return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(x.month)}</td><td>${x.label}</td><td class="text-right">${L.yen(x.amount)}</td><td class="text-right text-slate-500 text-[10.5px] pl-1">${left <= 0 ? '今月' : `あと${left}ヶ月`}</td></tr>`;
+            // v17: 予定納税・中間納付の払い過ぎは還付（マイナス金額）になる。そのまま「-¥xxx」と
+            // 出すと減額のように見えて紛らわしいので、「還付 +¥xxx」と現金が増える表記にする。
+            const amountHtml = x.amount < 0
+              ? `<span class="text-emerald-700 font-bold">還付 +${L.yen(-x.amount)}</span>`
+              : L.yen(x.amount);
+            return `<tr class="border-t"><td class="py-0.5">${L.fmtYM(x.month)}</td><td>${x.label}</td><td class="text-right">${amountHtml}</td><td class="text-right text-slate-500 text-[10.5px] pl-1">${left <= 0 ? '今月' : `あと${left}ヶ月`}</td></tr>`;
           }).join('')}</tbody>
           <tfoot><tr class="border-t-2 font-bold"><td colspan="2" class="py-1">合計</td><td colspan="2" class="text-right py-1">${L.yen(scheduleTotal)}</td></tr></tfoot>
         </table>
@@ -8601,10 +9016,23 @@ function openBooksModal() {
       ${capexRemain > 0 ? `<div class="pt-1.5 mt-1 border-t">資産計上した工事の未償却残 ${L.yen(capexRemain)}（毎月 ${L.yen(capexMonthly)} ずつ経費になります）</div>` : ''}
     </div>`;
 
+    // (e) 消費税の課税事業者判定。「大きく売った2年後に課税事業者になる」時間差が要点なので、
+    // 基準期間（2年前）の課税売上高と合わせて出す。
+    const baseYear = L.calYearOf(state.month) - 2;
+    const baseSales = state.taxableSalesByYear?.[baseYear] ?? 0;
+    const isPayer = L.isConsumptionTaxPayer(state);
+    const consumptionTaxLine = `<div class="border rounded-lg p-3 mb-3 text-xs ${isPayer ? 'bg-amber-50' : ''}">
+      <div class="font-bold text-sm mb-1">🧾 消費税</div>
+      ${isPayer
+        ? `<div>あなたは<b>課税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}）。今後の建物売却で消費税を預かり、後日納付します。</div>`
+        : `<div class="text-slate-600">あなたは<b>免税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}／${L.yen(L.CONSUMPTION_TAX_THRESHOLD)}超で2年後から課税事業者）。</div>`}
+    </div>`;
+
     body.innerHTML = `
       ${personalCard}
       ${corpCard}
       ${carryLossHtml}
+      ${consumptionTaxLine}
       <div class="border rounded-lg p-3 mb-3">
         <div class="font-bold text-sm mb-2">📅 納税の予定</div>
         ${scheduleHtml}
@@ -9009,6 +9437,14 @@ function structureSummaryLine(p) {
   return `${structureLabel(p)}・築${p.builtAge}年${unitsText}／${term('depr_remaining', '残存償却')} ${deprText}`;
 }
 
+// v17: 売主区分。法人・宅建業者からの購入は建物価格に消費税がかかり、同じ価格でも
+// 個人売主より手出しが増える。買う前に必ず見えるよう、価格・構造の近くに常時出す。
+function sellerTypeBadge(p) {
+  return p.sellerType === 'corp'
+    ? `<span class="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">🏢 売主：法人（建物分に消費税${L.fmtTaxRate(L.CONSUMPTION_TAX)}）</span>`
+    : `<span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-50 text-slate-500 border border-slate-200">👤 売主：個人（消費税なし）</span>`;
+}
+
 // v8.9: 訳あり（junkFlags）の表示区分。「改善済み」は実際にp.resolvedJunkへ記録された
 // 種類だけに出す（L.markJunkResolvedが大規模修繕・日常メンテ/特別清掃の完了時に記録）。
 // 「傾き」「事故歴」「再建築不可」は物件そのものの恒久的な物理・法的事実なので対象外
@@ -9102,6 +9538,17 @@ function assessedBreakdownRows(p) {
     <tr class="border-t"><td class="text-slate-500">${term('hyoka_gaku', '評価額')}合計</td><td class="text-right font-bold">${L.yen(bd.total)}</td></tr>`;
 }
 
+// v17: 固都税は評価額×税率の単純計算から、都市計画税＋住宅用地の特例（土地のみ）込みの
+// propertyTaxAnnual に変わったので、計算過程の表示も内訳（固定資産税/都市計画税×土地/建物）に
+// 合わせる。特例そのものの割合は物件ごとに変わる（敷地が住戸×200㎡を超えると一般住宅用地が混ざる）
+// ため、ここでは結果の内訳だけを見せる。
+function propTaxBreakdownRows(p) {
+  const pt = L.propertyTaxAnnual(p);
+  return `<tr><td class="text-slate-500">固定資産税（住宅用地の特例込み）</td><td class="text-right">${L.yen(pt.landFixed + pt.bldgFixed)}</td></tr>
+    <tr><td class="text-slate-500">都市計画税（住宅用地の特例込み）</td><td class="text-right">${L.yen(pt.landCity + pt.bldgCity)}</td></tr>
+    <tr class="border-t"><td class="text-slate-500">${term('koto_zei', '固都税')}合計</td><td class="text-right font-bold">${L.yen(pt.total)}</td></tr>`;
+}
+
 function noiTable(p) {
   const gpi = L.gpiAnnual(p), egi = L.egiAnnual(p), noi = L.noiAnnualV2(p);
   const mgmt = p.mgmtFeeM * 12, reserve = p.repairReserveM * 12;
@@ -9117,9 +9564,7 @@ function noiTable(p) {
       <tr><td class="pl-3 text-slate-500"><button type="button" class="noi-koto-toggle inline-flex items-center gap-0.5">
         <span class="inline-block transition-transform text-[9px]">▶</span>└ ${term('koto_zei', '固都税')}</button></td><td class="text-right">-${L.yen(p.propTaxA)}</td></tr>
       <tr id="noi-koto-detail" class="hidden bg-slate-50"><td colspan="2" class="pl-3 py-1">
-        <table class="w-full">${assessedBreakdownRows(p)}
-          <tr><td class="text-slate-500">${term('koto_zei', '固都税')} = 評価額 × ${(L.PROPERTY_TAX_RATE * 100).toFixed(1)}%</td><td class="text-right font-bold">${L.yen(p.propTaxA)}</td></tr>
-        </table></td></tr>
+        <table class="w-full">${assessedBreakdownRows(p)}${propTaxBreakdownRows(p)}</table></td></tr>
       <tr class="font-bold border-t"><td>${term('noi')}（営業純収益）</td><td class="text-right">${L.yen(noi)}</td></tr>
     </table>`;
 }
@@ -9149,11 +9594,14 @@ function holdingTaxBox(p) {
   const months = L.heldMonthsOf(state, p);
   const bd = L.saleBreakdown(state, p, p.timeValue);
   const corp = p.owner === 'corp';
+  // v17: 復興特別所得税を乗せて税率が端数を持つようになったので、表示は必ず
+  // L.fmtTaxRate(CONFIGの値) から作る。ここに数字を直書きすると、税率を変えたときに
+  // 「画面は20%と言っているのに請求は20.315%」というズレが生まれる。
   const badge = corp
-    ? '<span class="bg-navy text-white rounded px-1.5 py-0.5 font-bold">🏢法人・一律30%</span>'
+    ? `<span class="bg-navy text-white rounded px-1.5 py-0.5 font-bold">🏢法人・一律${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}</span>`
     : bd.longTerm
-      ? '<span class="bg-emerald-600 text-white rounded px-1.5 py-0.5 font-bold">長期20%</span>'
-      : '<span class="bg-red-500 text-white rounded px-1.5 py-0.5 font-bold">短期39%</span>';
+      ? `<span class="bg-emerald-600 text-white rounded px-1.5 py-0.5 font-bold">長期${L.fmtTaxRate(L.CONFIG.capGainTaxLong)}</span>`
+      : `<span class="bg-red-500 text-white rounded px-1.5 py-0.5 font-bold">短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}</span>`;
   // 長期化までのカウントダウン。ここが「あと少し待つ」判断の核になる。
   // ただし益が出ていないときは税額も0なので、待つ意味がない＝出さない。
   const saving = Math.round(bd.gain * (L.CONFIG.capGainTaxShort - L.CONFIG.capGainTaxLong));
@@ -9161,12 +9609,12 @@ function holdingTaxBox(p) {
   return `<div class="rounded-lg p-2 text-xs space-y-1 ${bd.longTerm || corp ? 'bg-emerald-50' : 'bg-amber-50'}">
     <div class="flex items-center justify-between">
       <span class="font-bold">保有 ${Math.floor(months / 12)}年${months % 12}ヶ月</span>${badge}</div>
-    ${toLong > 0 ? `<div class="text-amber-800 font-bold">⏳ あと${toLong}ヶ月で長期20%になる（いまの時価なら譲渡税 ${L.yen(saving)} の差）</div>` : ''}
+    ${toLong > 0 ? `<div class="text-amber-800 font-bold">⏳ あと${toLong}ヶ月で長期${L.fmtTaxRate(L.CONFIG.capGainTaxLong)}になる（いまの時価なら譲渡税 ${L.yen(saving)} の差）</div>` : ''}
     <table class="w-full">
       <tr><td class="text-slate-600">購入価格</td><td class="text-right">${L.yen(p.boughtPrice ?? p.price)}</td></tr>
       <tr><td class="text-slate-600">${term('book_value', '簿価')}（${term('depreciation', '減価償却')}後）</td><td class="text-right">${L.yen(bd.book)}</td></tr>
       <tr class="border-t"><td class="text-slate-600">いま時価で売った場合の課税対象益</td><td class="text-right font-bold">${L.yen(bd.gain)}</td></tr>
-      <tr><td class="text-slate-600">${term('capital_gains_tax', '譲渡税')}（${Math.round(bd.rate * 100)}%）</td><td class="text-right text-red-600">-${L.yen(bd.tax)}</td></tr>
+      <tr><td class="text-slate-600">${term('capital_gains_tax', '譲渡税')}（${L.fmtTaxRate(bd.rate)}）</td><td class="text-right text-red-600">-${L.yen(bd.tax)}</td></tr>
     </table>
     <div class="text-[11px] text-slate-500">償却が進むほど簿価が下がり、課税される益は「購入差額」より大きくなります。</div>
   </div>`;
@@ -9342,6 +9790,7 @@ function overviewTab(p, from, opts = {}) {
     </div>
     <div class="flex justify-center mt-1.5"><span class="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full ${sigCls}">${sig.icon} ${sig.label}</span></div>
     <div class="text-center text-xs text-slate-500 mt-2">${structureSummaryLine(p)}${buildingComposition(p) ? `／${buildingComposition(p)}` : ''}</div>
+    <div class="flex justify-center mt-1">${sellerTypeBadge(p)}</div>
     ${wakeAriRowHtml(p)}
     ${statBarsBlock(p, from)}
     ${bandAlertBox(p)}
@@ -9712,11 +10161,19 @@ function metricsBadge(r, muted) {
     <span class="${tone(dscrOk)}">${term('dscr')}${r.dscr.toFixed(2)}${dscrSym}${r.dscrMin}</span></span>`;
 }
 
+// v17: 信金・地銀は金利に保証料が上乗せされている（bankRateが下限クランプ後に足す）。
+// 直書きすると「なぜこの銀行だけ金利が高いのか」が伝わらないので、BANKS[bankKey].guaranteeRate
+// から注記を作る（公庫・ノンバンクは0なので何も出ない）。
+function guaranteeNote(bankKey) {
+  const rate = L.BANKS[bankKey]?.guaranteeRate ?? 0;
+  return rate > 0 ? `（保証料 +${L.fmtTaxRate(rate)} 込み）` : '';
+}
+
 // v11.6: 融資タブはあくまで下見用のプレビューなので、可否は○×とLTV/DSCR・条件の数値だけで
 // 示す。色分け・否決理由・借りる操作は支払い方法画面（showPayment）側だけの役目にする。
 function bankReviewList(rs) {
   return `<div class="space-y-1">${rs.map(r => r.approved
-    ? `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">◯ ${r.label}</b>${metricsBadge(r, true)}</div><div class="text-xs">金利${(r.terms.rate * 100).toFixed(2)}%・${r.terms.years}年・月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div></div>`
+    ? `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">◯ ${r.label}</b>${metricsBadge(r, true)}</div><div class="text-xs">金利${(r.terms.rate * 100).toFixed(2)}%${guaranteeNote(r.bankKey)}・${r.terms.years}年・月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div></div>`
     : `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">✕ ${r.label}</b>${metricsBadge(r, true)}</div></div>`).join('')}</div>`;
 }
 
@@ -10034,21 +10491,47 @@ function purchaseCostBox(p, price, loanAmount, title, id, open) {
     : price <= 4_000_000 ? '価格の4%＋2万＋税'
     : '価格の3%＋6万＋税';
   const row = (label, v) => v ? `<tr><td class="text-slate-600">${label}</td><td class="text-right">${L.yen(v)}</td></tr>` : '';
+  // v17: 不動産取得税は決済時のtotalから外れ、登記ACQ_TAX_DELAY_MIN〜MAXヶ月後に別途納税
+  // 通知が届く（実務どおり）。開閉式の内訳の中に埋めると見落として現金を使い切る事故が
+  // 起きるため、開閉状態に関係なく必ず見える警告として出す。
+  const acqWarning = c.acquisition
+    ? `<div class="text-[10.5px] text-amber-800 bg-amber-50 rounded px-2 py-1 mt-1">⚠️ ${term('fudosan_shutokuzei', '不動産取得税')} ${L.yen(c.acquisition)} は約${L.ACQ_TAX_DELAY_MIN}〜${L.ACQ_TAX_DELAY_MAX}ヶ月後に納税通知が届きます（決済時の現金には含まれません）</div>`
+    : '';
   return `<div class="rounded-lg bg-slate-50 p-1.5 text-xs">
     <button type="button" data-toggle="${id}" class="w-full flex justify-between font-bold ${open ? 'mb-1' : ''} text-left"><span>${open ? '▲' : '▶'} ${title}</span><span>${L.yen(c.total)}<span class="font-normal text-slate-500">（価格の${(c.total / price * 100).toFixed(1)}%）</span></span></button>
+    ${acqWarning}
     <div class="${open ? '' : 'hidden'}">
     <table class="w-full">
       ${row(`${term('chukai_tesuryo', '仲介手数料')}（${brokerLabel}）`, c.broker)}
       ${row(term('inshizei', '印紙税'), c.stamp)}
       ${row(`${term('toroku_menkyozei', '登録免許税')}（所有権移転）`, c.regTransfer)}
       ${row(`${term('toroku_menkyozei', '登録免許税')}（抵当権設定）`, c.regMortgage)}
-      ${c.acquisition ? `<tr><td class="text-slate-600"><button type="button" class="acq-toggle inline-flex items-center gap-0.5 text-left">
-          <span class="inline-block transition-transform text-[9px]">▶</span>${term('fudosan_shutokuzei', '不動産取得税')}</button></td><td class="text-right">${L.yen(c.acquisition)}</td></tr>
+      ${c.acquisition ? (() => {
+        // v17: 不動産取得税は単純な評価額×3%から、宅地の課税標準1/2特例（建物には無い）＋
+        // 免税点込みの acquisitionTaxOf に変わったので、内訳表示も土地・建物を分けて見せる。
+        // total（決済時の現金）には含まれない後払いの項目なので、行に注記を添える。
+        const at = L.acquisitionTaxOf(p, price);
+        return `<tr><td class="text-slate-600"><button type="button" class="acq-toggle inline-flex items-center gap-0.5 text-left">
+          <span class="inline-block transition-transform text-[9px]">▶</span>${term('fudosan_shutokuzei', '不動産取得税')}（後日納付）</button></td><td class="text-right">${L.yen(c.acquisition)}</td></tr>
         <tr class="acq-detail hidden bg-white"><td colspan="2" class="pl-3 py-1"><table class="w-full">${assessedBreakdownRows(p)}
-          <tr><td class="text-slate-500">${term('fudosan_shutokuzei', '不動産取得税')} = 評価額 × ${(L.ACQUISITION_TAX_RATE * 100).toFixed(0)}%</td><td class="text-right font-bold">${L.yen(c.acquisition)}</td></tr>
-        </table></td></tr>` : ''}
+          <tr><td class="text-slate-500">土地: 評価額×1/2×3%（免税点10万円未満は0）</td><td class="text-right">${L.yen(at.land)}</td></tr>
+          <tr><td class="text-slate-500">建物: 評価額×3%（免税点12万円未満は0）</td><td class="text-right">${L.yen(at.bldg)}</td></tr>
+          <tr class="border-t"><td class="text-slate-500">${term('fudosan_shutokuzei', '不動産取得税')}合計</td><td class="text-right font-bold">${L.yen(c.acquisition)}</td></tr>
+        </table></td></tr>`;
+      })() : ''}
       ${row('司法書士報酬', c.scrivener)}
-      ${row('融資事務手数料', c.loanFee)}
+      ${(() => {
+        // v17: 融資事務手数料は銀行で型が違う（公庫だけ定額、他は借入額×2.2%で上限なし）。
+        // この画面はまだ銀行を選ぶ前なので、高いほう（定率）で必要現金を出しつつ、
+        // 公庫を選べばここまで下がることを併記する。片方だけ見せると、下の銀行カードに
+        // 出る金額と食い違って「どっちが本当か」が分からなくなる。
+        if (!c.loanFee) return '';
+        const flat = L.loanArrangementFee(loanAmount, 'kouko');
+        return `<tr><td class="text-slate-600">融資事務手数料（借入額の${L.fmtTaxRate(L.LOAN_FEE_RATE)}）</td><td class="text-right">${L.yen(c.loanFee)}</td></tr>
+          ${flat < c.loanFee ? `<tr><td class="text-slate-500 pl-3 text-[10px]">└ 日本政策金融公庫なら定額</td><td class="text-right text-[10px] text-emerald-700">${L.yen(flat)}</td></tr>` : ''}`;
+      })()}
+      ${row(`火災保険料（${L.FIRE_INSURANCE_YEARS}年一括）`, c.insurance)}
+      ${row(`消費税（建物分・売主が法人のため${L.fmtTaxRate(L.CONSUMPTION_TAX)}）`, c.consumptionTax)}
       ${row('固定資産税の日割精算', c.propTaxSettle)}
     </table>
     <div class="text-[10px] text-slate-500 mt-1">登録免許税と不動産取得税は${term('hyoka_gaku', '固定資産税評価額')}が基準です。指値や売り急ぎで価格が下がっても評価額は変わりません。${loanAmount > 0 ? '融資を使うと抵当権設定と事務手数料が上乗せされます。' : '現金購入なので抵当権設定と事務手数料はかかりません。'}</div>
@@ -10227,6 +10710,7 @@ function showPayment(propId, price, close) {
     const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[94vh] flex flex-col" style="max-height:94dvh">
       <div class="p-4 pb-1.5 shrink-0 flex justify-between items-center gap-2"><h2 class="font-bold" style="font-size:clamp(0.7rem,4vw,0.9rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto">支払い方法（成約価格 ${L.yen(price)}）</h2><button id="pay-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
       <div class="px-4 pb-1.5 space-y-1.5 overflow-y-auto flex-1 min-h-0">
+      <div class="flex justify-center">${sellerTypeBadge(p)}</div>
       ${state.isIncorporated ? `<div class="flex gap-2 text-sm items-center"><span class="font-bold shrink-0">名義:</span>
         <label class="flex-1 border rounded p-1 text-center cursor-pointer ${buyOwner === 'personal' ? 'bg-slate-100 font-bold border-navy' : ''}"><input type="radio" name="buy-owner" value="personal" ${buyOwner === 'personal' ? 'checked' : ''} class="mr-1">👤 個人</label>
         <label class="flex-1 border rounded p-1 text-center cursor-pointer ${buyOwner === 'corp' ? 'bg-slate-100 font-bold border-navy' : ''}"><input type="radio" name="buy-owner" value="corp" ${buyOwner === 'corp' ? 'checked' : ''} class="mr-1">🏢 法人</label></div>` : ''}
@@ -10276,7 +10760,7 @@ function showPayment(propId, price, close) {
             <b class="min-w-0" style="${bankNameStyle}">◯ ${r.label}</b>
             ${metricsBadge(r, true)}
           </div>
-          <div class="text-[11px] text-white/80 mt-0.5">金利${(r.terms.rate * 100).toFixed(2)}%・${r.terms.years}年</div>
+          <div class="text-[11px] text-white/80 mt-0.5">金利${(r.terms.rate * 100).toFixed(2)}%${guaranteeNote(r.bankKey)}・${r.terms.years}年</div>
           <div class="text-[11px] text-white/80">月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div>
           <button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button></div>`
       : `<div class="bank-rejected border rounded p-1.5 mb-1 bg-slate-50 cursor-pointer" data-k="${r.bankKey}">
@@ -10378,7 +10862,7 @@ function openCorpTransfer(propId) {
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <table class="w-full text-sm">
       <tr><td>移転価格（現在の時価）</td><td class="text-right font-bold">${L.yen(price)}</td></tr>
-      <tr class="border-t"><td>${term('capital_gains_tax', '譲渡税')}（個人側・${heldYears <= 5 ? '短期39%' : '長期20%'}）</td><td class="text-right text-red-600">-${L.yen(capTax)}</td></tr>
+      <tr class="border-t"><td>${term('capital_gains_tax', '譲渡税')}（個人側・${L.isLongTermHold(state, p) ? `長期${L.fmtTaxRate(L.CONFIG.capGainTaxLong)}` : `短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}`}）</td><td class="text-right text-red-600">-${L.yen(capTax)}</td></tr>
       <tr><td>取得コスト（法人側・5%）</td><td class="text-right text-red-600">-${L.yen(acqCost)}</td></tr>
       <tr class="border-t font-bold"><td>支払い合計</td><td class="text-right text-red-600">${L.yen(total)}</td></tr>
     </table>
@@ -10475,12 +10959,19 @@ function netProceedsBox(p, price, hideWait = false) {
   // 益が出ていなければ税額も0で、待っても手取りは変わらない。カウントダウンはノイズになるので出さない。
   const waitGain = Math.round(bd.gain * (L.CONFIG.capGainTaxShort - L.CONFIG.capGainTaxLong));
   const toLong = (waitGain > 0 && !hideWait) ? L.monthsToLongTerm(state, p) : 0;
-  const rateLabel = p.owner === 'corp' ? '🏢法人 一律30%'
-    : `👤個人 ${bd.longTerm ? '長期' : '短期'}${Math.round(bd.rate * 100)}%`;
+  const rateLabel = p.owner === 'corp' ? `🏢法人 一律${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}`
+    : `👤個人 ${bd.longTerm ? '長期' : '短期'}${L.fmtTaxRate(bd.rate)}`;
   // v8.20: 800万円以下は低廉物件特例で定額33万円（税込）。超えると速算式の階段（売却価格帯で変わる）。
   const brokerLabel = bd.price <= L.LOW_PRICE_BROKER_FEE_MAX_PRICE ? '低廉物件特例・定額33万円（税込）'
     : bd.price <= 4_000_000 ? '価格の4%＋2万＋税'
     : '価格の3%＋6万＋税';
+  // v17: 建物の売却は消費税の課税取引。課税事業者（isConsumptionTaxPayer）なら建物分の
+  // 消費税を預かって後日納付する義務が生じる。譲渡税（v16）と同じ扱いで、手取り(net)は
+  // 消費税を引いた額にはしない（納付は翌年3月／決算+2ヶ月と後日のため）が、必ず見えるようにする。
+  const isPayer = L.isConsumptionTaxPayer(state);
+  const bldgPortion = Math.round(bd.price * (p.bldgRatio ?? 0.5));
+  const ctax = isPayer ? Math.round(bldgPortion * L.CONSUMPTION_TAX) : 0;
+  const ctaxDue = p.owner === 'corp' ? '決算の2ヶ月後にまとめて納付' : '翌年3月にまとめて納付';
   return `<div class="rounded-lg bg-slate-50 p-2 text-xs space-y-0.5">
     <table class="w-full">
       <tr><td class="text-slate-600">売却価格</td><td class="text-right font-bold">${L.yen(bd.price)}</td></tr>
@@ -10491,8 +10982,11 @@ function netProceedsBox(p, price, hideWait = false) {
       <tr><td class="text-slate-600">残債の精算</td><td class="text-right text-red-600">${bd.payoff ? `-${L.yen(bd.payoff)}` : '—'}</td></tr>
       <tr class="border-t font-bold"><td>手取り</td><td class="text-right ${bd.net >= 0 ? 'text-emerald-700' : 'text-red-600'}">${L.yen(bd.net)}</td></tr>
     </table>
-    ${toLong > 0 ? `<div class="text-amber-800 font-bold">⏳ あと${toLong}ヶ月待つと長期20%。いまの価格なら手取りが ${L.yen(waitGain)} 増える計算</div>` : ''}
+    ${toLong > 0 ? `<div class="text-amber-800 font-bold">⏳ あと${toLong}ヶ月待つと長期${L.fmtTaxRate(L.CONFIG.capGainTaxLong)}。いまの価格なら手取りが ${L.yen(waitGain)} 増える計算</div>` : ''}
     <div class="text-[10px] text-slate-500">課税対象益 ${L.yen(bd.gain)}（売却価格 − ${term('book_value', '簿価')} ${L.yen(bd.book)}）</div>
+    ${isPayer
+      ? `<div class="text-amber-800 bg-amber-50 rounded px-2 py-1">🧾 消費税 ${L.yen(ctax)}（建物分・${ctaxDue}／上の手取りには含まれていません）</div>`
+      : `<div class="text-slate-500">免税事業者のため消費税の納付はありません</div>`}
   </div>`;
 }
 
@@ -11483,7 +11977,7 @@ function playIncorporationCelebration() {
         <div class="font-bold text-navy">ここが変わりました</div>
         <div>✅ 購入時に<b>名義（👤個人／🏢法人）</b>を選べるように</div>
         <div>✅ 法人名義の物件は<b>${term('dead_cross', 'デッドクロス')}後の課税が30%</b>に軽減（個人は40%）</div>
-        <div>✅ 法人名義の売却は<b>保有期間に関係なく${term('capital_gains_tax', '譲渡税')}30%</b>（個人の短期39%より転売に有利）</div>
+        <div>✅ 法人名義の売却は<b>保有期間に関係なく${term('capital_gains_tax', '譲渡税')}${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}</b>（個人の短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}より転売に有利）</div>
         <div>✅ 既存の物件は<b>👤個人名義のまま</b>。詳細画面の「🏢法人へ売却」で移転できます（ローン完済物件のみ・移転すると減価償却が再スタート）</div>
       </div>
       <button id="ic-close" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-3 font-bold">経営を続ける ▶</button>
@@ -12401,7 +12895,9 @@ function onNextMonth() {
   // v8.1: どの税率で売ったかを必ず添える。ここで印象づけないと、5年ルールは最後まで学習されない。
   settling.forEach((s, i) => setTimeout(() => {
     const bd = s.bd;
-    const stamp = !bd ? '売却成立' : s.corp ? '法人30%' : bd.longTerm ? '長期20%' : '短期39%';
+    const stamp = !bd ? '売却成立'
+      : s.corp ? `法人${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}`
+      : bd.longTerm ? `長期${L.fmtTaxRate(L.CONFIG.capGainTaxLong)}` : `短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}`;
     const title = !bd ? '売り抜けた！' : s.corp ? '法人名義で売却！' : bd.longTerm ? '長期まで待った！' : '短期での売却…';
     const sub = bd
       ? `${s.label} ／ ${L.yen(bd.price)}　譲渡税 -${L.yen(bd.tax)}${bd.payoff ? ` ／ 残債 -${L.yen(bd.payoff)}` : ''}<br>手取り <b>${L.yen(bd.net)}</b>`
