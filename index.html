@@ -342,8 +342,9 @@ export function monthsUntilCalMonth(month, targetCalMonth) {
 export const CASH_CATEGORIES = {
   rent:   { label: '🏠 家賃収入' },
   sale:   { label: '💰 売却の入金' },
+  loan_draw: { label: '🏦 借入の実行' },   // v18.2: 融資の実行そのものを明細に出す（購入・工事の自己負担分だけが見えていた反対側）
   refund: { label: '🛡️ 保険金・還付' },
-  work:   { label: '💼 副業収入' },
+  work:   { label: '💼 労働収入' },   // v18.2: 「内職」的な作業でも実態は労働の対価であって副業ではないため改称
   opex:   { label: '🧹 運営費' },
   loan:   { label: '🏦 ローン返済' },
   tax:    { label: '🧾 税金' },
@@ -364,14 +365,28 @@ function trimCashLog(s) {
   s.cashLog = (s.cashLog || []).filter(e => e.month >= cutoff);
 }
 
+// v18.2: propertyIdから名義（owner）を引くための検索。物件は「買う前」（購入処理の途中で
+// まだs.propertiesに入っていない）ではs.marketに、それ以外はs.propertiesにある。どちらも
+// 同じオブジェクト参照を配列に持っているだけなので、buyPropertyV2がその場でp.ownerを
+// セットした直後ならs.marketを見てもowner確定後の値が拾える。
+function findPropertyById(s, propertyId) {
+  return (s.properties || []).find(x => x.id === propertyId)
+    ?? (s.market || []).find(x => x.id === propertyId)
+    ?? null;
+}
+
 // v18: 現金操作の一本化。s.cashを動かすのと同時に、何の収支で動いたかをcashLogへ1件積む。
 // 以後、現金を動かす箇所は必ずこれを通す（40箇所以上に散らばる現金操作を1つずつ書き換えると
 // 必ずどこか漏れるため、advanceMonthの最後で「実際の現金増減とcashLogの記録額」を突き合わせ、
 // 差額をotherとして自動計上する安全網もあわせて用意してある＝advanceMonth参照）。
-export function moveCash(s, amount, cat, label, propertyId = null) {
+// v18.2: ownerを持たせる。呼び出し側が明示しなければ、propertyIdから物件のp.ownerを引く
+// （毎回呼び出し側に書かせると書き忘れが出るため）。物件に紐づかない収支（労働収入・
+// 法人設立費用など）はowner省略時 'personal' になる。
+export function moveCash(s, amount, cat, label, propertyId = null, owner = null) {
+  const resolvedOwner = owner ?? (propertyId != null ? findPropertyById(s, propertyId)?.owner : null) ?? 'personal';
   s.cash += amount;
   s.cashLog = s.cashLog || [];
-  s.cashLog.push({ month: s.month, cat, amount: Math.round(amount), label, propertyId });
+  s.cashLog.push({ month: s.month, cat, amount: Math.round(amount), label, propertyId, owner: resolvedOwner });
   trimCashLog(s);
   return s;
 }
@@ -987,7 +1002,15 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
     p.downPaid = price;   // v15: 現金購入は全額が自己資金
   } else {
     const terms = reviewLoan(method, p, price, downRatio, s, reformPlan).terms;
-    moveCash(s, -(Math.round(price * downRatio) + closing), 'buy', `${p.label} を購入（頭金・諸費用）`, p.id);
+    // v18.2: 借入の実行（入金）と物件代金・諸費用の支払い（出金）を2本の明細に分ける。
+    // ただしloanAmountに上乗せしたリフォーム費（reformCost）は現金を経由しない
+    // （上のreformCost>0ブロックのとおり、決済と同時に着工し「ここで現金は引かない」設計＝
+    // 業者へは融資から直接支払われる想定）。これをloan_drawに含めると、借りた分だけ
+    // 手元現金が増えて見えるのに実際には使える現金は1円も増えていない食い違いが起きるため、
+    // loan_drawは物件価格ぶんの融資（loanAmount − reformCost）だけを計上する。
+    const cashLoanPortion = loanAmount - reformCost;
+    if (cashLoanPortion > 0) moveCash(s, cashLoanPortion, 'loan_draw', `${p.label} の融資実行`, p.id);
+    moveCash(s, -(price + closing), 'buy', `${p.label} を購入（物件代金・諸費用）`, p.id);
     p.loan = { bankKey: method, principal: loanAmount,
       rate: bankRate(method, s), years: terms?.years ?? BANKS[method].termMax, monthsPaid: 0,
       reformIncluded: reformCost || 0 };   // v15: 内訳の表示用に、いくらリフォームぶんかを残す
@@ -1314,10 +1337,15 @@ export const CONSUMPTION_TAX = 0.10;
 // v17: 消費税の課税事業者判定。住宅の家賃は非課税売上なので賃貸経営だけなら基本は免税事業者だが、
 // 建物の売却は課税取引。その年の課税売上高（建物分）が1,000万円を超えると、2年後（基準期間）
 // から課税事業者になり、以後の建物売却分の消費税を納付する義務が生じる（settleSaleが積む）。
+// v18.2: 個人事業主と法人は別の納税義務者なので、課税売上高は名義ごとの箱（personal/corp）に
+// 分けて積む（state.taxableSalesByYear = { personal: {年:額}, corp: {年:額} }）。判定も
+// ownerを指定して、その名義の基準期間だけを見る（法人名義で大きく売っても個人まで
+// 課税事業者になってしまう、という誤りを是正する）。
 export const CONSUMPTION_TAX_THRESHOLD = 10_000_000;
-export function isConsumptionTaxPayer(state) {
+export function isConsumptionTaxPayer(state, owner = 'personal') {
   const baseYear = calYearOf(state.month) - 2;
-  return (state.taxableSalesByYear?.[baseYear] ?? 0) > CONSUMPTION_TAX_THRESHOLD;
+  const bucket = state.taxableSalesByYear?.[owner === 'corp' ? 'corp' : 'personal'];
+  return (bucket?.[baseYear] ?? 0) > CONSUMPTION_TAX_THRESHOLD;
 }
 export const LOW_PRICE_BROKER_FEE_MAX_PRICE = 8_000_000;   // 特例の対象上限（税抜価格）
 export const LOW_PRICE_BROKER_FEE_CAP = 330_000;            // 特例の報酬上限（30万円＋消費税10%）
@@ -1688,18 +1716,24 @@ export function settleSale(state, sale) {
   // v16: 譲渡税は即時徴収しない。個人は帳簿（book.capGainTax）に積んで翌年3月にまとめて
   // 納付、法人は総合課税なので売却益をそのまま益金（book.income）へ合流させ、決算で払う。
   // どちらも「今は税を引かず」現金へ入れ、実際の納税は s.taxSchedule 経由で後日引かれる。
-  moveCash(s, bd.net + capTax, 'sale', `${p.label} を売却`, p.id);   // 売却価格 − 残債 − 諸費用（譲渡税は後日別枠で納付）
+  // v18.2: 売却の入金と残債の一括返済を2本の明細に分ける。合計は従来どおり
+  // bd.net + capTax（＝price − costs.total − payoff）と1円もずれない
+  // （bd.net = price − tax − payoff − costs.total なので、税を足し戻すと payoff と costs.total だけが残る）。
+  moveCash(s, sale.price - costs.total, 'sale', `${p.label} を売却`, p.id);
+  if (payoff > 0) moveCash(s, -payoff, 'loan', `${p.label} の残債を一括返済`, p.id);
   const book = bookOf(s, p.owner);
   if (p.owner === 'corp') book.income += gain;
   else book.capGainTax += capTax;
   if (p.loan) { const rel = s.bankRelations?.[p.loan.bankKey]; if (rel) rel.paidOff += 1; }
   // v17: 建物の売却は消費税の課税取引。免税・課税の判定は「今年より2年前（基準期間）」の
   // 課税売上高で決まるので、まず今回の売却で消費税を納めるかどうかを（今年の売上を積む前に）判定する。
-  const isPayer = isConsumptionTaxPayer(s);
+  // v18.2: 個人事業主と法人は別の納税義務者なので、売った物件の名義（p.owner）側の基準期間だけを見る。
+  const isPayer = isConsumptionTaxPayer(s, p.owner);
   const bldgPortion = Math.round(sale.price * (p.bldgRatio ?? 0.5));
-  s.taxableSalesByYear = s.taxableSalesByYear || {};
+  s.taxableSalesByYear = s.taxableSalesByYear || { personal: {}, corp: {} };
+  if (!s.taxableSalesByYear[p.owner]) s.taxableSalesByYear[p.owner] = {};
   const saleYear = calYearOf(s.month);
-  s.taxableSalesByYear[saleYear] = (s.taxableSalesByYear[saleYear] ?? 0) + bldgPortion;
+  s.taxableSalesByYear[p.owner][saleYear] = (s.taxableSalesByYear[p.owner][saleYear] ?? 0) + bldgPortion;
   if (isPayer) {
     const ctaxAmount = Math.round(bldgPortion * CONSUMPTION_TAX);
     let dueMonth;
@@ -2012,7 +2046,10 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
   let loanAmount = 0;
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の原状回復（自己負担分）`, p.id);
+    // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
+    // 合計は従来の自己負担分（cost-loanAmount）と同じ現金の減りになる。
+    moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
+    moveCash(s, -cost, 'repair', `${p.label} の原状回復`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
@@ -2286,7 +2323,9 @@ export function startRepair(state, propertyId, kind, opts = {}) {
   let loanAmount = 0;
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の${REPAIR_KINDS[kind].label}（自己負担分）`, p.id);
+    // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
+    moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
+    moveCash(s, -cost, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
@@ -2421,7 +2460,9 @@ export function startProfessionalRepair(state, propertyId, financed = false) {
   let loanAmount = 0;
   if (canFinance) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の大規模修繕（自己負担分）`, p.id);
+    // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
+    moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
+    moveCash(s, -cost, 'repair', `${p.label} の大規模修繕`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
@@ -2503,7 +2544,9 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
   let loanAmount = 0;
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
-    moveCash(s, -(cost - loanAmount), 'repair', `${p.label} の${plan.label}（自己負担分）`, p.id);
+    // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
+    moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
+    moveCash(s, -cost, 'repair', `${p.label} の${plan.label}`, p.id);
     addSpend(p, 'valueUpSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
@@ -2581,8 +2624,40 @@ export function totalAssetsV2(state) {
   return (state.cash ?? 0) + (state.properties || []).reduce((t, p) => t + marketValueOf(p), 0);
 }
 export function netWorth(state) { return Math.round(totalAssetsV2(state) - totalDebt(state)); }
+
+// v18.2: 「💰 お金」ハブの資産タブ用。総資産・総負債を個人名義／法人名義で分けて出す。
+// 物件の時価はmarketValueOf、残債はloanPayoffOf（totalDebtが物件ごとに合算しているのと同じ式）を
+// そのまま使い、ここで新しい評価式は作らない。現金は名義で分けられないので合算のまま1つで返す
+// （呼び出し側で「現金は分けられない」旨を注記する）。
+export function assetsByOwner(state) {
+  const mk = () => ({ assets: 0, debt: 0, net: 0 });
+  const out = { personal: mk(), corp: mk() };
+  for (const p of state.properties || []) {
+    const b = p.owner === 'corp' ? out.corp : out.personal;
+    b.assets += marketValueOf(p);
+    b.debt += loanPayoffOf(p);
+  }
+  out.personal.net = Math.round(out.personal.assets - out.personal.debt);
+  out.corp.net = Math.round(out.corp.assets - out.corp.debt);
+  return { cash: state.cash ?? 0, personal: out.personal, corp: out.corp };
+}
+
 export function monthlyCF(state) {
   return (state.properties || []).reduce((t, p) => t + (p.history?.at(-1)?.cf ?? 0), 0);
+}
+
+// v18.2: cashLogのエントリ群を個人・法人で分け、それぞれの収入・支出・純額を出す。
+// monthlyCashSummary（カテゴリごとのbyOwner）とrecentCashSummaries（月ごとのbyOwner）の
+// 両方から使う共通部品。
+function cashByOwner(entries) {
+  const mk = () => ({ income: 0, expense: 0, net: 0 });
+  const out = { personal: mk(), corp: mk() };
+  for (const e of entries) {
+    const b = out[e.owner === 'corp' ? 'corp' : 'personal'];
+    if (e.amount > 0) b.income += e.amount; else b.expense -= e.amount;
+    b.net += e.amount;
+  }
+  return out;
 }
 
 // v18: 指定した月のcashLogを集計する。income/expenseはどちらも正の額で返す
@@ -2596,11 +2671,15 @@ export function monthlyCashSummary(state, month) {
   const groups = new Map();
   for (const e of entries) {
     if (!groups.has(e.cat)) {
-      groups.set(e.cat, { cat: e.cat, label: CASH_CATEGORIES[e.cat]?.label ?? e.cat, amount: 0, items: [] });
+      // v18.2: カテゴリごとに個人・法人の内訳（byOwner）を持たせる（UIが名義別の内訳を出せるように）。
+      groups.set(e.cat, { cat: e.cat, label: CASH_CATEGORIES[e.cat]?.label ?? e.cat, amount: 0,
+        byOwner: { personal: 0, corp: 0 }, items: [] });
     }
     const g = groups.get(e.cat);
     g.amount += e.amount;
-    g.items.push({ label: e.label, amount: e.amount, propertyId: e.propertyId });
+    const owner = e.owner === 'corp' ? 'corp' : 'personal';
+    g.byOwner[owner] += e.amount;
+    g.items.push({ label: e.label, amount: e.amount, propertyId: e.propertyId, owner });
   }
   const all = [...groups.values()];
   // 収入カテゴリを先、支出カテゴリを後に。それぞれの中では金額（絶対値）が大きい順。
@@ -2610,11 +2689,15 @@ export function monthlyCashSummary(state, month) {
 }
 
 // v18: 直近months ヶ月ぶんの収支サマリーを新しい順に返す（過去12ヶ月の推移表示用）。
+// v18.2: 各月にbyOwner（個人・法人それぞれのincome/expense/net）を持たせる。
 export function recentCashSummaries(state, months = 12) {
   const out = [];
   for (let m = state.month; m > state.month - months; m--) {
-    const { income, expense, net } = monthlyCashSummary(state, m);
-    out.push({ month: m, income, expense, net });
+    const entries = (state.cashLog || []).filter(e => e.month === m);
+    const income = entries.filter(e => e.amount > 0).reduce((t, e) => t + e.amount, 0);
+    const expense = entries.filter(e => e.amount < 0).reduce((t, e) => t - e.amount, 0);
+    const net = income - expense;
+    out.push({ month: m, income, expense, net, byOwner: cashByOwner(entries) });
   }
   return out;
 }
@@ -3281,7 +3364,10 @@ export function applyEventChoice(state, event, choiceIndex, targetId, unitIndex 
   if (cost > 0) {
     const q = method === 'loan' ? eventLoanQuote(s, cost) : null;
     if (q && p) {
-      moveCash(s, -q.selfPay, 'event', `${p.label} イベント対応（自己負担分）`, p.id);
+      // v18.2: 借入の実行（+q.amount）とイベント対応費の全額支払い（-cost）を2本で記録する。
+      // 合計は従来の自己負担分（-q.selfPay = -(cost - q.amount)）と同じ現金の減りになる。
+      moveCash(s, q.amount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
+      moveCash(s, -cost, 'event', `${p.label} イベント対応`, p.id);
       p.reformLoans = p.reformLoans || [];
       p.reformLoans.push({ principal: q.amount, rate: q.rate, years: q.years, monthsPaid: 0 });
       addSpend(p, 'troubleSpend', q.selfPay);
@@ -3375,7 +3461,7 @@ export function doWork(state, rng = Math.random) {
   s.actionPower -= 1;
   // v3.9: 金額幅(1,000〜10,000円)は維持しつつ低額を引きやすく偏らせ、平均を約2,000円（旧5,500円の約37%）に。
   const earned = (10 + Math.floor(Math.pow(rng(), 6) * 91)) * 100;
-  moveCash(s, earned, 'work', '副業');
+  moveCash(s, earned, 'work', '労働');   // v18.2: CASH_CATEGORIES.workの改称に合わせてラベルも揃える
   return { state: s, earned };
 }
 
@@ -3419,7 +3505,9 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
     },
     taxSchedule: [],
     cashLog: [],   // v18: 現金の動きの明細（moveCash参照）。直近CASH_LOG_RETENTION_MONTHSヶ月ぶんだけ保持する
-    taxableSalesByYear: {},   // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高（建物分）
+    // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高（建物分）。
+    // v18.2: 個人事業主と法人は別の納税義務者なので、名義ごとに分けて積む。
+    taxableSalesByYear: { personal: {}, corp: {} },
     salesSearch: { spent: 0, threshold: null },
     nextPropertyId: 1,
     unlockedRegions: ['main'],   // v9-A: 解放済みの陸地。開発区・競売区・海外は条件を満たすと増える
@@ -3471,8 +3559,12 @@ export function transferToCorp(state, propertyId) {
   const capTax = Math.round(gain * capGainTaxRate(s, p));
   const acqCost = Math.round(price * CONFIG.corpTransferCostRate);
   if (s.cash < capTax + acqCost) return { state, done: false, reason: 'cash' };
-  if (capTax > 0) moveCash(s, -capTax, 'tax', `${p.label} 法人へ移転（譲渡税）`, p.id);
-  if (acqCost > 0) moveCash(s, -acqCost, 'buy', `${p.label} 法人へ移転（取得コスト）`, p.id);
+  // v18.2: 移転は「個人が売り、法人が買う」取引なので、名義を明示して両側に振り分ける。
+  // 譲渡税は売主＝個人の負担、取得コスト（不動産取得税・登録免許税・登記費用）は
+  // 買主＝法人の負担。この時点ではまだ p.owner が 'personal' のままなので、
+  // propertyId から自動判定させると両方とも個人に付いてしまう。
+  if (capTax > 0) moveCash(s, -capTax, 'tax', `${p.label} 法人へ移転（譲渡税）`, p.id, 'personal');
+  if (acqCost > 0) moveCash(s, -acqCost, 'buy', `${p.label} 法人へ移転（取得コスト）`, p.id, 'corp');
   p.owner = 'corp';
   p.boughtPrice = price;
   p.boughtMonth = s.month;
@@ -4370,7 +4462,15 @@ export function advanceMonth(state, rng = Math.random) {
         (p.areaKey ?? 'local') === areaKey && calYearOf(s.month) >= (p.propTaxFromYear ?? 0));
       if (!payable.length) continue;
       const total = payable.reduce((t, p) => t + propTaxQuarterAmount(p.propTaxA, periodIdx), 0);
-      moveCash(s, -total, 'tax', `固定資産税 第${periodIdx}期（${PROP_TAX_AREA_LABEL[areaKey]}${payable.length}物件）`);
+      // v18.2: エリアの納期グループには個人名義・法人名義の物件が混在しうるので、
+      // どちらの財布から出た税かをownerに残すため、名義ごとに分けてmoveCashへ積む
+      // （ログの表示は従来どおりエリアの納期グループごとに1行のままにする）。
+      for (const owner of ['personal', 'corp']) {
+        const ownerPayable = payable.filter(p => p.owner === owner);
+        if (!ownerPayable.length) continue;
+        const ownerTotal = ownerPayable.reduce((t, p) => t + propTaxQuarterAmount(p.propTaxA, periodIdx), 0);
+        moveCash(s, -ownerTotal, 'tax', `固定資産税 第${periodIdx}期（${PROP_TAX_AREA_LABEL[areaKey]}${payable.length}物件）`, null, owner);
+      }
       logs.push(`🏛️ 固定資産税 第${periodIdx}期（${PROP_TAX_AREA_LABEL[areaKey]}${payable.length}物件・${yen(total)}）`);
     }
   }
@@ -4387,7 +4487,8 @@ export function advanceMonth(state, rng = Math.random) {
     // ラベルは締め処理側で「所得税の還付」のように既に還付だと分かる形で作られていることがある。
     // 二重に「の還付」を付けないよう、含まれていないときだけ補う。
     const refundLabel = x.label.includes('還付') ? x.label : `${x.label}の還付`;
-    moveCash(s, -x.amount, x.amount < 0 ? 'refund' : 'tax', x.amount < 0 ? refundLabel : x.label);
+    // v18.2: taxScheduleの各エントリは積んだ時点でownerを持っているので、それをそのまま使う。
+    moveCash(s, -x.amount, x.amount < 0 ? 'refund' : 'tax', x.amount < 0 ? refundLabel : x.label, null, x.owner ?? 'personal');
     if (x.kind === 'income_tax_prepay') ensureBooks(s).personal.prepaidIncomeTax = (ensureBooks(s).personal.prepaidIncomeTax ?? 0) + x.amount;
     if (x.kind === 'corp_tax_interim') ensureBooks(s).corp.prepaidCorpTax = (ensureBooks(s).corp.prepaidCorpTax ?? 0) + x.amount;
     logs.push(x.amount < 0 ? `🧾 ${x.label}（+${yen(-x.amount)}）` : `🧾 ${x.label}を納付（${yen(x.amount)}）`);
@@ -4509,7 +4610,18 @@ export function migrateSave(state) {
   if (!Array.isArray(s.cashLog)) s.cashLog = [];
   // v17: 消費税の課税事業者判定に使う暦年ごとの課税売上高。旧セーブには無いので空で始める
   // （過去の売却実績は復元できないが、免税事業者スタートは安全側＝プレイヤー有利な既定値）。
-  if (!s.taxableSalesByYear || typeof s.taxableSalesByYear !== 'object') s.taxableSalesByYear = {};
+  // v18.2: 個人事業主と法人は別の納税義務者に分けたので { personal: {}, corp: {} } の形にする。
+  // 旧形式（フラットな {年:額}）を検出したら personal 側へ寄せる（当時は名義を問わず1つの箱に
+  // 積んでいたため合算されており、法人名義ぶんだけを正確に取り出す手段が無い。個人へ寄せておけば
+  // 「本来非課税の個人が誤って課税事業者になる」方向にはブレず、安全側＝プレイヤー有利になる）。
+  if (!s.taxableSalesByYear || typeof s.taxableSalesByYear !== 'object') {
+    s.taxableSalesByYear = { personal: {}, corp: {} };
+  } else if (!('personal' in s.taxableSalesByYear) && !('corp' in s.taxableSalesByYear)) {
+    s.taxableSalesByYear = { personal: { ...s.taxableSalesByYear }, corp: {} };
+  } else {
+    s.taxableSalesByYear.personal = s.taxableSalesByYear.personal || {};
+    s.taxableSalesByYear.corp = s.taxableSalesByYear.corp || {};
+  }
   if (s.isIncorporated && s.corpFiscalMonth == null) s.corpFiscalMonth = 12;
   if (s.corpFiscalMonth === undefined) s.corpFiscalMonth = null;
   // v8.2: すでに壊れているセーブを読み込み時に直す。
@@ -5339,7 +5451,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -9061,6 +9173,21 @@ function openBooksModal() {
   openMoneyHub('tax');
 }
 
+// v18.2: 「💰 お金」ハブの全タブで共通の判定。法人化していない間は内訳を一切出さない方針
+// （個人しかいないのに「👤個人」と書いても情報が増えるだけ）なので、内訳を出すかどうかを
+// ここに1つだけ置き、各タブから呼ぶ（タブごとに別々の条件を書くと判定がずれる）。
+// state.isIncorporatedだけでなく、法人名義の実績（物件・現金明細・納税予定・課税売上）が
+// 実際に残っているかも見る（isIncorporatedが立つ前後で内訳がちらつかないようにするため）。
+function hasCorpSide(state) {
+  if (state.isIncorporated) return true;
+  if ((state.properties || []).some(p => p.owner === 'corp')) return true;
+  if ((state.cashLog || []).some(e => e.owner === 'corp')) return true;
+  if ((state.taxSchedule || []).some(x => x.owner === 'corp')) return true;
+  const corpSales = state.taxableSalesByYear?.corp;
+  if (corpSales && Object.values(corpSales).some(v => v > 0)) return true;
+  return false;
+}
+
 // v18: 「💰 お金」ハブの税金タブ。旧 openBooksModal の中身をそのまま移設。
 // 今月の収支ブロック（monthlyCashBox）は独立した「今月」タブへ切り出したので、ここには含めない。
 // uiStateは呼び出し側（openMoneyHub）が保持する { expenseOpen }。
@@ -9109,10 +9236,10 @@ function taxTabHtml(state, uiState) {
       const scale = L.isBusinessScale(state);
       const skipPrepaid = L.difficultyOf(state).skipPrepaidTax;
       const businessTaxLine = skipPrepaid
-        ? `<div class="text-[11px] text-slate-500 mt-1">🏢 事業的規模: ${scale ? 'はい' : 'いいえ'}（初心者向けなので個人事業税・予定納税は発生しません）</div>`
+        ? `<div class="text-[11px] text-slate-500 mt-1">📏 事業的規模: ${scale ? 'はい' : 'いいえ'}（初心者向けなので個人事業税・予定納税は発生しません）</div>`
         : (() => {
             const bizTax = scale ? Math.round(Math.max(0, net - L.BUSINESS_TAX_DEDUCTION) * L.BUSINESS_TAX_RATE) : 0;
-            return `<div class="text-[11px] text-slate-500 mt-1">🏢 事業的規模（5棟10室以上）: ${scale ? `はい（概算の個人事業税 ${L.yen(bizTax)}）` : 'いいえ（個人事業税の対象外）'}</div>`;
+            return `<div class="text-[11px] text-slate-500 mt-1">📏 事業的規模（5棟10室以上）: ${scale ? `はい（概算の個人事業税 ${L.yen(bizTax)}）` : 'いいえ（個人事業税の対象外）'}</div>`;
           })();
       taxLines = `
         ${deduction > 0
@@ -9209,9 +9336,20 @@ function taxTabHtml(state, uiState) {
     : '<div class="text-slate-500 text-xs">まだ納税予定はありません（12月に暦年を締めると確定します）</div>';
 
   // (d) 経費の内訳。「元金返済は経費にならない」がデッドクロスの正体なので必ず明記する。
-  const capexRemain = state.properties.reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount * c.monthsLeft, 0), 0);
-  const capexMonthly = state.properties.reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount, 0), 0);
+  // v18.2: 5-2 この区分自体（運営費・固定資産税…）は個人・法人どちらの帳簿にも共通なので
+  // 一覧は1つに残し、見出しに対象を明記する。p.capexは物件（＝名義）ごとに積まれているので、
+  // 未償却残は名義ごとに集計して分けられる分だけ内訳を出す（法人側があるときだけ）。
+  const showCorpExpense = hasCorpSide(state);
+  const capexRemainOf = (owner) => state.properties
+    .filter(p => (p.owner === 'corp' ? 'corp' : 'personal') === owner)
+    .reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount * c.monthsLeft, 0), 0);
+  const capexMonthlyOf = (owner) => state.properties
+    .filter(p => (p.owner === 'corp' ? 'corp' : 'personal') === owner)
+    .reduce((t, p) => t + (p.capex || []).reduce((s, c) => s + c.monthlyAmount, 0), 0);
+  const capexRemain = capexRemainOf('personal') + capexRemainOf('corp');
+  const capexMonthly = capexMonthlyOf('personal') + capexMonthlyOf('corp');
   const expenseDetailHtml = `<div class="mt-1 text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
+    ${showCorpExpense ? `<div class="text-[10.5px] text-slate-400">対象: 👤 個人・🏢 法人 共通の経費区分です</div>` : ''}
     <div>運営費（管理費・修繕積立・管理会社への手数料）</div>
     <div>固定資産税</div>
     <div>支払利息</div>
@@ -9219,19 +9357,31 @@ function taxTabHtml(state, uiState) {
     <div>原状回復・日常メンテ・広告費・突発修繕</div>
     <div>資本的支出の償却</div>
     <div class="font-bold text-red-600 pt-1.5 mt-1 border-t">※ 元金返済は経費になりません（利益が出ているのに現金が減っていく「デッドクロス」の正体はこれです）</div>
-    ${capexRemain > 0 ? `<div class="pt-1.5 mt-1 border-t">資産計上した工事の未償却残 ${L.yen(capexRemain)}（毎月 ${L.yen(capexMonthly)} ずつ経費になります）</div>` : ''}
+    ${capexRemain > 0 ? `<div class="pt-1.5 mt-1 border-t">資産計上した工事の未償却残 ${L.yen(capexRemain)}（毎月 ${L.yen(capexMonthly)} ずつ経費になります）
+      ${showCorpExpense ? `<div class="text-[10.5px] text-slate-400 mt-0.5">👤 ${L.yen(capexRemainOf('personal'))} ／ 🏢 ${L.yen(capexRemainOf('corp'))}</div>` : ''}
+    </div>` : ''}
   </div>`;
 
   // (e) 消費税の課税事業者判定。「大きく売った2年後に課税事業者になる」時間差が要点なので、
   // 基準期間（2年前）の課税売上高と合わせて出す。
+  // v18.2: 5-1 taxableSalesByYearは名義ごとの箱 { personal, corp } になった。isConsumptionTaxPayerも
+  // owner引数を取るようになったので、個人・法人で別々に判定して行を分ける（法人だけ大きく
+  // 売っても個人まで課税事業者になってしまう、と誤読されないように）。法人側が無ければ
+  // 個人の1行だけ出す（hasCorpSideで全タブ共通判定）。
   const baseYear = L.calYearOf(state.month) - 2;
-  const baseSales = state.taxableSalesByYear?.[baseYear] ?? 0;
-  const isPayer = L.isConsumptionTaxPayer(state);
+  const payerLineHtml = (owner, label) => {
+    const sales = state.taxableSalesByYear?.[owner]?.[baseYear] ?? 0;
+    const payer = L.isConsumptionTaxPayer(state, owner);
+    return payer
+      ? `<div>${label}: <b>課税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(sales)}）。今後の建物売却で消費税を預かり、後日納付します。</div>`
+      : `<div class="text-slate-600">${label}: <b>免税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(sales)}／${L.yen(L.CONSUMPTION_TAX_THRESHOLD)}超で2年後から課税事業者）。</div>`;
+  };
+  const showCorpConsumptionTax = hasCorpSide(state);
+  const isPayer = L.isConsumptionTaxPayer(state, 'personal') || (showCorpConsumptionTax && L.isConsumptionTaxPayer(state, 'corp'));
   const consumptionTaxLine = `<div class="border rounded-lg p-3 mb-3 text-xs ${isPayer ? 'bg-amber-50' : ''}">
     <div class="font-bold text-sm mb-1">🧾 消費税</div>
-    ${isPayer
-      ? `<div>あなたは<b>課税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}）。今後の建物売却で消費税を預かり、後日納付します。</div>`
-      : `<div class="text-slate-600">あなたは<b>免税事業者</b>です（基準期間＝${baseYear > 0 ? `${baseYear}年目` : '開始前'}の課税売上 ${L.yen(baseSales)}／${L.yen(L.CONSUMPTION_TAX_THRESHOLD)}超で2年後から課税事業者）。</div>`}
+    ${payerLineHtml('personal', '👤 個人')}
+    ${showCorpConsumptionTax ? payerLineHtml('corp', '🏢 法人') : ''}
   </div>`;
 
   return `
@@ -9263,17 +9413,36 @@ function assetsTabHtml(state) {
     : `<div class="text-[11px] text-slate-500 mt-3">まだ売却した物件はありません</div>`;
   // 保有件数／総戸数。件数だけだと規模感が薄く、戸数まで見えて初めて実感が出る。
   const unitTotal = state.properties.reduce((t, p) => t + p.units.length, 0);
+  // v18.2: 3. 資産タブ。法人側があるときだけ、総資産・総負債・純資産の各行の下に
+  // 名義ごとの内訳を小さく添える。現金は名義で分けられないのでその旨だけ1行注記する
+  // （既存のassetsByOwnerが返すcashは合算値。この関数の外で新しい評価式は作らない）。
+  const showOwner = hasCorpSide(state);
+  const byOwner = showOwner ? L.assetsByOwner(state) : null;
+  // v18.2: 名義の内訳は「物件だけ」を割ったもので、現金は入らない（現金に名義は無い）。
+  // 総資産・純資産の行にそのまま添えると 👤＋🏢 が上の合計と一致せず、読んだ人が
+  // 足し算して混乱する。何を割った内訳なのかを prefix で必ず名乗らせる。
+  const ownerRow = (personalVal, corpVal, prefix = 'うち物件') => showOwner
+    ? `<tr><td colspan="2" class="pt-0 pb-1"><div class="text-[10.5px] text-slate-400 text-right tabular-nums">${prefix} 👤 ${L.yen(personalVal)} ／ 🏢 ${L.yen(corpVal)}</div></td></tr>`
+    : '';
+  const corpN = state.properties.filter(p => p.owner === 'corp').length;
+  const persN = state.properties.length - corpN;
+  const ownerCountHtml = showOwner ? `<div class="text-[11px] text-slate-500 mt-1">👤個人${persN}件 ・ 🏢法人${corpN}件</div>` : '';
   return `${bsElapsedRow('light')}
   <div class="text-[11px] text-slate-500 border-b pb-1 mb-2">
     保有 <b>${state.properties.length}件</b>／総戸数 <b>${unitTotal}戸</b></div>
   <table class="w-full text-sm">
     <tr><td>手元現金</td><td class="text-right font-bold">${L.yen(state.cash)}</td></tr>
+    ${showOwner ? `<tr><td colspan="2" class="pt-0 pb-1"><div class="text-[10.5px] text-slate-400 text-right">※ 現金に名義は無いので、下の内訳は物件だけを割ったものです</div></td></tr>` : ''}
     <tr class="border-t"><td>総資産（現金＋物件時価）</td><td class="text-right">${L.yen(L.totalAssetsV2(state))}</td></tr>
+    ${byOwner ? ownerRow(byOwner.personal.assets, byOwner.corp.assets, 'うち物件') : ''}
     <tr><td>総負債（残債）</td><td class="text-right text-red-600">-${L.yen(L.totalDebt(state))}</td></tr>
+    ${byOwner ? ownerRow(byOwner.personal.debt, byOwner.corp.debt, '内訳') : ''}
     <tr class="border-t font-bold"><td>${term('net_worth', '純資産')}</td><td class="text-right text-emerald">${L.yen(L.netWorth(state))}</td></tr>
+    ${byOwner ? ownerRow(byOwner.personal.net, byOwner.corp.net, 'うち物件（時価−残債）') : ''}
     <tr class="border-t"><td>${term('credit_score', '信用度')}</td><td class="text-right">${state.creditScore}</td></tr>
   </table>
   <button id="mh-props" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-3">🏠 保有物件一覧（${state.properties.length}件）</button>
+  ${ownerCountHtml}
   ${soldBlock}
   ${!state.isIncorporated ? `<div class="mt-4 pt-4 border-t">
     <h3 class="font-bold text-sm mb-1">🏢 法人化</h3>
@@ -9288,19 +9457,38 @@ function assetsTabHtml(state) {
 function loansTabHtml(state) {
   const loans = L.allLoansOf(state);
   if (!loans.length) return '<div class="text-slate-500 text-sm">借入はありません</div>';
+  // v18.2: allLoansOf自体は名義を持たないので、propertyIdから物件の名義（owner）を引いて
+  // 各ローンに添える（物件詳細ヘッダーと同じ考え方＝ローンではなく物件に名義が紐づく）。
+  const ownerOf = (propertyId) => state.properties.find(p => p.id === propertyId)?.owner === 'corp' ? 'corp' : 'personal';
   const totalBalance = loans.reduce((t, x) => t + x.summary.balance, 0);
   const totalMonthlyPay = loans.reduce((t, x) => t + x.summary.monthlyPay, 0);
   // 今年の支払利息は、各ローンの返済予定表から「今年」（stateと同じ暦年）かつ返済済みの回だけ合計する
   // （L.loanSummary自体には年ごとの実績値が無いため、既存のamortizationScheduleから導く）。
   const thisYear = L.calYearOf(state.month);
-  const totalInterestThisYear = loans.reduce((t, x) => {
+  const interestThisYearOf = (x) => {
     const rows = L.amortizationSchedule(x.loan, x.summary.startMonth);
-    return t + rows.filter(r => r.paid && L.calYearOf(r.month) === thisYear).reduce((s, r) => s + r.interest, 0);
-  }, 0);
+    return rows.filter(r => r.paid && L.calYearOf(r.month) === thisYear).reduce((s, r) => s + r.interest, 0);
+  };
+  const totalInterestThisYear = loans.reduce((t, x) => t + interestThisYearOf(x), 0);
+  // v18.2: 上部3項目の名義別内訳。法人側があるときだけ添える（hasCorpSideで全タブ共通判定）。
+  const showOwner = hasCorpSide(state);
+  const byOwnerTotals = showOwner ? loans.reduce((t, x) => {
+    const b = t[ownerOf(x.propertyId)];
+    b.balance += x.summary.balance;
+    b.monthlyPay += x.summary.monthlyPay;
+    b.interest += interestThisYearOf(x);
+    return t;
+  }, { personal: { balance: 0, monthlyPay: 0, interest: 0 }, corp: { balance: 0, monthlyPay: 0, interest: 0 } }) : null;
+  const ownerLine = (personalVal, corpVal) => showOwner
+    ? `<div class="text-[10px] text-slate-400 tabular-nums mt-0.5">👤 ${L.yen(personalVal)} ／ 🏢 ${L.yen(corpVal)}</div>` : '';
   const rows = loans.map(x => {
     const { summary: sm } = x;
+    // v18.2: 各ローンの行に名義バッジ（物件一覧・物件詳細と同じ配色・書き方に揃える）。
+    // 法人側が無い間はバッジ自体を出さない（1-2の明細行と同じ方針）。
+    const owner = ownerOf(x.propertyId);
+    const badge = showOwner ? (owner === 'corp' ? '🏢 ' : '👤 ') : '';
     return `<button class="mh-loan-row w-full border rounded-lg p-2.5 text-left text-xs hover:bg-slate-50" data-id="${x.propertyId}">
-      <div class="font-bold text-sm">${x.name}（${sm.bankLabel}）</div>
+      <div class="font-bold text-sm">${badge}${x.name}（${sm.bankLabel}）</div>
       <div class="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-slate-600">
         <span>残債 <b class="text-red-600">${L.yen(sm.balance)}</b></span>
         <span>金利 <b>${(sm.rate * 100).toFixed(2)}%</b></span>
@@ -9311,9 +9499,9 @@ function loansTabHtml(state) {
   }).join('');
   return `<div class="border rounded-lg p-3 mb-3">
     <div class="grid grid-cols-3 gap-2 text-center">
-      <div><div class="text-[10.5px] text-slate-500">総借入残高</div><div class="font-bold text-sm text-red-600">${L.yen(totalBalance)}</div></div>
-      <div><div class="text-[10.5px] text-slate-500">毎月の返済額</div><div class="font-bold text-sm">${L.yen(totalMonthlyPay)}</div></div>
-      <div><div class="text-[10.5px] text-slate-500">今年の支払利息</div><div class="font-bold text-sm">${L.yen(totalInterestThisYear)}</div></div>
+      <div><div class="text-[10.5px] text-slate-500">総借入残高</div><div class="font-bold text-sm text-red-600">${L.yen(totalBalance)}</div>${byOwnerTotals ? ownerLine(byOwnerTotals.personal.balance, byOwnerTotals.corp.balance) : ''}</div>
+      <div><div class="text-[10.5px] text-slate-500">毎月の返済額</div><div class="font-bold text-sm">${L.yen(totalMonthlyPay)}</div>${byOwnerTotals ? ownerLine(byOwnerTotals.personal.monthlyPay, byOwnerTotals.corp.monthlyPay) : ''}</div>
+      <div><div class="text-[10.5px] text-slate-500">今年の支払利息</div><div class="font-bold text-sm">${L.yen(totalInterestThisYear)}</div>${byOwnerTotals ? ownerLine(byOwnerTotals.personal.interest, byOwnerTotals.corp.interest) : ''}</div>
     </div>
   </div>
   <div class="space-y-1.5">${rows}</div>`;
@@ -10147,22 +10335,34 @@ function collapseHeader(cls, open, label, summaryHtml) {
 // （同じ見た目を2箇所に別々に書かない）。openCatは展開中のカテゴリキー（無ければnull）、
 // toggleClassは呼び出し側がクリックを拾うためのボタンclass名（今月用・推移用で別名にして区別する）。
 function cashCategoryRowsHtml(state, summary, openCat, toggleClass, monthLabel) {
+  // v18.2: 名義の内訳を出すのは法人側の実績があるときだけ（hasCorpSideで判定・全タブ共通）。
+  const showOwner = hasCorpSide(state);
   const catRowHtml = (g) => {
     const open = openCat === g.cat;
     const tone = g.amount >= 0 ? 'text-emerald-700' : 'text-red-600';
     const itemsHtml = g.items.map(it => {
       const p = it.propertyId != null ? state.properties.find(x => x.id === it.propertyId) : null;
       const nm = p ? (p.name || p.label) : null;
+      // v18.2: 1-2 明細の各行に名義バッジ。法人側が無い間はバッジ自体を出さない
+      // （個人しかいないのに👤とだけ表示しても情報が増えるだけのため）。
+      const badge = showOwner ? (it.owner === 'corp' ? '🏢 ' : '👤 ') : '';
       return `<div class="flex justify-between text-[11px] text-slate-600 py-0.5">
-        <span>${nm ? `${nm} ${it.label}` : it.label}</span>
+        <span>${badge}${nm ? `${nm} ${it.label}` : it.label}</span>
         <span class="tabular-nums">${signedYen(it.amount)}</span>
       </div>`;
     }).join('');
+    // v18.2: 1-1 カテゴリ行の内訳。個人・法人の両方に金額があるときだけ小さく1行添える
+    // （片側しか無ければ大半のケースで行が増えない＝「詳細は格納・パッと見は少なく」の方針）。
+    const byOwner = g.byOwner || {};
+    const ownerLineHtml = (byOwner.personal && byOwner.corp)
+      ? `<div class="pl-4 text-[10.5px] text-slate-400 tabular-nums">👤 ${signedYen(byOwner.personal)} ／ 🏢 ${signedYen(byOwner.corp)}</div>`
+      : '';
     return `<div class="py-1">
       <button class="${toggleClass} w-full flex items-center justify-between gap-2" data-cat="${g.cat}">
         <span class="flex items-center gap-1 text-xs"><span class="inline-block transition-transform ${open ? 'rotate-90' : ''}">▶</span>${g.label}</span>
         <span class="tabular-nums ${tone} font-bold text-xs">${signedYen(g.amount)}</span>
       </button>
+      ${ownerLineHtml}
       ${open ? `<div class="pl-4 mt-0.5">${itemsHtml}</div>` : ''}
     </div>`;
   };
@@ -10190,13 +10390,19 @@ function monthlyCashBox(state, uiState) {
 
   // v18.1: 過去12ヶ月の推移。各行をタップすると直下にその月の内訳（内訳を見る、と同じ描画）を
   // アコーディオン展開する。開けるのは一度に1ヶ月だけ（trendMonthOpenで管理）。
+  // v18.2: 各月の収支の下に、法人側があるときだけ名義ごとの内訳を小さく添える
+  // （recentCashSummariesが月ごとに持つbyOwnerをそのまま使う。1-1と別集計を書かない）。
+  const showTrendOwner = hasCorpSide(state);
   const trendRows = L.recentCashSummaries(state, 12).map(row => {
     const tone = row.net >= 0 ? 'text-emerald-700' : 'text-red-600';
     const open = uiState.trendMonthOpen === row.month;
+    const ownerLine = showTrendOwner
+      ? `<div class="text-[10px] font-normal text-slate-400">👤 ${signedYen(row.byOwner.personal.net)} ／ 🏢 ${signedYen(row.byOwner.corp.net)}</div>`
+      : '';
     const headerRow = `<tr class="border-t trend-row-toggle cursor-pointer select-none hover:bg-slate-50 active:bg-slate-100" data-month="${row.month}">
       <td class="py-0.5"><span class="inline-block w-3 transition-transform ${open ? 'rotate-90' : ''}">▶</span> ${L.fmtYM(row.month)}</td>
       <td class="text-right">${L.yen(row.income)}</td><td class="text-right">${L.yen(row.expense)}</td>
-      <td class="text-right ${tone} font-bold">${signedYen(row.net)}</td></tr>`;
+      <td class="text-right ${tone} font-bold">${signedYen(row.net)}${ownerLine}</td></tr>`;
     if (!open) return headerRow;
     // 当月は既に計算済みのsummaryを再利用し、過去月はrecentCashSummariesと同じ関数で個別に出す。
     const rowSummary = row.month === state.month ? summary : L.monthlyCashSummary(state, row.month);
@@ -10216,6 +10422,22 @@ function monthlyCashBox(state, uiState) {
       </div>`
     : '';
 
+  // v18.2: 1-3 上部の合計。法人側があるときだけ、名義ごとの内訳を小さく1行足す。
+  // summary.byCatの各カテゴリが持つbyOwnerを合算すれば、summary.netを名義で割った額になる
+  // （logic.mjs側に月合計専用のbyOwnerは無いため、既存のカテゴリ別byOwnerから導く）。
+  const ownerSummaryLine = hasCorpSide(state)
+    ? (() => {
+        const total = summary.byCat.reduce((t, g) => {
+          t.personal += g.byOwner?.personal ?? 0;
+          t.corp += g.byOwner?.corp ?? 0;
+          return t;
+        }, { personal: 0, corp: 0 });
+        return `<div class="text-[10.5px] text-slate-500 mt-0.5 tabular-nums">
+          👤 個人 ${signedYen(total.personal)} ／ 🏢 法人 ${signedYen(total.corp)}
+        </div>`;
+      })()
+    : '';
+
   return `<div class="border rounded-lg p-3 mb-3">
     <div class="flex items-center justify-between gap-2">
       <div class="font-bold text-sm">💴 今月の収支</div>
@@ -10224,6 +10446,7 @@ function monthlyCashBox(state, uiState) {
     <div class="text-[11px] text-slate-500 mt-0.5 tabular-nums">
       月CF ${L.yen(beforeTax)}／税引後CF ${L.yen(Math.round(tax.afterTax))}${tax.estimated ? '（見込み）' : ''}
     </div>
+    ${ownerSummaryLine}
     <div class="mt-2">${collapseHeader('cashbox-toggle-detail', uiState.detailOpen, '内訳を見る', '')}</div>
     ${uiState.detailOpen ? detailHtml : ''}
     <div class="mt-2">${collapseHeader('cashbox-toggle-trend', uiState.trendOpen, '過去12ヶ月の推移', '')}</div>
@@ -11456,7 +11679,9 @@ function netProceedsBox(p, price, hideWait = false) {
   // v17: 建物の売却は消費税の課税取引。課税事業者（isConsumptionTaxPayer）なら建物分の
   // 消費税を預かって後日納付する義務が生じる。譲渡税（v16）と同じ扱いで、手取り(net)は
   // 消費税を引いた額にはしない（納付は翌年3月／決算+2ヶ月と後日のため）が、必ず見えるようにする。
-  const isPayer = L.isConsumptionTaxPayer(state);
+  // v18.2: isConsumptionTaxPayerはowner引数を取るようになった。判定は「この物件を売る名義」で行う
+  // （個人事業主と法人は別の納税義務者なので、法人名義の物件の判定に個人の基準期間を使うと誤る）。
+  const isPayer = L.isConsumptionTaxPayer(state, p.owner);
   const bldgPortion = Math.round(bd.price * (p.bldgRatio ?? 0.5));
   const ctax = isPayer ? Math.round(bldgPortion * L.CONSUMPTION_TAX) : 0;
   const ctaxDue = p.owner === 'corp' ? '決算の2ヶ月後にまとめて納付' : '翌年3月にまとめて納付';
