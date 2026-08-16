@@ -151,9 +151,12 @@
      実測して#hud-clock-extra（💰現金/📈CF/⚡行動力）を丸ごと隠す対策にしていた。
      しかし現金・CFは投資が進むほど桁が増え続ける一方なので、一度はみ出すと二度と収まらず、
      現金・CF・行動力が全く表示されないまま復活しなくなる不具合だった。
-     金額side（現金・CF）だけを個別に…省略させ、⚡行動力を含む全体は必ず表示され続けるようにする。 */
+     金額side（現金・CF）だけを個別に…省略させ、⚡行動力を含む全体は必ず表示され続けるようにする。
+     v22.2: その…省略が「¥1,206,…」と桁を食い、金額の大きさすら読めなくなっていた（CFは8ch）。
+     JS側をL.yenShort（万・億の短縮表記・符号込みで最大8文字≒10ch）に変えて根本から幅を止めたので、
+     クランプは「万一はみ出しても⚡行動力を守る」最後の保険としてだけ残し、通常は当たらない幅にする。 */
   #hud-clock-cash { display: inline-block; max-width: 11ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
-  #hud-clock-cf { display: inline-block; max-width: 8ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+  #hud-clock-cf { display: inline-block; max-width: 11ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
   /* v11.6: 縦幅が狭い端末で#mobile-status（現金/CF/行動力＋市場/所有）と#mobile-actions
      （探す/働く/翌月）が重なるのを避けるため、JS側(fitMobileHud)が実測して現金/CF/行動力の
      1段目（ヘッダーのhud-clock-extraと重複する情報）だけを畳む時に付与するクラス。 */
@@ -318,6 +321,34 @@ export function yen(n) {
   const r = Math.round(n);
   const sign = r < 0 ? '-' : '';
   return sign + '¥' + Math.abs(r).toLocaleString('en-US');
+}
+
+// v22.2: HUD（ヘッダー・PC左パネル・スマホ上部タイル）専用の短縮表記。
+// yen()の全桁表記は現金・月CFが増えるほど横に伸びる一方なので、狭いHUDではCSSの
+// text-overflow:ellipsis に食われて「¥1,206,…」と桁ごと消え、金額の大きさすら読めなくなっていた
+// （v11.7で入れた max-width の ch クランプ。桁は増え続けるので、一度はみ出すと二度と収まらない）。
+// 万・億・兆へ丸めて常に3〜4桁に収め、いくら桁が増えても表示幅が伸びないようにする。
+// 正確な額はタップした先（💰お金ハブ・KPIモーダル）が従来どおり全桁で見せるので、
+// HUDは「桁が読める」ことだけを担保すればよい。
+const SHORT_UNITS = [[1e4, '万'], [1e8, '億'], [1e12, '兆']];
+export function yenShort(n) {
+  const r = Math.round(n);
+  const sign = r < 0 ? '-' : '';
+  const a = Math.abs(r);
+  for (let i = SHORT_UNITS.length - 1; i >= 0; i--) {
+    const [div, unit] = SHORT_UNITS[i];
+    if (a < div) continue;
+    // 4桁になったら小数を落とす（¥1,235万）。3桁までは小数第1位まで出す（¥120.6万）
+    const v = a / div;
+    const rounded = v >= 1000 ? Math.round(v) : Math.round(v * 10) / 10;
+    // 繰り上がりで1つ上の単位に届いたら、その単位で出し直す（¥10,000万 ではなく ¥1億）
+    const upper = SHORT_UNITS[i + 1];
+    if (rounded >= 10_000 && upper) {
+      return sign + '¥' + (Math.round(a / upper[0] * 10) / 10).toLocaleString('en-US') + upper[1];
+    }
+    return sign + '¥' + rounded.toLocaleString('en-US') + unit;
+  }
+  return sign + '¥' + a.toLocaleString('en-US');   // 1万円未満は丸めずそのまま
 }
 
 // === v16: 暦月（何月か）===
@@ -1769,14 +1800,21 @@ export function propertyScorecard(state, p, sale = null) {
 
   // 総合損益 ＝ 売却手取り ＋ 累計CF − 投下自己資金
   const totalPl = Math.round(netProceeds + incomeCf - equityIn);
-  const ccr = equityIn > 0 ? totalPl / equityIn : 0;                        // 自己資金に対する総合利益率
   const annualPl = heldMonths > 0 ? Math.round(totalPl / (heldMonths / 12)) : 0;
+
+  // v22.1: CCR（自己資金回収率・Cash on Cash Return）は実務どおり「年間キャッシュフロー ÷
+  // 投下自己資金」で出す。以前は「総合損益 ÷ 投下自己資金」＝保有期間ぶんの累計利益率を
+  // CCRと呼んでいたが、それは実務のCCR（毎年どれだけ回収できるかの年率）とは別物で、
+  // 「CCR20%なら5年で自己資金を回収」という実務の読み方が成立しなかった。
+  // 累計CF（incomeCf）を保有月数で年換算する。売却済みでも保有期間で割るので同じ式で扱える。
+  const annualCf = heldMonths > 0 ? Math.round(incomeCf * 12 / heldMonths) : 0;
+  const ccr = equityIn > 0 ? annualCf / equityIn : 0;
 
   return {
     heldMonths, boughtPrice, acqCost, exitPrice, saleCost,
     incomeCf, opexTotal, interestTotal, principalTotal, taxTotal,
     repairSpend, valueUpSpend, adSpend, troubleSpend, capexTotal, tracked,
-    capGain, capTax, netProceeds, equityIn, totalPl, ccr, annualPl,
+    capGain, capTax, netProceeds, equityIn, totalPl, annualCf, ccr, annualPl,
     sold: !!sale,
   };
 }
@@ -4235,7 +4273,9 @@ export function salaryIncomeOf(state) {
 }
 // v17: 基礎控除。社会保険料控除・扶養控除等の他の所得控除は簡略化して省略する
 // （用語ヘルプ「損益通算」にその旨を明記）。
-export const BASIC_DEDUCTION = 480_000;
+// v22.1: 令和7年分（2025年分）以降の基礎控除は48万円→58万円。
+// 所得に応じた上乗せ（令和7・8年分の時限措置）と2,350万円超の逓減は簡略化のため入れない。
+export const BASIC_DEDUCTION = 580_000;
 export const RESIDENT_TAX_RATE = 0.10;
 export const PERSONAL_CARRY_LOSS_YEARS = 3;   // 個人の繰越損失は3年
 // v17: 前年の所得税額（譲渡税は含まない）がこれ以上なら、翌年7月・11月に1/3ずつ予定納税する。
@@ -5377,7 +5417,12 @@ export function doSalesPress(state, { genres, areas, ages, wakeari = false }, rn
 // v22: 「評価」グループを追加。時価の算定（積算価格・収益還元法）に関する用語をまとめる。
 export const TERM_GROUPS = ['収益', '融資', '税・会計', '売買', '管理', '評価'];
 
-// def=1行の定義／calc=計算方法（このゲームの実装そのもの）／here=この画面での意味／hint=数字の目安
+// def=1行の定義／calc=実務の計算方法／here=この画面での意味／hint=実務の数字の目安
+//
+// v22.1: calc・hint には**実務の式と相場だけ**を書く。ゲーム内部の実装値（劣化率・成功確率・
+// スキル補正・行動力コスト・内部関数名など）は現実の不動産投資と対応しないため載せない。
+// 用語集は「遊びながら実務の用語を覚える」ための辞典であって、ゲームの攻略情報ではない。
+// 画面のどこに出るかを案内する here だけは、プレイヤーが用語と画面を結び付けられるよう残す。
 export const TERMS = {
   yield_gross: { scope: 'real', reading: 'ひょうめんりまわり', group: '収益', label: '表面利回り',
     def: '満室想定の年間家賃を物件価格で割った、いちばん大まかな儲けの指標。',
@@ -5417,7 +5462,7 @@ export const TERMS = {
   // v18: ヘッダーの📈月CF専用の用語ヘルプ。月CF・税引後CF・今月の収支の3つは似た数字で
   // 混同しやすいので、ここで違いを明記する（「💰 お金 → 今月」のexplainLineと同じ内容）。
   monthly_cf: { scope: 'real', group: '収益', label: '月CF',
-    def: '物件が毎月生む力を表す指標。ヘッダーに常時表示され、目標の達成判定はこの数字で行われる。',
+    def: '物件が毎月生む力を表す指標。ローン返済まで引いた税引前のキャッシュフロー（BTCF）にあたる。',
     calc: '月CF ＝ NOI ÷ 12 − 元利返済',
     here: '実際に動いた現金は「💰 お金 → 今月」で見られる（税・工事・購入も含むので月CFとは一致しない）。税まで引いた見込みは同じ画面の「税引後CF」。',
     hint: '月CFがプラスでも、納税や大きな工事が重なった月は今月の収支がマイナスになることがある。' },
@@ -5428,7 +5473,7 @@ export const TERMS = {
     hint: '家賃5万円の部屋を3ヶ月空けると15万円の損。原状回復を先延ばしするほど高くつく。' },
   pm_fee: { scope: 'real', group: '管理', label: 'PM費',
     def: '賃貸管理会社に払う手数料。家賃回収・入居者対応・退去精算などを代行してもらう対価。',
-    calc: 'PM費 ＝ 実際に入った家賃 × 5%',
+    calc: 'PM費 ＝ 実際に入った家賃 × 管理料率（相場は3〜5%）',
     here: '運営費に毎月含まれている。空室の部屋には発生しない（家賃が入っていないため）。',
     hint: '相場は家賃の3〜5%。自主管理にすればゼロにできるが、その手間は自分で負う。' },
 
@@ -5436,12 +5481,12 @@ export const TERMS = {
     def: '債務返済余裕率（Debt Service Coverage Ratio）。NOI が年間のローン返済額の何倍あるかを示す。',
     calc: 'DSCR ＝ 年間NOI ÷ 年間ローン返済額',
     here: '銀行の審査に必ず出てくる。1.0 を切ると家賃だけでは返済できない状態。頭金を増やすと返済額が減るのでDSCRは上がる。',
-    hint: 'このゲームでは 1.3 以上ないと融資が下りない。例: 年間NOI 260万・年間返済 200万 → DSCR 1.30 でぎりぎり通る。' },
+    hint: '金融機関は1.2〜1.3以上を求めるのが一般的。例: 年間NOI 260万・年間返済 200万 → DSCR 1.30。' },
   ltv: { scope: 'real', group: '融資', label: 'LTV',
     def: '物件価格に対する借入額の割合（Loan to Value）。',
     calc: 'LTV ＝ 借入額 ÷ 物件価格 ＝ 100% − 頭金の割合',
     here: 'LTV80%なら価格の8割を借りて、残り2割を頭金として自分で出す。銀行ごとに上限が決まっている。',
-    hint: '公庫/地銀/信金80%・ノンバンク90%。LTVが高いほど手出しは減るが、返済が重くなりDSCRが下がる。' },
+    hint: '上限は8割前後が一般的で、金利の高い金融機関ほど高いLTVを認めやすい。LTVが高いほど手出しは減るが、返済が重くなりDSCRが下がる。' },
   own_cash: { scope: 'real', group: '融資', label: '自己資金',
     def: '購入時に自分で出す現金。頭金と諸費用の合計。',
     calc: '自己資金 ＝ 頭金（物件価格 ×（100% − LTV）） ＋ 諸費用（仲介手数料・登記費用・不動産取得税等の実額）',
@@ -5455,22 +5500,22 @@ export const TERMS = {
   leverage: { scope: 'real', group: '融資', label: 'レバレッジ',
     def: '借入を使って、自己資金だけでは届かない規模の物件を買うこと。',
     calc: 'レバレッジ倍率 ＝ 物件価格 ÷ 自己資金',
-    here: 'このゲームの主題。少ない元手で大きな資産を動かせるが、失敗したときの傷も同じだけ大きくなる。',
+    here: '少ない元手で大きな資産を動かせるが、失敗したときの傷も同じだけ大きくなる。',
     hint: '自己資金500万で5,000万の物件を買えば10倍。倍率が高いほど、家賃が少し下がっただけで赤字に転落する。' },
   yield_gap: { scope: 'real', group: '融資', label: 'イールドギャップ',
     def: '物件の利回りと借入金利の差。',
     calc: 'イールドギャップ ＝ 実質利回り − 借入金利',
     here: 'この差が大きいほど、借りて買うほど儲かる。差が小さいと借金だけが残る。',
-    hint: '実質利回り8%・金利2%ならギャップ6%。2%以上は欲しいところ。ノンバンクの金利4%は差を食いつぶしやすい。' },
+    hint: '実質利回り8%・金利2%ならギャップ6%。2%以上は欲しいところ。金利4%台で借りると差を食いつぶしやすい。' },
   credit_score: { scope: 'game', group: '融資', label: '信用度',
-    def: '銀行から見たあなたの返済能力・信頼度。0〜100で表す。',
-    calc: '初期値はサラリーマン60・自営業10。ローンを完済する、管理組合の理事を引き受ける等で上がる。',
+    def: '銀行から見た借り手の返済能力・信頼度。実務で「属性」と呼ばれる評価を0〜100の一つの数値にまとめたもの。',
+    calc: '実務では年収・勤務先・勤続年数・保有資産・既存の借入状況・その銀行との取引実績を総合して判断される。',
     here: '高いほど多くの銀行が使え、金利も下がる。低いと審査の入口で弾かれる。',
-    hint: '公庫は15、ノンバンクは25、信金は35、地銀は50から取り扱ってもらえる。' },
+    hint: '公務員や上場企業の会社員は評価が高く、自営業は事業の実績年数が重く見られる。返済を続けて実績を作るほど次の条件は良くなる。' },
 
   depreciation: { scope: 'real', reading: 'げんかしょうきゃく', group: '税・会計', label: '減価償却',
     def: '建物の価値の目減りを、毎年の経費として計上する仕組み。',
-    calc: '月の償却額 ＝ 建物価格 ÷ 償却期間（月数）。建物価格は木造なら物件価格の50%、S・RCなら45%。',
+    calc: '月の償却額 ＝ 建物価格 ÷ 償却期間（月数）。土地は償却できないので、売買契約書の内訳や固定資産税評価額の比率で建物ぶんを切り分ける。',
     here: '現金が出ていかないのに経費にできるので、課税所得を圧縮できる。',
     hint: '法定耐用年数は木造22年・鉄骨34年・RC47年。耐用年数を過ぎた築古は「法定年数×20%」の短期間で一気に落とせる。' },
   depr_remaining: { scope: 'real', reading: 'ざんぞんしょうきゃく', group: '税・会計', label: '残存償却',
@@ -5480,19 +5525,19 @@ export const TERMS = {
     hint: '残り12ヶ月を切ったら、売却か買い増しを考えはじめる合図。' },
   dead_cross: { scope: 'real', group: '税・会計', label: 'デッドクロス',
     def: '減価償却が終わり、経費に落とせるものが無いのにローン返済だけが残る状態。',
-    calc: '残存償却が0になった時点から、NOIに対して 個人40% / 法人30% の課税がかかる。',
+    calc: '経費になる減価償却費は年々減るのに、経費にならない元金返済の割合は年々増える。この2本の線が交差した後は、帳簿上の利益が実際の手残りを上回り続ける。',
     here: '帳簿では黒字なのに手元の現金は減る、という一番きつい局面。',
-    hint: '法人名義なら30%で済む。償却が切れる前に法人化するか、売却を考える。' },
+    hint: '償却が切れる前に法人化して税率を抑えるか、売却して次の物件へ乗り換えるのが定石。' },
   capital_gains_tax: { scope: 'real', reading: 'じょうとぜい', group: '税・会計', label: '譲渡税',
     def: '物件を売って出た利益にかかる税金。',
-    calc: '譲渡税 ＝（売却価格 −（簿価＋購入時諸費用）− 売却諸費用）× 税率。個人は短期39.63%・長期20.315%（復興特別所得税込み）、法人は一律30%。長期になるのは「売った年の1月1日時点で所有5年超」のときで、買ってちょうど5年ではまだ短期。',
+    calc: '譲渡税 ＝（売却価格 −（簿価＋購入時諸費用）− 売却諸費用）× 税率。個人は短期39.63%・長期20.315%（復興特別所得税込み）で、長期になるのは「売った年の1月1日時点で所有5年超」のとき。買ってちょうど5年ではまだ短期。法人は分離課税ではなく他の所得と合算して法人税で課税される。',
     here: '個人名義は保有5年以内だと税率がほぼ倍になる。法人名義には5年ルールがない。',
     hint: '短期転売を狙うなら法人化を検討する。5年目前なら、あと数ヶ月待つだけで手取りが大きく変わる。' },
   loss_offset: { scope: 'real', reading: 'そんえきつうさん', group: '税・会計', label: '損益通算',
     def: '不動産所得が赤字のとき、その赤字を給与所得など他の所得から差し引いて税額を計算できる制度。給与は毎月現金には反映されないが、確定申告で税額が下がる（黒字なら逆に給与と合算されて累進税率が上がる）形でここに現れる。',
-    calc: '課税所得 ＝ max(0, 給与所得 ＋ 通算後の不動産所得 − 基礎控除48万円)。ただし赤字のうち「土地取得のための借入金利子」に対応する部分（支払利息 ×（1−建物比率））は通算できず、繰越損失にも回せない（実務どおり切り捨て）。',
+    calc: '課税所得 ＝ max(0, 給与所得 ＋ 通算後の不動産所得 − 基礎控除58万円)。ただし赤字のうち「土地取得のための借入金利子」に対応する部分（支払利息 ×（1−建物比率））は通算できず、繰越損失にも回せない。',
     here: '帳簿・納税画面の個人カードで、給与所得・通算後の不動産所得・総所得・課税所得と、確定申告の所得税−源泉徴収済みの差引（追加納税／還付）を確認できる。',
-    hint: '不動産が赤字の年は3月に還付が入りやすい。逆に黒字が大きくなると給与と合算されてブラケットが上がり、不動産所得だけで計算するより税額が重くなる。社会保険料控除など他の所得控除は簡略化のため省略している。' },
+    hint: '不動産が赤字の年は3月に還付が入りやすい。逆に黒字が大きくなると給与と合算されて税率帯が上がり、不動産所得だけで計算するより税額が重くなる。' },
   toroku_menkyozei: { scope: 'real', reading: 'とうろくめんきょぜい', group: '売買', label: '登録免許税',
     def: '登記をするときにかかる税金。所有権の移転や、抵当権の設定でかかる。',
     calc: '所有権移転＝評価額×1.5%（土地）／2.0%（建物）。抵当権設定＝借入額×0.4%。',
@@ -5507,18 +5552,18 @@ export const TERMS = {
     hint: '売買価格ではなく評価額が基準。土地は1/2特例があるぶん、単純な評価額×3%より軽い。' },
   hyoka_gaku: { scope: 'real', reading: 'こていしさんぜいひょうかがく', group: '売買', label: '固定資産税評価額',
     def: '税金の計算に使われる、市町村が決めた不動産の評価額。売買価格とは別物。',
-    calc: 'このゲームでは構造・延床面積・築年・エリア（土地単価）から算出し、売買価格とは連動させていない。',
+    calc: '市町村が3年に一度評価替えを行う。土地は路線価等をもとに、建物は再建築費から経過年数ぶんを減点して求める。売買価格とは連動しない。',
     here: '登録免許税・不動産取得税・固都税は、この評価額を基準に計算される。指値や売り急ぎで価格が下がっても評価額は下がらない。',
     hint: '通常物件は売買価格の5〜7割ほどになりやすいが、訳あり物件など価格が利回り優先で安く叩かれている物件では、評価額が価格を上回ることもある。地方は土地単価のレンジが都心より低いため評価額も控えめになりやすいが、価格自体がさらに安く叩かれた訳あり物件では地方でも評価額が価格超えすることがある。' },
   shisan_haikei: { scope: 'real', reading: 'しさんはいけい', group: '融資', label: '資産背景',
     def: '本人の年収や職業とは別に、どれだけ資産（現金・不動産）を持っているか。銀行が必ず見る項目。',
-    calc: 'このゲームでは純資産の規模で最大+25点。1,000万で+12、1億で+24。',
+    calc: '保有する金融資産と不動産の純資産額、それに購入時にいくら自己資金を入れるかで評価される。',
     here: '属性が弱くても資産があれば融資は通る。自営業で信用度が低くても、資産と頭金でカバーできる。',
-    hint: '「自己資金をいくら入れるか」も評価に入る（頭金80%で+25が上限）。属性だけで決まるわけではない。' },
+    hint: '同じ年収・同じ職業でも、資産と自己資金の厚みで融資条件は変わる。頭金を厚く入れるほど評価は上がる。' },
   chukai_tesuryo: { scope: 'real', reading: 'ちゅうかいてすうりょう', group: '売買', label: '仲介手数料',
     def: '売買を仲介した不動産会社に払う報酬。売主・買主がそれぞれ自分の側の分を払う。',
     calc: '上限は「売買価格×3%＋6万円」＋消費税10%（400万円超の場合）。800万円以下は特例で定額33万円（税込）まで請求できる。宅建業法で決まっている。',
-    here: '売却時の手取り計算に必ず入る。1億円で売れば約300万円かかる。800万円以下の訳あり物件でも一律33万円かかる。',
+    here: '売却時の手取り計算に必ず入る。1億円で売れば約337万円（306万円＋消費税）かかる。800万円以下の訳あり物件でも一律33万円かかる。',
     hint: '800万円超は売却価格に比例するので、売値が上がるほど額も増える。800万円以下は定額なので、安い物件ほど手数料の負担割合が重くなる。' },
   inshizei: { scope: 'real', reading: 'いんしぜい', group: '売買', label: '印紙税',
     def: '売買契約書に貼る収入印紙の代金。契約金額の段階で決まる。',
@@ -5527,7 +5572,7 @@ export const TERMS = {
     hint: '仲介手数料と違って定額の階段。高額物件でも数万円で収まる。' },
   teitoken_masshou: { scope: 'real', reading: 'ていとうけんまっしょう', group: '売買', label: '抵当権抹消',
     def: 'ローンを完済したときに、登記簿から銀行の担保権を消す手続き。',
-    calc: '登録免許税（不動産1個1,000円）＋司法書士報酬。このゲームでは一律2万円。',
+    calc: '登録免許税（不動産1個につき1,000円）＋司法書士報酬。合計2万円前後が目安。',
     here: 'ローンが残っている物件を売るときだけ発生する。現金購入の物件では0円。',
     hint: '所有権移転登記（名義変更）の費用は買主負担が慣習なので、売主側では計上しない。' },
   book_value: { scope: 'real', reading: 'ぼか', group: '税・会計', label: '簿価',
@@ -5537,71 +5582,69 @@ export const TERMS = {
     hint: '償却が進むほど簿価は下がり、課税される益は増える。画面の「購入差額（時価−購入価格）」より税金は重くなるのが普通。' },
   houjin_nari: { scope: 'real', reading: 'ほうじんなり', group: '税・会計', label: '法人成り',
     def: '個人でやっていた不動産賃貸業を、会社（法人）を作ってそちらの名義に移すこと。',
-    calc: '設立費用200万円。以降は物件の名義が法人なら NOI への課税が30%（個人は償却切れ後40%）。',
+    calc: '株式会社の設立実費は30万円前後（登録免許税15万＋定款認証5万＋定款印紙4万＋その他実費）。以降の利益は法人税で課税され、譲渡益にも保有期間による税率区分が無い。',
     here: '「資産・バランスシート」の中から設立できる。設立後は既存物件を1件ずつ法人へ移転していく（ローン完済済みのものだけ）。',
-    hint: '規模が大きくなるほど税率差が効く。個人の譲渡税は保有5年以内39%だが、法人は保有期間に関係なく30%。' },
+    hint: '規模が大きくなるほど税率差が効く。個人の譲渡税は保有5年以内なら約39%だが、法人は保有期間に関係なく通常の法人税率で課税される。' },
   net_worth: { scope: 'real', reading: 'じゅんしさん', group: '税・会計', label: '純資産',
     def: '総資産（現金＋物件の時価）から総負債（ローン残債）を引いた、正味の財産。',
     calc: '純資産 ＝ 手元現金 ＋ 全物件の時価 − ローン残債の合計',
-    here: '目標が「純資産型」ならこれを積み上げるゲームになる。',
+    here: 'バランスシートで確認できる。総資産が大きくても、負債が多ければ純資産は小さい。',
     hint: '物件を買った直後は諸費用ぶんだけ必ず目減りする。焦らなくてよい。' },
   time_value: { scope: 'real', reading: 'じか', group: '税・会計', label: '時価',
     def: 'いま売ったらいくらになるかという評価額。',
-    calc: '時価 ＝ 満室想定年収 ÷ 市場利回り × 入居率の補正 × 躯体の補正（躯体が0%だと最大15%減）',
-    here: '空室を埋める・家賃を上げる・躯体を直す、のどれでも上がる。',
-    hint: '木造は毎月0.15%ほど下がる。建物の価値は時間とともに落ちていく。' },
+    calc: '時価 ＝ 収益還元価格と積算価格の高いほう。収益還元価格は満室想定年収を還元利回りで割り戻し、実際の入居状況と建物の傷み具合で調整して求める。',
+    here: '空室を埋める・家賃を上げる・躯体や手入れを直す、のどれでも上がる。収支タブの「現在の時価（参考）」で内訳を確認できる。',
+    hint: '築年が進むと積算価格の建物ぶんが減り、法定耐用年数を超えると土地値だけになる。空室や傷みは収益還元の側を直接押し下げる。' },
 
   sashine: { scope: 'real', reading: 'さしね', group: '売買', label: '指値',
     def: '売出価格より安い金額を提示して交渉すること。',
-    calc: '値引き率 ＝（売出価格 − 提示額）÷ 売出価格。取次ラインの範囲内なら普通に交渉してもらえる。',
+    calc: '値引き率 ＝（売出価格 − 提示額）÷ 売出価格',
     here: '交渉力が高いほど、また売主が売り急いでいるほど、深い指値が通りやすい。',
-    hint: '1割程度なら普通に取り次いでもらえる。理由なく3割超を出すと評判が下がり、交渉EXPも減る。' },
+    hint: '1割程度なら普通に取り次いでもらえる。根拠なく3割超を出すと買う気を疑われ、以後の紹介が細る。' },
   toritsugi: { scope: 'game', reading: 'とりつぎライン', group: '売買', label: '取次ライン',
     def: '不動産会社が「この値引き幅なら売主に持っていける」と判断する境目。',
-    calc: '基準の値引き幅に、交渉力レベル・訳あり・売れ残り月数・売主の売り急ぎを加算して決まる。',
+    calc: '売主の事情（相続・住み替え・資金繰り）、売れ残っている期間、物件の状態、そして買主との関係で動く。',
     here: 'この範囲内の指値は普通に交渉してもらえる。超えると門前払いか、評判を落とす。',
     hint: '売れ残っている物件や相続で急いでいる売主ほどラインは広がる。焦って初月に指値しない。' },
   wakeari: { scope: 'real', reading: 'わけあり', group: '売買', label: '訳あり',
     def: '残置物・事故歴・再建築不可・管理崩壊など、なにか事情を抱えた物件。',
-    calc: '訳あり物件は躯体0〜40%・手入れ20〜60%で生成され、入居率も40%程度から始まる。',
-    here: '安く買えるが、躯体が傷んでいて大規模修繕に数百万かかることが多い。融資も公庫とノンバンクしか使えない。',
+    here: '安く買えるが、躯体が傷んでいて大規模修繕に数百万かかることが多い。融資に応じる金融機関も限られる。',
     hint: '買値の安さだけで判断しない。「買値 ＋ 大規模修繕費」で採算が合うかを見る。木造6戸なら修繕に400万前後かかる。' },
 
-  rentroll: { scope: 'real', reading: 'レントロール', group: '管理', label: 'レントロール',
+  rentroll: { scope: 'real', group: '管理', label: 'レントロール',
     def: '部屋ごとの家賃・間取り・入居状況を一覧にした表。',
     calc: '各室の家賃を合計したものが月の満室想定家賃になる。',
     here: '詳細画面の「レントロール」タブ。どの部屋が空いていて、いくら取れているかが分かる。',
     hint: '同じ建物なのに家賃差が大きい部屋は、値上げか値下げの余地がある。' },
   ad: { scope: 'real', group: '管理', label: 'AD',
     def: '広告料。入居者を決めてくれた仲介業者へ、大家が上乗せで払う成功報酬。',
-    calc: 'AD ＝ 家賃の1〜3ヶ月分。このゲームでは1ヶ月分で客付け率+15pt、2ヶ月分で+30pt、3ヶ月分で+45pt（上限90%）。',
-    here: '空室の部屋から出せる。**決まるまで毎月効き続ける**ので、出した月に決まらなくても無駄にはならない。',
+    calc: 'AD ＝ 家賃の1〜3ヶ月分。空室が長い物件・競合の多いエリアほど多く積むことになる。',
+    here: '空室の部屋に設定する。募集条件として掲げ続けるので、出した月に決まらなくても無駄にはならない。',
     hint: '払えば必ず決まるものではない。3ヶ月分でも外れることはあるし、1ヶ月分が初月で決まることもある。空室損（家賃×空室月数）と見比べて、どこまで積むかを決める。' },
   value_up: { scope: 'real', group: '管理', label: 'バリューアップ',
     def: '設備更新やリノベで物件そのものの価値を上げ、家賃を引き上げる投資。',
-    calc: '設備更新で家賃+6%、水回り刷新で+12%、フルリノベで+20%。1物件につき2回まで。',
-    here: '家賃が上がるだけでなく、**部屋の魅力度が大きく上がって決まりやすくなる**。ADと違って効果が残る。',
+    calc: '工事の規模に応じて家賃が上がる。設備更新で数%、水回り刷新で1割前後、フルリノベで2割程度が目安。',
+    here: '家賃が上がるだけでなく、**内見での印象が上がって決まりやすくなる**。ADと違って効果が残る。',
     hint: '空室がなかなか埋まらないなら、ADを積むより先にこちらを検討する。家賃も資産価値も一緒に上がる。' },
   kyakuduke: { scope: 'real', reading: 'きゃくづけ', group: '管理', label: '客付け',
     def: '空室に入居者を決めること。',
-    calc: '広告を出す＝家賃1ヶ月分で成功率70%。自分で動く＝行動力30で成功率 40%＋（自主管理Lv−1）×10%。',
-    here: '何もしなくても毎月一定の確率で自然に埋まるが、その確率は手入れの状態で変わる。',
-    hint: '自然客付けは手入れ100%で25%／手入れ0%で15%。草ぼうぼうの物件は内見で決まらない。' },
+    here: '仲介会社に募集を出して待つ、AD（広告料）を積んで優先してもらう、自分で客付けに動く、といった手段がある。',
+    hint: '決まりやすさは家賃設定・室内の状態・設備・立地で決まる。草ぼうぼうの物件は内見で決まらない。' },
   genjo_kaifuku: { scope: 'real', reading: 'げんじょうかいふく', group: '管理', label: '原状回復',
     def: '退去後の部屋を、次の入居者に貸せる状態まで戻す工事。',
-    calc: '費用 ＝ 家賃 ×（2 ＋ 躯体の傷み ÷ 50）×（1 ＋ 入居月数 ÷ 120）',
+    calc: '費用は部屋の広さ・傷み具合・入居していた期間で決まる。経年劣化や通常損耗の分は貸主負担で、借主に請求できるのは故意過失による損傷だけ。',
     here: 'これが終わるまでその部屋は募集できない。放置するほど空室損が積み上がる。',
-    hint: '長く住んでいた部屋ほど高くつく。10年入居なら通常の約2倍。DIYなら材料費（見積の30%）だけで済む。' },
+    hint: '長く住んでいた部屋ほど高くつく。自分で手を動かせば材料費だけで収まるが、そのぶん時間を使う。' },
   repair_state: { scope: 'game', reading: 'くたい', group: '管理', label: '躯体',
     def: '外壁・屋根・防水・構造といった建物本体の状態。0〜100%。',
-    calc: '毎月 築年数の基準（築浅0.10／中古0.25／築古0.35）× 構造の係数（木造1.3／S 1.0／RC 0.8）ずつ下がる。',
-    here: '足場を組む大規模修繕でしか回復しない。清掃や草刈りでは1%も戻らない。時価と銀行の評価に効く。',
-    hint: '築40年の木造なら100%→70%まで5.5年。築5年のRCなら31年かかる。10〜15年に一度の大規模修繕が前提。' },
+    calc: '外壁塗装と屋上防水は10〜15年ごと、給排水管は20〜30年ごとが更新の目安。木造は鉄骨・RCより傷みが早く、築古になるほど劣化は加速する。',
+    here: '足場を組む大規模修繕でしか回復しない。清掃や草刈りでは戻らない。時価と銀行の評価に効く。',
+    hint: '「安く買えた」と思っても、10〜15年に一度の大規模修繕が必ず来る。買値だけでなく修繕の積立まで含めて採算を見る。' },
   care_state: { scope: 'game', reading: 'ていれ', group: '管理', label: '手入れ',
     def: '清掃・草刈り・共用部の管理といった、日々の手入れの状態。0〜100%。',
-    calc: '毎月一律 2.0 ずつ下がる（築年数・構造には関係しない）。日常メンテで100%に戻る。',
+    calc: '清掃・草刈り・共用部の点検を定期的に入れて維持する。築年数や構造には関係なく、放置すれば月を追うごとに落ちていく。',
     here: '客付けの決まりやすさと退去率に効く。管理会社へおまかせすれば自動で維持される。',
-    hint: '100%から70%まで15ヶ月。50%を切ると退去率が1.5倍に跳ねる。' },
+    hint: '荒れた共用部は内見の印象を落とすだけでなく、いま住んでいる人の退去も増やす。空室対策より先に効く安上がりな一手。' },
   // v17: 都市計画税・住宅用地の軽減を実装したので、その内容に合わせて記述を更新。
   koto_zei: { scope: 'real', reading: 'こととぜい', group: '管理', label: '固都税',
     def: '固定資産税と都市計画税。物件を持っているだけで毎年かかる。',
@@ -5609,15 +5652,13 @@ export const TERMS = {
     here: '運営費に含まれている。空室でも容赦なくかかる固定費。評価額基準なので売買価格が下がっても軽くならない。物件詳細の内訳表示から計算過程を確認できる。',
     hint: '評価額は売買価格と別物（訳あり物件では価格より評価額が高いこともある）。安く買えたからと油断せず、評価額ベースで試算しておく。' },
   action_power: { scope: 'game', group: '管理', label: '行動力',
-    def: 'その月に動ける量。翌月へ進むと全回復する。',
-    calc: '働く＝1／物件を探す＝1／買付＝10／自主客付け＝30／査定＝5／工事の発注＝5／DIY＝1回10〜15。',
-    here: '「働く」で種銭を稼ぐか、「探す」で物件を見つけるか、DIYで工事費を浮かせるか、の取り合いになる。',
-    hint: '月100が基準。DIYで安く直すと、その月は稼げず探せない。これが「金 vs 時間」のトレードオフ。' },
+    def: '大家業に割ける時間と手間を表す持ち点。実際の不動産投資でも、動ける時間そのものが最大の制約になる。',
+    here: '「働く」で種銭を稼ぐか、「探す」で物件を見つけるか、自分で工事や客付けに動くか、の取り合いになる。',
+    hint: '兼業の大家にとって時間は最大の制約。外注すれば時間は買えるが、そのぶん手残りは減る。これが「金 vs 時間」のトレードオフ。' },
   seed_money: { scope: 'real', reading: 'たねせん', group: '売買', label: '種銭',
     def: '不動産投資を始めるための元手の現金。',
-    calc: '「働く」1回（行動力1）につき 1,000〜10,000円。平均は約2,000円。',
-    here: 'ゲーム開始時に設定した金額からスタートする。足りなければ働いて増やす。',
-    hint: '最初の1棟は「最低自己資金」が手元現金以下の物件から選ぶ。地方の訳ありアパートなら100〜200万から狙える。' },
+    here: '手元の現金がこれにあたる。足りなければ本業の収入から貯めて増やす。',
+    hint: '最初の1棟は、頭金と諸費用の合計が手元現金で賄える物件から選ぶ。地方の訳ありアパートなら100〜200万から狙える。' },
 
   // v22: 時価の算定方法の変更（収益還元価格と積算価格のmax）に伴う新グループ「評価」＋
   // 画面に出ているのに用語集に無かった語の補完。既存46語は1文字も変えていない。
@@ -5628,14 +5669,14 @@ export const TERMS = {
     hint: '地方の築古木造は建物が0円に張り付きやすく、土地値がそのまま時価の下支えになる。都心のRCは積算が大きく出るので、空室が増えても時価が積算で止まりやすい。' },
   shueki_kangen: { scope: 'real', reading: 'しゅうえきかんげんほう', group: '評価', label: '収益還元法',
     def: '家賃を利回りで割り戻して価格を出す評価方法。収益物件の売買価格は実務でもこれで決まる。',
-    calc: '収益還元価格 ＝ 満室想定の年間家賃 ÷ 市場利回り × 入居の係数 × 躯体の係数 × 手入れの係数',
-    here: '収支タブの「現在の時価（参考）」・不動産屋の査定額（この時価×0.92±誤差）の両方の土台になっている。',
-    hint: '満室にすると入居の係数が上がって時価も上がる。空室が増えると下がるが、積算価格を下回った分は積算価格で下支えされる。' },
+    calc: '収益還元価格 ＝ 満室想定の年間家賃 ÷ 還元利回り。実際には現況の入居状況と建物の傷み具合を織り込んで調整する。',
+    here: '収支タブの「現在の時価（参考）」と、不動産屋の査定額の両方の土台になっている。',
+    hint: '満室にすれば評価は上がり、空室が増えれば下がる。ただし下がっても、土地値（積算価格）が下支えになる。' },
   kangen_rimawari: { scope: 'real', reading: 'かんげんりまわり', group: '評価', label: '還元利回り',
     def: '収益還元法で使う分母の利回り。キャップレートとも呼ばれる。',
-    calc: 'このゲームでは物件タイプの標準利回りに、築15年超は古いほど＋、エリア、訳あり未解消、バリューアップを加減して決める（marketYield）。',
+    calc: '物件タイプ・立地・築年・状態ごとに、市場がその物件に求める利回り。都心の築浅ほど低く、地方の築古や訳ありほど高くなる。',
     here: '収益還元価格の式の「市場利回り」がこれ。数字が大きいほど安く評価される。',
-    hint: '訳あり未解消は+0.06〜、築15年超は1年ごとに+0.0015。安く評価されたくなければ訳あり解消と修繕を先にやる。' },
+    hint: '同じ家賃でも還元利回りが1pt上がるだけで価格は大きく下がる。安く評価されたくなければ訳ありの解消と修繕を先にやる。' },
   saichotatsu_kakaku: { scope: 'real', reading: 'さいちょうたつかかく', group: '評価', label: '再調達価格',
     def: 'いま同じ建物をゼロから建て直すとしたら、いくらかかるかという単価。積算価格の建物側に使う。',
     calc: '円/㎡の実務目安: 木造15万／重量鉄骨18万／RC20万。',
@@ -5643,7 +5684,7 @@ export const TERMS = {
     hint: '延床面積が同じでも構造でここが変わるので、RC造のほうが積算価格の建物側は大きく出やすい。' },
   rosenka: { scope: 'real', reading: 'ろせんか', group: '評価', label: '路線価',
     def: '道路ごとに国税庁が定める土地の単価。相続税・積算価格の土地評価に使う。公示地価のおおむね8割が目安。',
-    calc: 'このゲームではエリア（地方/都心）ごとの単価レンジから物件生成時に決まる（固定資産税評価額の土地側と共通）。',
+    calc: '国税庁が毎年7月に公表する。路線価が定められていない地域は、固定資産税評価額に倍率を掛けて評価する（倍率方式）。',
     here: '積算価格の「土地」部分にそのまま使われている。物件の内訳表示で単価×面積の計算式を確認できる。',
     hint: '都心は6万〜80万円/㎡、地方は3千〜4万円/㎡のレンジ。同じ延床でも立地でここが桁違いになる。' },
   hotei_taiyo_nensu: { scope: 'real', reading: 'ほうていたいようねんすう', group: '評価', label: '法定耐用年数',
@@ -5652,12 +5693,12 @@ export const TERMS = {
     here: '減価償却の期間（中古簡便法）にも、積算価格の建物の残存年数計算にも使われている。積算価格は固定資産税評価額と違って下限が無いので、この年数を超えると建物は0円になる。',
     hint: '築古の木造ほど建物側の積算価格が早く0に近づき、土地値だけの評価になりやすい。' },
 
-  capital_gain: { scope: 'real', reading: 'きゃぴたるげいん', group: '収益', label: 'キャピタルゲイン',
+  capital_gain: { scope: 'real', group: '収益', label: 'キャピタルゲイン',
     def: '物件を売って得られる（または売ったと仮定した）値上がり益。譲渡税を引く前の額。',
-    calc: 'キャピタルゲイン ＝ 売却価格（未売却なら現在の時価）−（簿価＋購入時諸費用）− 売却諸費用（マイナスは0止め）',
+    calc: 'キャピタルゲイン ＝ 売却価格（未売却なら現在の時価）−（簿価＋購入時諸費用）− 売却諸費用',
     here: '収支タブ「損益の内訳」のキャピタルゲイン行。タップすると式が出る。',
     hint: '簿価は償却が進むほど下がるので、保有が長いほどキャピタルゲインは膨らみやすい（そのぶん譲渡税も増える）。' },
-  income_gain: { scope: 'real', reading: 'いんかむげいん', group: '収益', label: 'インカムゲイン',
+  income_gain: { scope: 'real', group: '収益', label: 'インカムゲイン',
     def: '保有中に家賃から得られる利益の累計。物件を売らなくても入ってくる収益。',
     calc: 'インカムゲイン累計 ＝ 毎月のCF（家賃収入−運営費−ローン返済−税金）の合計。',
     here: '収支タブ「損益の内訳」のインカムゲイン累計行。キャピタルゲインと合わせて総合損益になる。',
@@ -5667,25 +5708,25 @@ export const TERMS = {
     calc: '投下自己資金 ＝ 頭金 ＋ 購入時諸費用 ＋ 修繕・バリューアップ等の工事費累計',
     here: '収支タブ「損益の内訳」の投下自己資金行。総合損益＝手取り＋累計CF−投下自己資金の検算に使う。',
     hint: '融資のLTVを上げるほどここは小さくできるが、返済が重くなりCFやDSCRが厳しくなるトレードオフがある。' },
-  ccr: { scope: 'real', reading: 'キャッシュ・オン・キャッシュ・リターン', group: '収益', label: '自己資金回収率（CCR）',
-    def: '投下した自己資金に対して、どれだけ利益（総合損益）を得られたかの割合。',
-    calc: 'CCR ＝ 総合損益 ÷ 投下自己資金',
-    here: '収支タブの「総合損益」の下に「自己資金回収率◯%」として常時表示される。',
-    hint: '同じ利益額でも自己資金が少ないほどCCRは高くなる＝レバレッジが効いている状態。' },
+  ccr: { scope: 'real', reading: 'じこしきんかいしゅうりつ', group: '収益', label: '自己資金回収率（CCR）',
+    def: '投下した自己資金に対して、1年でどれだけの現金を回収できているかの割合（Cash on Cash Return）。',
+    calc: 'CCR ＝ 年間キャッシュフロー ÷ 投下自己資金',
+    here: '収支タブの「総合損益」の下に「自己資金回収率◯%/年」として常時表示される。',
+    hint: '10%なら自己資金の回収に10年かかる計算。同じ手残りでも自己資金が少ないほど高くなる＝レバレッジが効いている状態。' },
   tanpo_hyoka: { scope: 'real', reading: 'たんぽひょうか', group: '融資', label: '担保評価',
     def: '銀行が融資額を決めるときに、その物件をいくらの担保として見るかという評価。',
     calc: '担保評価には積算価格（土地＋建物の積み上げ）が使われるのが実務。「積算が出る／出ない」で融資額が左右される。',
-    here: 'このゲームでは審査（reviewLoan）はLTV・DSCR・信用度で判定しており、積算価格を担保評価として直接は使っていない。積算価格は時価の算定（sekisanValue）の側に反映されている。',
+    here: '融資審査ではLTV・DSCR・信用度と並んで、この担保評価が借りられる額を左右する。',
     hint: '積算価格が出にくい物件（築古で建物が0円に近い等）ほど、実務では融資が付きにくくなる。' },
-  motokin_suechi: { scope: 'real', reading: 'もときんすえおき', group: '融資', label: '元金据置',
+  motokin_suechi: { scope: 'real', reading: 'がんきんすえおき', group: '融資', label: '元金据置',
     def: '返済期間の最初の一定期間、元金を減らさず利息だけを払う契約。',
-    calc: 'このゲームでは公庫のみ・最長24ヶ月まで、返済期間を超えない範囲で設定できる。据置中は元金が一切減らず、残高はそのまま。',
+    calc: '据置期間中は利息だけを払い、元金は1円も減らない。日本政策金融公庫の一般貸付では据置は2年以内が上限。',
     here: '融資タブの公庫の借入条件で選べる。据置中は月々の返済額が下がる代わりに、元金の減りが遅れる。',
     hint: '開業直後で手元資金を厚くしたいときに使う。据置が終わった瞬間に返済額が上がる点は忘れずに。' },
   ganri_kinto: { scope: 'real', reading: 'がんりきんとうへんさい', group: '融資', label: '元利均等返済',
     def: '毎月の返済額（元金＋利息）を一定に保つ返済方式。ほとんどの住宅ローン・アパートローンがこの方式。',
     calc: '毎月の返済額 ＝ 借入額 × 月利 ÷（1 −（1＋月利）^−返済回数）。返済が進むほど利息の割合が減り元金の割合が増える。',
-    here: 'このゲームの融資はすべてこの方式（monthlyPayment）。月々の返済額は完済まで変わらない。',
+    here: 'アパートローン・住宅ローンの多くがこの方式で、月々の返済額は完済まで変わらない。',
     hint: '同じ借入額・金利でも返済期間を延ばすほど毎月の返済額は下がるが、総支払利息は増える。' },
   teitoken_settei: { scope: 'real', reading: 'ていとうけんせってい', group: '融資', label: '抵当権設定',
     def: '融資を受けるときに、銀行が担保として物件に付ける権利を登記すること。完済すると抹消できる。',
@@ -5695,7 +5736,7 @@ export const TERMS = {
   shohizei: { scope: 'real', reading: 'しょうひぜい', group: '税・会計', label: '消費税（課税事業者・免税事業者）',
     def: '住宅の家賃収入は非課税売上だが、建物の売却は消費税の課税取引。基準期間の課税売上高しだいで納税義務が生じる。',
     calc: 'その年の建物売却の課税売上高（名義ごと）が1,000万円を超えると、2年後から課税事業者になり、以後の建物売却分に10%の消費税を納める。',
-    here: '売却（settleSale）の際、課税事業者と判定された名義には消費税の納税予定が積まれる。',
+    here: '建物を売ったとき、課税事業者と判定された名義には消費税の納税予定が積まれる。',
     hint: '個人と法人は別の納税義務者。法人で大きく売っても個人側の免税事業者判定には影響しない。' },
   yotei_nozei: { scope: 'real', reading: 'よていのうぜい・ちゅうかんのうふ', group: '税・会計', label: '予定納税・中間納付',
     def: '前年（前期）の税額が一定額を超えると、確定申告（決算）を待たずに前払いする制度。個人は所得税、法人は法人税にある。',
@@ -5707,22 +5748,22 @@ export const TERMS = {
     calc: '個人は3年、法人は10年繰り越せる。古い年の損失から順に、その年の課税所得に充当する。',
     here: '確定申告・決算の課税所得計算で自動的に充当される（帳簿画面から繰越残高を確認できる）。',
     hint: '法人のほうが繰越期間が長い（10年）ぶん、大きな赤字（大規模修繕など）を出した年の翌年以降も長く使える。' },
-  shihonteki_shishutsu: { scope: 'real', reading: 'しほんてきししゅつ', group: '税・会計', label: '資本的支出と修繕費',
+  shihonteki_shishutsu: { scope: 'real', reading: 'しほんてきししゅつとしゅうぜんひ', group: '税・会計', label: '資本的支出と修繕費',
     def: '工事費用を「資産計上して償却する（資本的支出）」か「発生した月に一括で経費にする（修繕費）」かの税務上の区分。',
-    calc: 'このゲームでは1件60万円（CAPEX_THRESHOLD）を境に、60万円以上は資産計上して残存耐用年数（またはバリューアップは一律15年）で償却、60万円未満はその場で全額経費にする。',
+    calc: '建物の価値を高める・耐用年数を延ばす支出は資本的支出として資産計上し、原状回復や維持管理にとどまる支出は修繕費として一括経費にする。金額の小さい工事（おおむね60万円未満）は修繕費として扱える。',
     here: '大規模修繕・バリューアップの完了時、金額に応じてどちらの扱いになるかが決まる（帳簿の経費・簿価に反映）。',
     hint: '同じ工事でも60万円をわずかに超えるかどうかで、その月の経費計上額が大きく変わる。急ぎでなければ見積りの分割も検討材料になる。' },
-  chotanki_joto: { scope: 'real', reading: 'ちょうたんきじょうと', group: '税・会計', label: '長期譲渡・短期譲渡',
+  chotanki_joto: { scope: 'real', reading: 'ちょうきじょうと・たんきじょうと', group: '税・会計', label: '長期譲渡・短期譲渡',
     def: '売った不動産の保有期間による譲渡税率の区分。個人だけにある（法人は保有期間を問わず一律税率）。',
     calc: '売った年の1月1日時点で所有5年超なら長期（税率20.315%）、5年以下なら短期（税率39.63%）。買ってちょうど5年でもまだ短期になりうる点に注意。',
-    here: '譲渡税の計算（saleBreakdown）で保有期間から自動判定される。物件詳細で保有年数を確認できる。',
+    here: '売却時の譲渡税の計算で保有期間から自動判定される。物件詳細で保有年数を確認できる。',
     hint: '短期と長期で税率がほぼ倍違う。売却時期が5年の節目に近いなら、あと数ヶ月待つだけで手取りが大きく変わる。' },
   chuko_kanben: { scope: 'real', reading: 'ちゅうこかんべんほう', group: '税・会計', label: '中古簡便法',
     def: '中古の建物を取得したときの、減価償却期間の簡易な計算方法。',
-    calc: '法定耐用年数を超えている構造は「法定耐用年数×20%」（4年未満は4年）。超えていなければ「（法定耐用年数−経過年数）＋経過年数×20%」。',
-    here: 'deprMonthsFor（deprRemainingの初期値）がこの式で決まる。法人成りや法人移転で名義が変わると、この式で償却が再スタートする。',
+    calc: '法定耐用年数を超えている建物は「法定耐用年数×20%」、超えていなければ「（法定耐用年数−経過年数）＋経過年数×20%」。1年未満の端数は切り捨て、2年未満になる場合は2年とする。',
+    here: '中古物件を買ったときの償却期間はこの式で決まる。法人成りや法人への移転で名義が変わると、償却が計算し直しになる。',
     hint: '築古なほど残存償却期間が短く、デッドクロス（償却切れ）が早く来る。' },
-  teiren_bukken: { scope: 'real', reading: 'ていれんぶっけん', group: '売買', label: '低廉物件の特例',
+  teiren_bukken: { scope: 'real', reading: 'ていれんぶっけんのとくれい', group: '売買', label: '低廉物件の特例',
     def: '売買価格が低い物件について、仲介手数料の上限を実額の速算式ではなく定額にできる宅建業法の特例。',
     calc: '税抜価格800万円以下の物件は、仲介手数料の上限が33万円（税込）の定額になる（速算式より現地調査等の実費が上回りやすいための特例）。',
     here: '訳あり物件など安価な物件の購入諸費用の仲介手数料に自動で適用される。',
@@ -5769,7 +5810,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -7317,6 +7358,24 @@ function coloredItems() {
   return spreadItems(items);
 }
 
+// 描画・当たり判定は spreadItems 後の位置を使うので、カメラ・ピン・コインも同じ位置を見る。
+// 押し出し前の slotFor をそのまま使うと、所有24件中6件で最大162px（球の半径282px比）
+// ずれ、カメラが建物の無い地面を向いていた。
+function placedItem(kind, propertyId) {
+  return coloredItems().find(it => it.kind === kind && it.p.id === propertyId) || null;
+}
+
+// 指定の緯度経度が画面中央に来る向きへ即座に移す。
+// project() の y2 = sin(lat - pitch) なので、緯度latを中央に置く pitch は lat そのもの。
+// 旧実装は -lat*0.6 を [-0.6, 0.2] に丸めており、都心コアから離れた物件ほど画面の
+// 上下端へ外れていた。丸めはドラッグ操作と同じ ±1.1 に揃える。
+function aimAt(lat, lon) {
+  viewAnim = null;
+  yaw = -lon;
+  pitch = Math.max(-1.1, Math.min(1.1, lat));
+  yawV = 0;
+}
+
 // v5: 翌月ボタンから呼ばれるゆっくり回転。draw() の毎フレームで補間する。
 function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 function normAngle(a) { return ((a + Math.PI) % TAU + TAU) % TAU - Math.PI; }
@@ -7583,7 +7642,12 @@ function initCity(cv, callbacks) {
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left, my = e.clientY - rect.top;
       // ①ピンをクリック → 詳細画面へ（ピンは消す）
-      if (hitPin(mx, my)) { const id = pingItem.id; pingItem = null; if (cbs.onTapMarketDetail) cbs.onTapMarketDetail(id); return; }
+      if (hitPin(mx, my)) {
+        const { id, kind } = pingItem; pingItem = null;
+        if (kind === 'owned') { if (cbs.onTapProperty) cbs.onTapProperty(id); }
+        else if (cbs.onTapMarketDetail) cbs.onTapMarketDetail(id);
+        return;
+      }
       // どこかをクリックしたらピンは解除（②以降の判定は続ける）
       pingItem = null;
       // ②🔒未解放エリア → 解放条件パネル（どのエリアを押したかを渡す）
@@ -7639,13 +7703,10 @@ function animateResetView(dur = 1400) {
 // ピンはどこかをクリックするまで維持され、ピン自体をクリックすると詳細画面が開く。
 function focusOnMarket(propertyId) {
   if (!st) return;
-  const p = st.market.find(x => x.id === propertyId);
-  if (!p) return;
-  const s = slotFor(p.region, p.areaKey, 'm:' + p.id);
-  viewAnim = null;
-  yaw = -s.lon; pitch = Math.max(-0.6, Math.min(0.2, -s.lat * 0.6));
-  yawV = 0;
-  pingItem = { lat: s.lat, lon: s.lon, id: propertyId, sx: null, sy: null };
+  const it = placedItem('market', propertyId);
+  if (!it) return;
+  aimAt(it.lat, it.lon);
+  pingItem = { lat: it.lat, lon: it.lon, id: propertyId, kind: 'market', sx: null, sy: null };
 }
 
 // v9-A: エリアピル／🔒タップから呼ぶ。その陸地が正面に来るようゆっくり回す。
@@ -7653,7 +7714,7 @@ function focusOnMarket(propertyId) {
 function focusOnRegion(regionKey, dur) {
   const r = regionOf(regionKey);
   const targetYaw = -r.lon;
-  const targetPitch = Math.max(-0.6, Math.min(0.6, r.lat * 0.8));
+  const targetPitch = Math.max(-1.1, Math.min(1.1, r.lat));
   yawV = 0;
   viewAnim = {
     t0: performance.now(), dur: dur || (r.island ? 1900 : 1400),
@@ -7664,14 +7725,14 @@ function focusOnRegion(regionKey, dur) {
 }
 
 // v3: DIY・業者修繕の演出用。該当の所有物件が正面に来るようカメラを回転させる（ピンは立てない）。
-function focusOnOwned(propertyId) {
+function focusOnOwned(propertyId, withPin = false) {
   if (!st) return;
-  const p = st.properties.find(x => x.id === propertyId);
-  if (!p) return;
-  const s = slotFor(p.region, p.areaKey, 'o:' + p.id);
-  viewAnim = null;
-  yaw = -s.lon; pitch = Math.max(-0.6, Math.min(0.2, -s.lat * 0.6));
-  yawV = 0;
+  const it = placedItem('owned', propertyId);
+  if (!it) return;
+  aimAt(it.lat, it.lon);
+  // withPin は「📍地図を見る」からの呼び出しだけ true。修繕・DIYの演出では
+  // ピンを立てず、前のピンだけ消す（別の場所を向くので出しっぱなしだと嘘になる）。
+  pingItem = withPin ? { lat: it.lat, lon: it.lon, id: propertyId, kind: 'owned', sx: null, sy: null } : null;
 }
 
 // コイン回収アニメ用: 所有建物のビューポート座標一覧。
@@ -7682,9 +7743,8 @@ function focusOnOwned(propertyId) {
 function cityBuildingScreenPositions() {
   if (!canvas || !st) return [];
   const rect = canvas.getBoundingClientRect();
-  return st.properties.map(p => {
-    const s = slotFor(p.region, p.areaKey, 'o:' + p.id);
-    const pr = project(s.lat, s.lon);
+  return coloredItems().filter(it => it.kind === 'owned').map(it => {
+    const pr = project(it.lat, it.lon);
     if (pr.z >= 0.04) return { x: rect.left + pr.x, y: rect.top + pr.y };
     const ang = Math.atan2(pr.y - cy, pr.x - cx);
     return { x: rect.left + cx + Math.cos(ang) * R * 0.96, y: rect.top + cy + Math.sin(ang) * R * 0.96 };
@@ -8893,9 +8953,9 @@ function renderMobileBars() {
   statusEl.innerHTML = `
     <div class="grid grid-cols-3 gap-1">
       <button class="ms-kpi hud-panel shadow rounded-lg px-1 py-1 text-center" data-kpi="cash">
-        <div class="text-[11px] font-bold hud-sub">💰現金</div><div class="text-sm font-bold truncate hud-money">${L.yen(state.cash)}</div></button>
+        <div class="text-[11px] font-bold hud-sub">💰現金</div><div class="text-sm font-bold tabular-nums whitespace-nowrap hud-money">${L.yenShort(state.cash)}</div></button>
       <button class="ms-kpi hud-panel shadow rounded-lg px-1 py-1 text-center" data-kpi="cf">
-        <div class="text-[11px] font-bold hud-sub">📈月${term('cf', 'CF')}</div><div class="text-sm font-bold truncate ${mcf >= 0 ? 'hud-money' : 'hud-bad'}">${L.yen(mcf)}</div></button>
+        <div class="text-[11px] font-bold hud-sub">📈月${term('cf', 'CF')}</div><div class="text-sm font-bold tabular-nums whitespace-nowrap ${mcf >= 0 ? 'hud-money' : 'hud-bad'}">${L.yenShort(mcf)}</div></button>
       <div class="hud-panel shadow rounded-lg px-1 py-1 text-center">
         <div class="text-[11px] font-bold hud-sub">⚡${term('action_power', '行動力')}</div><div class="text-sm font-bold" id="hud-ap-m">${state.actionPower}/${state.baseActionPower}</div></div>
     </div>
@@ -9073,11 +9133,14 @@ function renderHeaderClock() {
   box.querySelector('#hud-elapsed').textContent = calText(state);
   // v18: 🎂年齢はヘッダーから外し、「💰 お金 → 資産」タブへ移設した（bsElapsedRowが表示する）。
   // v8.9: スマホ版はここ（ヘッダー）だけが常に見えるので、現金・行動力もここに常時表示する。
-  box.querySelector('#hud-clock-cash').textContent = L.yen(state.cash);
+  // v22.2: HUDの金額はyenShort（万・億）で出す。全桁のyen()だと桁が増えるたび横に伸び、
+  // CSSの max-width + ellipsis に食われて「¥1,206,…」と桁ごと消えていた（=金額が読めない）。
+  // 正確な額はこのタイルをタップした先（💰お金ハブ）が全桁で見せる。
+  box.querySelector('#hud-clock-cash').textContent = L.yenShort(state.cash);
   // v8.17: 月CFも追加。プラス/マイナスで色分けする（他の月CF表示と同じhud-money/hud-badを流用）。
   const mcf = L.monthlyCF(state);
   const cfEl = box.querySelector('#hud-clock-cf');
-  cfEl.textContent = L.yen(mcf);
+  cfEl.textContent = L.yenShort(mcf);
   cfEl.classList.toggle('hud-money', mcf >= 0);
   cfEl.classList.toggle('hud-bad', mcf < 0);
   box.querySelector('#hud-clock-ap').textContent = `${state.actionPower}/${state.baseActionPower}`;
@@ -9121,7 +9184,7 @@ function renderPanelLeft() {
       <div class="grid grid-cols-2 gap-2">
         <button class="kpi-btn hud-tile rounded-lg p-2 text-left" data-kpi="cash">
           <div class="text-[11px] font-bold hud-sub">💰 現金</div>
-          <div class="font-bold truncate hud-money" id="hud-cash">${L.yen(state.cash)}</div>
+          <div class="font-bold tabular-nums whitespace-nowrap hud-money" id="hud-cash">${L.yenShort(state.cash)}</div>
         </button>
         <button class="kpi-btn hud-tile rounded-lg p-2 text-left" data-kpi="props">
           <div class="text-[11px] font-bold hud-sub">🏠 物件</div>
@@ -9129,7 +9192,7 @@ function renderPanelLeft() {
         </button>
         <button class="kpi-btn hud-tile rounded-lg p-2 text-left" data-kpi="cf">
           <div class="text-[11px] font-bold hud-sub">📈 月${term('cf', 'CF')}</div>
-          <div class="font-bold truncate ${mcf >= 0 ? 'hud-money' : 'hud-bad'}">${L.yen(mcf)}</div>
+          <div class="font-bold tabular-nums whitespace-nowrap ${mcf >= 0 ? 'hud-money' : 'hud-bad'}">${L.yenShort(mcf)}</div>
         </button>
         <button class="kpi-btn hud-tile rounded-lg p-2 text-left" data-kpi="credit">
           <div class="text-[11px] font-bold hud-sub">📊 ${term('credit_score', '信用度')}</div>
@@ -9618,12 +9681,17 @@ function taxTabHtml(state, uiState) {
         ${book.capGainTax > 0 ? `<div class="text-[11px] text-slate-500 mt-1">売却益にかかる譲渡税 ${L.yen(book.capGainTax)}（分離課税・総所得には合流せず翌年3月に別途加算）</div>` : ''}
         ${businessTaxLine}`;
     }
+    // v22.2: 収入・経費・差引をgrid-cols-3で横に3つ並べていたが、桁の多い金額が
+    // 8pxのgapを挟んで隣り合うだけで、どこまでが1つの数字か目で切れず読めなかった。
+    // 下の「給与との損益通算」ブロックと同じ「ラベル左・金額右」の縦積みに揃える
+    // （新しい見た目を作らず、同じカード内で既にある型を使う）。経費は符号付きにして
+    // 収入 − 経費 ＝ 差引 の引き算が縦に読めるようにし、差引は罫線で区切って一段大きくする。
     return `<div class="border rounded-lg p-3 mb-3">
-      <div class="font-bold text-sm mb-1">${label}</div>
-      <div class="grid grid-cols-3 gap-2 text-center">
-        <div><div class="text-[10.5px] text-slate-500">収入</div><div class="font-bold text-sm">${L.yen(book.income)}</div></div>
-        <div><div class="text-[10.5px] text-slate-500">経費</div><div class="font-bold text-sm">${L.yen(book.expense)}</div></div>
-        <div><div class="text-[10.5px] text-slate-500">差引</div><div class="font-bold text-sm ${net >= 0 ? 'text-emerald-700' : 'text-red-600'}">${signedYen(net)}</div></div>
+      <div class="font-bold text-sm mb-2">${label}</div>
+      <div class="text-sm tabular-nums space-y-1">
+        <div class="flex justify-between items-baseline gap-4"><span class="text-xs text-slate-500">収入</span><span class="font-bold">${L.yen(book.income)}</span></div>
+        <div class="flex justify-between items-baseline gap-4"><span class="text-xs text-slate-500">経費</span><span class="font-bold text-red-600">−${L.yen(book.expense)}</span></div>
+        <div class="flex justify-between items-baseline gap-4 border-t pt-1.5 mt-1.5"><span class="text-xs text-slate-500">差引</span><span class="font-bold text-base ${net >= 0 ? 'text-emerald-700' : 'text-red-600'}">${signedYen(net)}</span></div>
       </div>
       ${taxLines}
       <div class="text-[10.5px] text-slate-400 mt-2">※ 年末（決算）までの実績で変わる概算です</div>
@@ -9859,12 +9927,17 @@ function loansTabHtml(state) {
       </div>
     </button>`;
   }).join('');
-  return `<div class="border rounded-lg p-3 mb-3">
-    <div class="grid grid-cols-3 gap-2 text-center">
-      <div><div class="text-[10.5px] text-slate-500">総借入残高</div><div class="font-bold text-sm">${L.yen(totalBalance)}</div>${byOwnerTotals ? ownerLine(byOwnerTotals.personal.balance, byOwnerTotals.corp.balance) : ''}</div>
-      <div><div class="text-[10.5px] text-slate-500">毎月の返済額</div><div class="font-bold text-sm">${L.yen(totalMonthlyPay)}</div>${byOwnerTotals ? ownerLine(byOwnerTotals.personal.monthlyPay, byOwnerTotals.corp.monthlyPay) : ''}</div>
-      <div><div class="text-[10.5px] text-slate-500">今年の支払利息</div><div class="font-bold text-sm">${L.yen(totalInterestThisYear)}</div>${byOwnerTotals ? ownerLine(byOwnerTotals.personal.interest, byOwnerTotals.corp.interest) : ''}</div>
-    </div>
+  // v22.2: 損益カード（yearCard）と同じ理由で、grid-cols-3の3列並びをやめて縦積みにする。
+  // ここは各行の下にさらに名義内訳（👤/🏢の2金額）がぶら下がるため、3列だと1列あたり
+  // 4桁以上の金額が3つ縦に潰れて特に読めなかった。
+  const totalRow = (label, amount, owned) => `<div class="flex justify-between items-baseline gap-4">
+      <span class="text-xs text-slate-500">${label}</span>
+      <div class="text-right"><div class="font-bold">${L.yen(amount)}</div>${byOwnerTotals ? ownerLine(owned.personal, owned.corp) : ''}</div>
+    </div>`;
+  return `<div class="border rounded-lg p-3 mb-3 text-sm tabular-nums space-y-2">
+    ${totalRow('総借入残高', totalBalance, { personal: byOwnerTotals?.personal.balance, corp: byOwnerTotals?.corp.balance })}
+    ${totalRow('毎月の返済額', totalMonthlyPay, { personal: byOwnerTotals?.personal.monthlyPay, corp: byOwnerTotals?.corp.monthlyPay })}
+    ${totalRow('今年の支払利息', totalInterestThisYear, { personal: byOwnerTotals?.personal.interest, corp: byOwnerTotals?.corp.interest })}
   </div>
   <div class="space-y-1.5">${rows}</div>`;
 }
@@ -10267,9 +10340,9 @@ function showTermPopover(anchor) {
   termPop = el(`<div class="term-pop">
     <div><b>${t.label}</b>${t.reading ? ` <span class="tp-yomi">（${t.reading}）</span>` : ''} <span class="tp-scope tp-${t.scope}">${scopeLabel(t)}</span></div>
     <div class="mt-1">${t.def}</div>
-    <div class="mt-1 tp-calc">🧮 ${t.calc}</div>
+    ${t.calc ? `<div class="mt-1 tp-calc">🧮 ${t.calc}</div>` : ''}
     <div class="mt-1">${t.here}</div>
-    <div class="mt-1 tp-hint">💡 ${t.hint}</div>
+    ${t.hint ? `<div class="mt-1 tp-hint">💡 ${t.hint}</div>` : ''}
     <div class="mt-2 tp-foot">${termPopFootHtml()}</div>
   </div>`);
   termPop.dataset.for = anchor.dataset.term;
@@ -10349,9 +10422,9 @@ function openGlossaryModal() {
           <span class="align-middle text-[10px] font-normal rounded px-1.5 py-0.5 ${t.scope === 'game' ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-700'}">${scopeLabel(t)}</span>
           ${learned.has(key) ? '<span class="align-middle text-[10px] font-bold rounded px-1.5 py-0.5 bg-emerald-100 text-emerald-700">✅ 習得済み</span>' : ''}</div>
         <div class="text-xs text-slate-700 mt-0.5">${t.def}</div>
-        <div class="text-xs text-navy bg-slate-50 rounded px-2 py-1 mt-1">🧮 ${t.calc}</div>
+        ${t.calc ? `<div class="text-xs text-navy bg-slate-50 rounded px-2 py-1 mt-1">🧮 ${t.calc}</div>` : ''}
         <div class="text-xs text-slate-600 mt-1">${t.here}</div>
-        <div class="text-[11px] text-slate-500 mt-0.5">💡 ${t.hint}</div>
+        ${t.hint ? `<div class="text-[11px] text-slate-500 mt-0.5">💡 ${t.hint}</div>` : ''}
       </div>`).join('');
     return `<div class="mb-3"><h3 class="font-bold text-xs text-navy bg-slate-100 rounded px-2 py-1 mb-1">${g}</h3>${rows}</div>`;
   };
@@ -10636,8 +10709,11 @@ function signedYen(n) {
 // v22: 「現在の時価」の算定方法を購入価格からのドリフト方式から、収益還元価格と積算価格の
 // 高いほう（L.timeValueOf）へ変更（仕様書 §2）。文面も丸ごと差し替える。
 // v21: §1-A「時価の算定根拠」セクションの丸ごと削除に伴い、「現在の時価（参考）」行のタップで
-// 開く内容として格納する（logic.mjsのincomeValue/sekisanValueの式・係数はコードから引き写した数値。
-// timeValueOf/fairValueの計算式が変わったらここも直す）。
+// 開く内容として格納する。
+// v22.1: ゲーム内部の係数レンジ（入居0.6〜1.0・躯体0.85〜1.0・手入れ0.92〜1.0）と査定の
+// 内部式（×0.92±目利きレベル）を撤去し、実務の考え方＋この物件の実額だけを見せる形にした。
+// ここは「表示されている数字がどう出たか」を検算するための画面であって、
+// ゲームの内部パラメータを開示する画面ではない（用語集と同じ方針）。
 // v22: この物件の実際の数字（収益還元・積算・採用）を併記できるよう property を受け取る関数にする。
 function timeValueExplainHtml(property) {
   const income = Math.round(L.incomeValue(property));
@@ -10652,17 +10728,17 @@ function timeValueExplainHtml(property) {
   </div>
   <div class="font-bold text-slate-700 mt-1.5 mb-0.5">${term('shueki_kangen', '収益還元価格')}（その家賃をいくらの利回りで買う人がいるか）</div>
   <div class="font-mono bg-white border rounded p-1.5 mt-1 leading-relaxed">
-    収益還元価格 ＝ 満室想定の年間家賃 ÷ 市場利回り × 入居の係数 × 躯体の係数 × 手入れの係数
+    収益還元価格 ＝ 満室想定の年間家賃 ÷ ${term('kangen_rimawari', '還元利回り')}
   </div>
-  <div class="mt-1">・入居 0.6〜1.0（満室で1.0）／躯体 0.85〜1.0／手入れ 0.92〜1.0</div>
-  <div>・市場利回り … 物件タイプの標準に、築15年超は古いほど＋、エリア、訳あり、バリューアップで加減</div>
+  <div class="mt-1">・実際には、いまの入居状況と建物の傷み具合（躯体・手入れ）を織り込んで調整する</div>
+  <div>・還元利回り … 物件タイプ・立地・築年・状態ごとに市場が求める利回り。都心の築浅ほど低く、地方の築古や訳ありほど高い</div>
   <div class="font-bold text-slate-700 mt-1.5 mb-0.5">${term('sekisan_kakaku', '積算価格')}（土地と建物を積み上げるといくらか。銀行の${term('tanpo_hyoka', '担保評価')}もこの物差し）</div>
   <div class="font-mono bg-white border rounded p-1.5 mt-1 leading-relaxed">
     積算価格 ＝ ${term('rosenka', '路線価')} × 土地面積 ＋ ${term('saichotatsu_kakaku', '再調達価格')} × 延床面積 × 残存年数 ÷ ${term('hotei_taiyo_nensu', '法定耐用年数')}
   </div>
   <div class="mt-1">・再調達価格 木造15万／鉄骨18万／RC20万 円/㎡　・法定耐用年数 木造22／鉄骨34／RC47年</div>
   <div>・築年が法定耐用年数を超えると建物は0円。土地値だけの物件になる</div>
-  <div class="mt-1">不動産屋の査定額 ＝ この時価 × 0.92 ± 目利きレベルぶんの誤差（査定は気持ち安めに出る）</div>
+  <div class="mt-1">不動産屋の査定額は、期間内に売り切ることを前提にするぶん、この時価より気持ち安めに出る。</div>
 `;
 }
 
@@ -10679,10 +10755,12 @@ function scorecardSummaryHtml(card, opts = {}) {
       <span class="inline-block transition-transform ${open ? 'rotate-90' : ''}">▶</span>総合損益
     </button>
     <div class="${plTone} font-black text-2xl leading-tight tabular-nums">${signedYen(card.totalPl)}</div>
-    <div class="text-xs text-slate-600 mt-0.5">自己資金回収率 ${Math.round(card.ccr * 100)}% ・ 年平均 ${signedYen(card.annualPl)}/年</div>
+    <div class="text-xs text-slate-600 mt-0.5">自己資金回収率 ${Math.round(card.ccr * 100)}%/年 ・ 年平均 ${signedYen(card.annualPl)}/年</div>
     ${open ? `<div class="text-[10px] text-slate-500 mt-1.5 text-left bg-slate-50 rounded p-2 leading-relaxed">
       総合損益 ＝ 手取り ＋ 累計CF − 投下自己資金<br>
-      ${signedYen(card.totalPl)} ＝ ${L.yen(card.netProceeds)} ＋ ${signedYen(card.incomeCf)} − ${L.yen(card.equityIn)}
+      ${signedYen(card.totalPl)} ＝ ${L.yen(card.netProceeds)} ＋ ${signedYen(card.incomeCf)} − ${L.yen(card.equityIn)}<br>
+      自己資金回収率（CCR） ＝ 年間CF ÷ 投下自己資金<br>
+      ${Math.round(card.ccr * 100)}% ＝ ${signedYen(card.annualCf)} ÷ ${L.yen(card.equityIn)}
     </div>` : ''}
   </div>`;
 }
@@ -12345,7 +12423,7 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
     <div class="text-center text-sm text-slate-600">この価格の${term('yield_gross', '表面利回り')} <span id="sl-yield" class="font-bold text-lg text-emerald-700">${yieldOf(price)}</span>%
       <div class="text-[11px] text-slate-500">（満室想定・年間家賃収入 ${L.yen(gpi)} 基準）</div></div>
     <div>
-      ${collapseHeader('sl-net-toggle', false, '売却の内訳を見る（税・手数料・残債）', `手取り <span id="sl-net-sum" class="text-emerald-700">${L.yen(L.saleBreakdown(state, p, price).net)}</span>`)}
+      ${collapseHeader('sl-net-toggle', false, '売却の内訳（税・手数料・残債）', `手取り <span id="sl-net-sum" class="text-emerald-700">${L.yen(L.saleBreakdown(state, p, price).net)}</span>`)}
       <div id="sl-net" class="hidden mt-1">${netProceedsBox(p, price)}</div>
     </div>
     <div>
@@ -12552,11 +12630,11 @@ function renderBuildingSVG(p, sizeClass = 'w-16 h-16') {
 // v3.2: 概要の「地図で場所を見る」。詳細を閉じて地図の該当地点へ飛び、
 // 「タップすると詳細に戻れる」ことを吹き出しで数秒示す（市場物件はピンも立つ）。
 function jumpToMapWithBubble(p, from) {
-  if (from === 'owned') focusOnOwned(p.id); else focusOnMarket(p.id);
+  if (from === 'owned') focusOnOwned(p.id, true); else focusOnMarket(p.id);
   const canvas = document.getElementById('city-canvas');
   const r = canvas ? canvas.getBoundingClientRect() : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
   const bubble = el(`<div class="fixed z-[55] pointer-events-none" style="left:${Math.round(r.left + r.width / 2)}px; top:${Math.round(r.top + r.height * 0.30)}px; transform:translate(-50%,-100%); transition: opacity 0.5s;">
-    <div class="bg-white rounded-xl shadow-xl px-4 py-2 text-sm font-bold text-navy">📍 ここ！ ${from === 'market' ? 'ピンや建物' : 'この建物'}をタップ（クリック）すると詳細に戻れます</div>
+    <div class="bg-white rounded-xl shadow-xl px-4 py-2 text-sm font-bold text-navy">📍 ここ！ ピンや建物をタップ（クリック）すると詳細に戻れます</div>
     <div style="width:0;height:0;border-left:10px solid transparent;border-right:10px solid transparent;border-top:12px solid #fff;margin:0 auto;filter:drop-shadow(0 2px 2px rgba(0,0,0,0.15));"></div>
   </div>`);
   document.body.appendChild(bubble);
@@ -13523,16 +13601,18 @@ function showRepairEffect(propId, text) {
 // v3.9: 長押し中のライブ表示更新（PCパネルとスマホ情報バーの両方を更新）
 function updateHudLive() {
   const cashEl = document.getElementById('hud-cash');
-  if (cashEl) cashEl.textContent = L.yen(state.cash);
+  // v22.2: HUDの3面（PC左パネル・スマホ上部タイル・ヘッダー）はyenShort表記。
+  // ここだけyen()のままだと長押し中に表記が全桁へ切り替わってしまうので合わせる。
+  if (cashEl) cashEl.textContent = L.yenShort(state.cash);
   const apEl = document.getElementById('hud-ap');
   if (apEl) apEl.textContent = `⚡ 行動力: ${state.actionPower} / ${state.baseActionPower}`;
   const apM = document.getElementById('hud-ap-m');
   if (apM) apM.textContent = `${state.actionPower}/${state.baseActionPower}`;
   const cashM = document.querySelector('#mobile-status .ms-kpi[data-kpi="cash"] div:last-child');
-  if (cashM) cashM.textContent = L.yen(state.cash);
+  if (cashM) cashM.textContent = L.yenShort(state.cash);
   // v8.9: スマホ版ヘッダーの常時表示（現金・行動力）も長押し中に追従させる。
   const clockCash = document.getElementById('hud-clock-cash');
-  if (clockCash) clockCash.textContent = L.yen(state.cash);
+  if (clockCash) clockCash.textContent = L.yenShort(state.cash);
   const clockAp = document.getElementById('hud-clock-ap');
   if (clockAp) clockAp.textContent = `${state.actionPower}/${state.baseActionPower}`;
   // v8.9: 営業（動いて情報を集める）で市場に新着物件が増えても、ホーム画面の「🗂️ 市場(N)」
