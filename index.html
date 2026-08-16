@@ -430,6 +430,25 @@ export function remainingPrincipal(principal, annualRate, years, paymentsMade) {
   return principal * (pow - powK) / (pow - 1);
 }
 
+// v19: 据置期間（元金据置・利息のみ）に対応した残債。graceMonths は返済期間の内数
+// （例: 10年のうち最初の2年）で、据置中は元金が一切減らない。graceMonths=0（省略時）の
+// ローンは remainingPrincipal(principal, rate, years, monthsPaid) と1円もずれない。
+export function loanRemaining(loan) {
+  if (!loan || !(loan.principal > 0)) return 0;
+  const g = loan.graceMonths ?? 0;
+  const k = loan.monthsPaid ?? 0;
+  if (k <= g) return loan.principal;
+  return remainingPrincipal(loan.principal, loan.rate, loan.years - g / 12, k - g);
+}
+
+// v19: 据置期間に対応した月々の返済額。据置中は利息のみ（元金据置）、据置後は
+// 残りの期間（years − graceMonths/12）で通常どおり元利均等償却する。
+export function loanPaymentOf(loan, monthsPaid = loan.monthsPaid ?? 0) {
+  const g = loan.graceMonths ?? 0;
+  if (monthsPaid < g) return loan.principal * loan.rate / 12;
+  return monthlyPayment(loan.principal, loan.rate, loan.years - g / 12);
+}
+
 export function noiAnnual(annualRentFull, opexRate) {
   return annualRentFull * (1 - opexRate);
 }
@@ -968,7 +987,7 @@ export function makeOffer(state, propertyId, cutRate, rng = Math.random) {
   return { state: s, accepted: false, price: 0, penalized, counterProposal };
 }
 
-export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price, owner = 'personal', reformPlan = null, rng = Math.random }) {
+export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price, owner = 'personal', reformPlan = null, rng = Math.random, graceMonths = 0 }) {
   const s = structuredClone(state);
   const i = s.market.findIndex(x => x.id === propertyId);
   const p = s.market[i];
@@ -1001,7 +1020,9 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
     p.loan = null;
     p.downPaid = price;   // v15: 現金購入は全額が自己資金
   } else {
-    const terms = reviewLoan(method, p, price, downRatio, s, reformPlan).terms;
+    // v19: 公庫の4,800万円は1事業者あたりの枠なので、実際に買う名義を審査に渡す
+    // （p.ownerはこの関数の冒頭で確定済み。渡さないと法人で買う物件まで個人の枠で判定される）。
+    const terms = reviewLoan(method, p, price, downRatio, s, reformPlan, p.owner).terms;
     // v18.2: 借入の実行（入金）と物件代金・諸費用の支払い（出金）を2本の明細に分ける。
     // ただしloanAmountに上乗せしたリフォーム費（reformCost）は現金を経由しない
     // （上のreformCost>0ブロックのとおり、決済と同時に着工し「ここで現金は引かない」設計＝
@@ -1011,8 +1032,12 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
     const cashLoanPortion = loanAmount - reformCost;
     if (cashLoanPortion > 0) moveCash(s, cashLoanPortion, 'loan_draw', `${p.label} の融資実行`, p.id);
     moveCash(s, -(price + closing), 'buy', `${p.label} を購入（物件代金・諸費用）`, p.id);
+    // v19: 元金据置は公庫のみ・最長24ヶ月・返済期間を超えない範囲でクランプする。
+    // 公庫以外を選んでいる場合は購入フローで据置UIを出さないが、念のため必ず0に落とす。
+    const years = terms?.years ?? BANKS[method].termMax;
+    const grace = method === 'kouko' ? Math.max(0, Math.min(24, graceMonths, years * 12)) : 0;
     p.loan = { bankKey: method, principal: loanAmount,
-      rate: bankRate(method, s), years: terms?.years ?? BANKS[method].termMax, monthsPaid: 0,
+      rate: bankRate(method, s), years, monthsPaid: 0, graceMonths: grace,
       reformIncluded: reformCost || 0 };   // v15: 内訳の表示用に、いくらリフォームぶんかを残す
     s.bankRelations[method].loans += 1;
     p.downPaid = Math.round(price * downRatio);   // v15: 頭金。ローン完済でp.loanがnullになっても振り返れるよう保存する
@@ -1096,11 +1121,16 @@ export function noiAnnualV2(p) {
   return egiAnnual(p) - opexAnnual(p);
 }
 
+// v19: 据置期間中（monthsPaid < graceMonths）は次回返済が利息のみになるので、元金0で返す。
+// graceMonths=0（省略時）のローンはこれまでどおりの結果になる。
 function loanMonthlyBreakdown(loan) {
   if (!loan) return { interest: 0, principal: 0 };
-  const rem = remainingPrincipal(loan.principal, loan.rate, loan.years, loan.monthsPaid);
-  const pay = monthlyPayment(loan.principal, loan.rate, loan.years);
+  const g = loan.graceMonths ?? 0;
+  const k = loan.monthsPaid ?? 0;
+  const rem = loanRemaining(loan);
   const interest = Math.round(rem * loan.rate / 12);
+  if (k < g) return { interest, principal: 0 };
+  const pay = monthlyPayment(loan.principal, loan.rate, loan.years - g / 12);
   return { interest, principal: Math.round(pay - interest) };
 }
 
@@ -1264,16 +1294,26 @@ export function capGainTaxOf(state, property, price) {
 // 1円単位でズレて「表と実際の残債が違う」という不信につながる。利息は前月残高×月利、
 // 元金はその月の残高の減少分として出す（合計＝毎月返済額になる）。
 // startMonth は借入を実行した通し月（＝返済1回目はその翌月）。
+// v19: 据置期間（graceMonths）に対応。据置中の行は利息のみ・元金0・残高は当初元金のまま。
+// graceMonths=0（省略時）のローンはこれまでどおりの結果になる。
 export function amortizationSchedule(loan, startMonth = 0) {
   if (!loan || !(loan.principal > 0)) return [];
+  const g = loan.graceMonths ?? 0;
   const n = Math.round(loan.years * 12);
   const r = loan.rate / 12;
   const rows = [];
   let prev = loan.principal;
   for (let k = 1; k <= n; k++) {
-    const bal = Math.round(remainingPrincipal(loan.principal, loan.rate, loan.years, k));
-    const interest = Math.round(prev * r);
-    const principal = prev - bal;
+    let bal, interest, principal;
+    if (k <= g) {
+      bal = loan.principal;
+      interest = Math.round(loan.principal * r);
+      principal = 0;
+    } else {
+      bal = Math.round(remainingPrincipal(loan.principal, loan.rate, loan.years - g / 12, k - g));
+      interest = Math.round(prev * r);
+      principal = prev - bal;
+    }
     rows.push({ n: k, month: startMonth + k, pay: interest + principal,
       interest, principal, balance: bal, paid: k <= (loan.monthsPaid ?? 0) });
     prev = bal;
@@ -1283,19 +1323,29 @@ export function amortizationSchedule(loan, startMonth = 0) {
 
 // 返済予定表のヘッダーに出す要約。借入を実行した月は state.month − 返済済み回数で復元する
 // （旧セーブにも借入月が記録されていないため、フィールドを増やさずここで導出する）。
+// v19: 据置期間に対応。monthlyPay は「現在の月額」（据置中なら利息のみ）、
+// monthlyPayAfterGrace は据置後の月額を返す。graceMonths=0（省略時）のローンは
+// これまでどおりの結果になる（monthlyPayAfterGrace === monthlyPay）。
 export function loanSummary(state, loan) {
   if (!loan) return null;
   const startMonth = (state.month ?? 0) - (loan.monthsPaid ?? 0);
   const n = Math.round(loan.years * 12);
-  const pay = Math.round(monthlyPayment(loan.principal, loan.rate, loan.years));
-  const balance = Math.round(remainingPrincipal(loan.principal, loan.rate, loan.years, loan.monthsPaid ?? 0));
+  const g = loan.graceMonths ?? 0;
+  const monthsPaid = loan.monthsPaid ?? 0;
+  const monthlyPayAfterGrace = Math.round(monthlyPayment(loan.principal, loan.rate, loan.years - g / 12));
+  const graceInterest = Math.round(loan.principal * loan.rate / 12);
+  const pay = monthsPaid < g ? graceInterest : monthlyPayAfterGrace;
+  const balance = Math.round(loanRemaining(loan));
+  // 総利息 ＝ 据置ぶん（利息のみ×g回）＋ 据置後の元利均等償還ぶん（総返済−元金）
+  const totalInterest = Math.round(g * graceInterest + (monthlyPayAfterGrace * (n - g) - loan.principal));
   return {
     bankKey: loan.bankKey ?? null,
     bankLabel: loan.bankKey ? BANKS[loan.bankKey]?.label ?? '金融機関' : 'リフォームローン',
     principal: loan.principal, rate: loan.rate, years: loan.years,
-    monthlyPay: pay, monthsPaid: loan.monthsPaid ?? 0, monthsTotal: n,
+    monthlyPay: pay, monthsPaid, monthsTotal: n,
     balance, startMonth, payoffMonth: startMonth + n,
-    totalInterest: Math.round(pay * n - loan.principal),
+    totalInterest,
+    graceMonths: g, monthlyPayAfterGrace,
     reformIncluded: loan.reformIncluded || 0,
   };
 }
@@ -1303,8 +1353,7 @@ export function loanSummary(state, loan) {
 export function loanPayoffOf(property) {
   let payoff = 0;
   if (property.loan) {
-    payoff += Math.round(remainingPrincipal(property.loan.principal, property.loan.rate,
-      property.loan.years, property.loan.monthsPaid));
+    payoff += Math.round(loanRemaining(property.loan));
   }
   return payoff + reformLoansRemaining(property);
 }
@@ -2041,19 +2090,32 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
     return { state: s, started: true, diy: true, cost: material, done };
   }
 
-  if (opts.financed && !canUseReformLoan(cost, s.creditScore)) return { state, started: false, reason: 'reformLoanBlocked' };
+  // v19: lenderKey を明示した呼び出しだけレンダー別の判定・金利・期間を使う。省略時（既存の
+  // 呼び出し）は従来どおり CONFIG.minCreditToFinance / reformLoanRateFor / CONFIG.reformLoanYears。
+  const lenderKey = opts.lenderKey;
+  const canFinanceThis = lenderKey ? canUseReformLoan(cost, s.creditScore, lenderKey) : canUseReformLoan(cost, s.creditScore);
+  if (opts.financed && !canFinanceThis) return { state, started: false, reason: 'reformLoanBlocked' };
   s.actionPower -= 5;
   let loanAmount = 0;
+  // v19: 有担保リフォームローンだけ抵当権設定費用がかかる。「無料の上位互換」にしないための対価。
+  // 現金が足りなければ着工させない（他の費用は従来どおり残高を割り込ませても着工できる仕様のまま）。
+  if (opts.financed && lenderKey === 'secured') {
+    const provisional = reformLoanAmount(cost, s.creditScore);
+    if (s.cash < securedReformFees(provisional)) return { state, started: false, reason: 'cash' };
+  }
   if (opts.financed) {
     loanAmount = reformLoanAmount(cost, s.creditScore);
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     // 合計は従来の自己負担分（cost-loanAmount）と同じ現金の減りになる。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の原状回復`, p.id);
+    if (lenderKey === 'secured') moveCash(s, -securedReformFees(loanAmount), 'buy', `${p.label} の抵当権設定費用`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
-    p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
+    p.reformLoans.push({ principal: loanAmount,
+      rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の原状回復`, p.id);
     addSpend(p, 'repairSpend', cost);
@@ -2061,8 +2123,10 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
   // v16: 原状回復費は借入があっても工事費の全額（cost）を発生月の経費として計上する
   // （融資は資金調達の方法にすぎず、税務上の経費は発生主義で見るため）。
   bookOf(s, p.owner).expense += cost;
-  u.restoreJob = { monthsTotal: 1, monthsLeft: 1 };
-  return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, months: 1 };
+  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす（保留の仕組みは作らず工期+1で表現）。
+  const restoreMonths = (opts.financed && lenderKey === 'secured') ? 2 : 1;
+  u.restoreJob = { monthsTotal: restoreMonths, monthsLeft: restoreMonths };
+  return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, months: restoreMonths };
 }
 
 // === v4/v6: 修繕は「日常メンテ・小規模補修」と「大規模修繕」の2種類 ===
@@ -2318,7 +2382,16 @@ export function startRepair(state, propertyId, kind, opts = {}) {
     return { state: s, started: true, diy: true, cost: prog ? 0 : material, done: false };
   }
 
-  if (opts.financed && !canUseReformLoan(cost, s.creditScore)) return { state, started: false, reason: 'reformLoanBlocked' };
+  // v19: lenderKey を明示した呼び出しだけレンダー別の判定・金利・期間を使う。省略時（既存の
+  // 呼び出し）は従来どおり CONFIG.minCreditToFinance / reformLoanRateFor / CONFIG.reformLoanYears。
+  const lenderKey = opts.lenderKey;
+  const canFinanceThis = lenderKey ? canUseReformLoan(cost, s.creditScore, lenderKey) : canUseReformLoan(cost, s.creditScore);
+  if (opts.financed && !canFinanceThis) return { state, started: false, reason: 'reformLoanBlocked' };
+  // v19: 有担保リフォームローンの抵当権設定費用（対価）。現金が足りなければ着工させない。
+  if (opts.financed && lenderKey === 'secured') {
+    const provisional = reformLoanAmount(cost, s.creditScore);
+    if (s.cash < securedReformFees(provisional)) return { state, started: false, reason: 'cash' };
+  }
   s.actionPower -= 5;
   let loanAmount = 0;
   if (opts.financed) {
@@ -2326,10 +2399,13 @@ export function startRepair(state, propertyId, kind, opts = {}) {
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}`, p.id);
+    if (lenderKey === 'secured') moveCash(s, -securedReformFees(loanAmount), 'buy', `${p.label} の抵当権設定費用`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
-    p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
+    p.reformLoans.push({ principal: loanAmount,
+      rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}`, p.id);
     addSpend(p, 'repairSpend', cost);
@@ -2339,7 +2415,8 @@ export function startRepair(state, propertyId, kind, opts = {}) {
   // 日常メンテ・特別清掃（業者発注）は資産計上せず、発生月の経費として計上する。
   if (kind === 'large') { p.jobCost = p.jobCost || {}; p.jobCost.large = cost; }
   else bookOf(s, p.owner).expense += cost;
-  const monthsTotal = repairJobMonths(p, kind);
+  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす。
+  const monthsTotal = repairJobMonths(p, kind) + ((opts.financed && lenderKey === 'secured') ? 1 : 0);
   // v15: 単数のp.repairJobをやめ、配列へpush（同じゲージの他の工事とは排他だが別ゲージとは同時進行できる）
   ensureRepairJobs(p).push({ kind, monthsTotal, monthsLeft: monthsTotal, startState: repairGaugeValue(p, kind) });
   return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, monthsTotal };
@@ -2387,14 +2464,14 @@ export function setAutoManage(state, propertyId, on) {
 
 export function totalDebt(state) {
   return Math.round((state.properties || []).reduce((t, p) => t
-    + (p.loan ? remainingPrincipal(p.loan.principal, p.loan.rate, p.loan.years, p.loan.monthsPaid) : 0)
+    + (p.loan ? loanRemaining(p.loan) : 0)
     + reformLoansRemaining(p), 0));
 }
 
 // v4: リフォームローンは1物件に複数本。残債の合計を返す。
 export function reformLoansRemaining(p) {
   return Math.round((p.reformLoans || []).reduce((t, l) =>
-    t + remainingPrincipal(l.principal, l.rate, l.years, l.monthsPaid), 0));
+    t + loanRemaining(l), 0));
 }
 
 // === 業者への修繕依頼（DIYより高コストだが一括で修繕度100・リフォームローン利用可）===
@@ -2403,8 +2480,11 @@ export function professionalRepairCost(property) {
   return repairCost(property, 'large');
 }
 
+// v19: 無担保リフォームローンは自己資金（頭金）不要＝工事費と諸経費の全額を借りられる商品が
+// 主流なので、上限比率を 0.9→1.0 に引き上げる（信用度が満点なら全額借りられる）。下限0.3は
+// 「信用度による効き方」を残すため据え置き。
 export function reformLoanAmount(cost, creditScore) {
-  const ratio = Math.max(0.3, Math.min(0.9, creditScore / 100));
+  const ratio = Math.max(0.3, Math.min(1.0, creditScore / 100));
   return Math.round(cost * ratio / 10000) * 10000;
 }
 
@@ -2412,21 +2492,52 @@ export function reformLoanAmount(cost, creditScore) {
 // 金融機関が取り扱わず、信用力が基準未満の借り手にも組めない。少額工事・信用不足の
 // どちらも現金払いのみとする（本体ローンと同じ CONFIG.minCreditToFinance を流用）。
 export const REFORM_LOAN_MIN_COST = 300_000;
-export function canUseReformLoan(cost, creditScore) {
-  return cost >= REFORM_LOAN_MIN_COST && creditScore >= CONFIG.minCreditToFinance;
+
+// v19: 実態調査により、金融機関を選べるようにする（銀行の無担保／信販の提携／有担保）。
+// それぞれ上限額・期間・必要信用度が違う。bank は工事金額帯で金利が変わる（REFORM_LOAN_RATE_BANDS）
+// ので rate を持たない。
+export const REFORM_LENDERS = {
+  bank:    { key: 'bank',    label: '🏦 銀行のリフォームローン（無担保）',       maxAmount: 10_000_000, years: 10, minCredit: 25, secured: false },
+  shinpan: { key: 'shinpan', label: '🏪 信販の提携ローン',                     maxAmount:  5_000_000, years: 10, rate: 0.045, minCredit: 15, secured: false },
+  secured: { key: 'secured', label: '🏛 有担保リフォームローン（物件を担保に）', maxAmount: 30_000_000, years: 15, rate: 0.018, minCredit: 40, secured: true },
+};
+
+// v19: lenderKey を明示した呼び出しは、レンダーごとの必要信用度・上限額で判定する。
+// 一方、lenderKey を渡さない既存の呼び出し（2引数）は、従来どおり CONFIG.minCreditToFinance
+// （=20）だけで判定する——bank の minCredit（25）に差し替えると、既存の呼び出し元の挙動が
+// 変わってしまうため、あえて分岐を分けて互換を保つ。
+export function canUseReformLoan(cost, creditScore, lenderKey) {
+  if (!(cost >= REFORM_LOAN_MIN_COST)) return false;
+  if (lenderKey === undefined) return creditScore >= CONFIG.minCreditToFinance;
+  const lender = REFORM_LENDERS[lenderKey];
+  if (!lender) return false;
+  return creditScore >= lender.minCredit && cost <= lender.maxAmount;
 }
 
 // v8.20: リフォームローンの金利は工事金額の帯で相場に連動させる。小口の内装・原状回復は
 // 無担保ローン相当で高め、大規模修繕・フルリノベは担保付き融資に近い低金利になるのが実勢。
+// v19: 銀行の無担保リフォームローンの実勢（年2.0〜3.5%）に帯の値を合わせた。
 export const REFORM_LOAN_RATE_BANDS = [
-  [500_000, 0.040],
-  [3_000_000, 0.035],
+  [500_000, 0.035],
+  [3_000_000, 0.030],
   [15_000_000, 0.025],
-  [Infinity, 0.018],
+  [Infinity, 0.020],
 ];
 export function reformLoanRateFor(cost) {
   for (const [limit, rate] of REFORM_LOAN_RATE_BANDS) if (cost <= limit) return rate;
   return REFORM_LOAN_RATE_BANDS.at(-1)[1];
+}
+
+// v19: レンダーごとの金利。secured・shinpanは固定金利、bankは工事金額帯で決まる金利。
+export function reformLenderRate(lenderKey, cost) {
+  const lender = REFORM_LENDERS[lenderKey] ?? REFORM_LENDERS.bank;
+  return lender.rate ?? reformLoanRateFor(cost);
+}
+
+// v19: 有担保リフォームローンだけにかかる抵当権設定費用（借入額の0.4%＋司法書士報酬5万円）。
+// 無料の上位互換にしないための対価。
+export function securedReformFees(loanAmount) {
+  return Math.round(loanAmount * 0.004) + 50_000;
 }
 
 // v15: 「いま一体で借りる」と「後からリフォームローンで借りる」の比較をUIに出すための材料。
@@ -2446,7 +2557,8 @@ export function repairMonthsForCost(cost) {
 }
 
 // v3: 業者修繕は即時完了せず「修繕中」を経て翌月以降に回復する。発注手続きは行動力5。
-export function startProfessionalRepair(state, propertyId, financed = false) {
+// v19: lenderKey（省略可）を渡すとレンダー別の判定・金利・期間で組める。省略時は従来どおり。
+export function startProfessionalRepair(state, propertyId, financed = false, lenderKey = undefined) {
   const p0 = state.properties.find(x => x.id === propertyId);
   // v15: 大規模修繕が動かすのは躯体ゲージだけなので、躯体側の工事が無ければ発注できる。
   if (!p0 || repairJobForGauge(p0, 'structural')) return { state, started: false, cost: 0, loanAmount: 0, financed: false };
@@ -2455,7 +2567,13 @@ export function startProfessionalRepair(state, propertyId, financed = false) {
   const cost = professionalRepairCost(p);
   // v4: 工事ごとに借りられるよう複数本を許可（配列化で残債・返済を本数ぶん正しく処理する）
   const canFinance = !!financed;
-  if (canFinance && !canUseReformLoan(cost, s.creditScore)) return { state, started: false, cost: 0, loanAmount: 0, financed: false, reason: 'reformLoanBlocked' };
+  const canFinanceThis = lenderKey ? canUseReformLoan(cost, s.creditScore, lenderKey) : canUseReformLoan(cost, s.creditScore);
+  if (canFinance && !canFinanceThis) return { state, started: false, cost: 0, loanAmount: 0, financed: false, reason: 'reformLoanBlocked' };
+  // v19: 有担保リフォームローンの抵当権設定費用（対価）。現金が足りなければ着工させない。
+  if (canFinance && lenderKey === 'secured') {
+    const provisional = reformLoanAmount(cost, s.creditScore);
+    if (s.cash < securedReformFees(provisional)) return { state, started: false, cost: 0, loanAmount: 0, financed: false, reason: 'cash' };
+  }
   s.actionPower -= 5;
   let loanAmount = 0;
   if (canFinance) {
@@ -2463,15 +2581,19 @@ export function startProfessionalRepair(state, propertyId, financed = false) {
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の大規模修繕`, p.id);
+    if (lenderKey === 'secured') moveCash(s, -securedReformFees(loanAmount), 'buy', `${p.label} の抵当権設定費用`, p.id);
     addSpend(p, 'repairSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
-    p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
+    p.reformLoans.push({ principal: loanAmount,
+      rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の大規模修繕`, p.id);
     addSpend(p, 'repairSpend', cost);
   }
-  const monthsTotal = largeRepairMonths(p);
+  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす。
+  const monthsTotal = largeRepairMonths(p) + ((canFinance && lenderKey === 'secured') ? 1 : 0);
   // v15: kindを明示する（未指定のままだと配列化後にrepairJobsOf側の暗黙large扱いに頼ることになり危険なため）
   ensureRepairJobs(p).push({ kind: 'large', monthsTotal, monthsLeft: monthsTotal, startState: p.repairState });
   // v16: 大規模修繕は資産計上して償却する（ここでは経費計上しない）。見積額は物件側の
@@ -2537,7 +2659,15 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
   }
 
   if (!opts.financed && state.cash < cost) return { state, started: false, reason: 'cash' };
-  if (opts.financed && !canUseReformLoan(cost, state.creditScore)) return { state, started: false, reason: 'reformLoanBlocked' };
+  // v19: lenderKey を明示した呼び出しだけレンダー別の判定・金利・期間を使う。省略時は従来どおり。
+  const lenderKey = opts.lenderKey;
+  const canFinanceThis = lenderKey ? canUseReformLoan(cost, state.creditScore, lenderKey) : canUseReformLoan(cost, state.creditScore);
+  if (opts.financed && !canFinanceThis) return { state, started: false, reason: 'reformLoanBlocked' };
+  // v19: 有担保リフォームローンの抵当権設定費用（対価）。現金が足りなければ着工させない。
+  if (opts.financed && lenderKey === 'secured') {
+    const provisional = reformLoanAmount(cost, state.creditScore);
+    if (state.cash < securedReformFees(provisional)) return { state, started: false, reason: 'cash' };
+  }
   const s = structuredClone(state);
   const p = s.properties.find(x => x.id === propertyId);
   s.actionPower -= 5;
@@ -2547,18 +2677,23 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の${plan.label}`, p.id);
+    if (lenderKey === 'secured') moveCash(s, -securedReformFees(loanAmount), 'buy', `${p.label} の抵当権設定費用`, p.id);
     addSpend(p, 'valueUpSpend', cost - loanAmount);
     addSpend(p, 'reformBorrowed', loanAmount);
     p.reformLoans = p.reformLoans || [];
-    p.reformLoans.push({ principal: loanAmount, rate: reformLoanRateFor(cost), years: CONFIG.reformLoanYears, monthsPaid: 0 });
+    p.reformLoans.push({ principal: loanAmount,
+      rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の${plan.label}`, p.id);
     addSpend(p, 'valueUpSpend', cost);
   }
   // v16: 業者発注も資産計上して償却する（ここでは経費計上しない）。見積額を運ぶ。
   p.jobCost = p.jobCost || {}; p.jobCost.valueup = cost;
-  p.valueUpJob = { monthsTotal: plan.months, monthsLeft: plan.months, rentMult: plan.rentMult, label: plan.label };
-  return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, months: plan.months };
+  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす。
+  const months = plan.months + ((opts.financed && lenderKey === 'secured') ? 1 : 0);
+  p.valueUpJob = { monthsTotal: months, monthsLeft: months, rentMult: plan.rentMult, label: plan.label };
+  return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, months };
 }
 
 // 価値UPの効果（各室家賃・時価・レベル）を物件に適用する。DIY完了時と業者工期完了時の共通処理。
@@ -3333,13 +3468,15 @@ export const BLUE_RETURN_SIMPLE = 100_000;
 export const EVENT_LOAN_MIN_COST = 300_000;
 
 // この出費をローンで払えるか。払えるなら条件（借入額・金利・期間・月返済・自己負担）を返す。
-export function eventLoanQuote(state, cost) {
+// v19: lenderKey（省略可）を渡すとレンダー別の判定・金利・期間で組める。省略時は従来どおり。
+export function eventLoanQuote(state, cost, lenderKey = undefined) {
   if (!(cost >= EVENT_LOAN_MIN_COST)) return null;
-  if (!canUseReformLoan(cost, state.creditScore)) return null;
+  const canFinance = lenderKey ? canUseReformLoan(cost, state.creditScore, lenderKey) : canUseReformLoan(cost, state.creditScore);
+  if (!canFinance) return null;
   const amount = reformLoanAmount(cost, state.creditScore);
   if (amount <= 0) return null;
-  const rate = reformLoanRateFor(cost);
-  const years = CONFIG.reformLoanYears;
+  const rate = lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost);
+  const years = lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears;
   return { amount, rate, years, cost,
     monthlyPay: Math.round(monthlyPayment(amount, rate, years)),
     selfPay: cost - amount };
@@ -3355,14 +3492,15 @@ export function eventChoiceCost(choice, property) {
 // 同じ選択肢で切り替えられる。method='loan' のときだけ reformLoans に1本積む。
 // 支出は突発修繕（troubleSpend）として記録する——イベントの出費はこれまで
 // どこにも積まれず、収支タブの「通信簿」から丸ごと抜け落ちていた。
-export function applyEventChoice(state, event, choiceIndex, targetId, unitIndex = null, method = 'cash') {
+// v19: lenderKey（省略可）を渡すとレンダー別の判定・金利・期間で組める。省略時は従来どおり。
+export function applyEventChoice(state, event, choiceIndex, targetId, unitIndex = null, method = 'cash', lenderKey = undefined) {
   let s = structuredClone(state);
   const ch = event?.choices?.[choiceIndex];
   if (!ch) return s;
   const p = targetId != null ? s.properties.find(x => x.id === targetId) : null;
   const cost = eventChoiceCost(ch, p);
   if (cost > 0) {
-    const q = method === 'loan' ? eventLoanQuote(s, cost) : null;
+    const q = method === 'loan' ? eventLoanQuote(s, cost, lenderKey) : null;
     if (q && p) {
       // v18.2: 借入の実行（+q.amount）とイベント対応費の全額支払い（-cost）を2本で記録する。
       // 合計は従来の自己負担分（-q.selfPay = -(cost - q.amount)）と同じ現金の減りになる。
@@ -4756,15 +4894,19 @@ export const MIN_LOAN_RATIO = 0.20;
 //   ・築年数は元から見ない（lifeStrict:false）ので変更不要
 // 公庫の期間を20年に伸ばすと信用金庫（同80%・20年）が完全に下位互換になってしまうため、
 // 信金は termMax 20→25 に伸ばして棲み分けを保つ（信金のアパートローンは実際25年程度まである）。
-// 期間の梯子は 公庫20 ＜ ノンバンク25 ≒ 信金25 ＜ 地銀30。公庫の maxLoan 4,800万は据え置きで、
-// 「少額・築古には強いが大きくは出ない」という公庫の性格はここで担保する。
+// v19: 公庫の実際の一般貸付は「設備資金＝10年以内（据置2年以内）」が正解で、20年は
+// 業種転換等に伴う特定設備資金の枠（賃貸物件取得には使えない）だった。termMax を 20→10 に
+// 訂正し、序盤の重さは据置期間（loanRemaining/loanPaymentOf）で緩和する。信金の25年は
+// 実勢どおり据え置き。期間の梯子は 公庫10 ＜ ノンバンク25 ≒ 信金25 ＜ 地銀30。公庫の
+// maxLoan 4,800万は据え置きで、「少額・築古には強いが大きくは出ない」という公庫の性格は
+// ここで担保する（v19でこの4,800万は物件単位ではなく名義ごとの総枠に変更＝koukoBalanceOf）。
 // v17: feeType（融資事務手数料の型）とguaranteeRate（保証料の金利上乗せ）を追加。
 // 公庫は融資手数料がほぼ無く・保証も不要（無保証）なので両方とも最も軽い。ノンバンクは
 // 保証料込みの高金利4.0%が最初から乗っている前提なので上乗せしない。信金・地銀は
 // 信用保証協会・保証会社の保証料を金利+0.2%で表現する（一括前払いだと定率手数料と
 // 合わせて借入額の4%超になり序盤が重すぎるため、金利上乗せに寄せてある）。
 export const BANKS = {
-  kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:10, termMax:20, ltvMax:0.80, maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'flat', guaranteeRate:0 },
+  kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:5, termMax:10, ltvMax:0.80, maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'flat', guaranteeRate:0 },
   chigin:  { key:'chigin',  label:'地方銀行',         baseRate:0.018, termMin:10, termMax:30, ltvMax:0.80, maxLoan:Infinity,   minLoan:3_000_000, minCredit:50, wakeOk:false, areaLimit:null,    lifeStrict:true,   minPrice:10_000_000, feeType:'rate', guaranteeRate:0.002 },
   shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:'local', lifeStrict:'soft', minPrice:0, feeType:'rate', guaranteeRate:0.002 },
   nonbank: { key:'nonbank', label:'ノンバンク',       baseRate:0.040, termMin:10, termMax:25, ltvMax:0.90, maxLoan:Infinity,   minLoan:  500_000, minCredit:25, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'rate', guaranteeRate:0 },
@@ -4810,7 +4952,16 @@ export function bankRate(bankKey, state) {
   return Math.max(b.baseRate - cut, b.baseRate - 0.007) + difficultyOf(state).rateAdj + (b.guaranteeRate ?? 0);
 }
 
-export function reviewLoan(bankKey, property, price, downRatio, state, reformPlan = null) {
+// v19: 公庫の4,800万円は1物件ごとの枠ではなく、1事業者（個人／法人）あたりの総枠。
+// state.properties のうち、その名義でかつ公庫から借りている物件融資の残債合計を返す。
+export function koukoBalanceOf(state, owner) {
+  return Math.round((state.properties || []).reduce((t, p) => {
+    if (p.owner !== owner || p.loan?.bankKey !== 'kouko') return t;
+    return t + loanRemaining(p.loan);
+  }, 0));
+}
+
+export function reviewLoan(bankKey, property, price, downRatio, state, reformPlan = null, owner = 'personal') {
   const b = BANKS[bankKey];
   const reasons = [];
   // v15: リフォーム一体型を選んだ場合、借入額は物件購入ぶんにリフォーム費を上乗せする。
@@ -4830,7 +4981,15 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
       + `${cr.down < DOWN_PAYMENT_BONUS_MAX ? '／頭金を厚くすると評価が上がります' : ''}` });
   if (property.junkFlags.length > 0 && !b.wakeOk) reasons.push({ code: 'WAKEARI_NG', msg: '瑕疵・事故物件のため取扱不可' });
   if (b.areaLimit && property.areaKey !== b.areaLimit) reasons.push({ code: 'AREA_NG', msg: `${b.label}の営業エリア外（地方・郊外のみ）` });
-  if (price < b.minPrice || loanAmount > b.maxLoan) reasons.push({ code: 'AMOUNT_NG', msg: `融資額が取扱範囲外（${b.label}）` });
+  // v19: 公庫だけは maxLoan を「この物件の借入額」ではなく「名義ごとの既存公庫借入＋今回」で見る
+  // （4,800万円は1事業者あたりの総枠のため）。他行は従来どおり単発の借入額で判定する。
+  const koukoExisting = bankKey === 'kouko' ? koukoBalanceOf(state, owner) : 0;
+  const amountOver = bankKey === 'kouko' ? (koukoExisting + loanAmount > b.maxLoan) : (loanAmount > b.maxLoan);
+  if (price < b.minPrice || amountOver) reasons.push({ code: 'AMOUNT_NG',
+    msg: bankKey === 'kouko'
+      ? `日本政策金融公庫の枠は1事業者あたり${yen(b.maxLoan)}です`
+        + `（既存の公庫借入 ${yen(koukoExisting)}／今回 ${yen(loanAmount)}／超過 ${yen(koukoExisting + loanAmount - b.maxLoan)}）`
+      : `融資額が取扱範囲外（${b.label}）` });
   // v8.7: 少額すぎる融資は銀行が扱わない。頭金の入れすぎで借入が数十万円になるのを防ぐ。
   // v16: 下限は「銀行ごとの実額」と「案件総額の20%」の大きい方（effectiveMinLoan）。
   // どちらで弾かれたかで打つ手が違う（実額＝この銀行では扱えない／比率＝頭金を減らせば通る）ため、
@@ -4906,8 +5065,10 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
 // v8.21: 融資が通りやすい順（信用度の必要水準が低い・LTVが緩い・訳あり/エリアの制限が
 // 少ないほど上位）に並べる。ノンバンクは金利が高い代わりに信用度25・LTV90%まで許容と
 // 最も間口が広く、地方銀行は信用度50必須・訳あり不可・1,000万円未満取扱不可と最も狭い。
-export function reviewAllBanks(property, price, downRatio, state, reformPlan = null) {
-  return ['nonbank', 'kouko', 'shinkin', 'chigin'].map(k => reviewLoan(k, property, price, downRatio, state, reformPlan));
+// v19: 公庫の4,800万円は「1事業者あたり」の枠なので、どの名義で買うかによって残枠が変わる。
+// 審査の一覧にも同じ名義を通さないと、法人で買うつもりの物件が個人の枠で判定されてしまう。
+export function reviewAllBanks(property, price, downRatio, state, reformPlan = null, owner = 'personal') {
+  return ['nonbank', 'kouko', 'shinkin', 'chigin'].map(k => reviewLoan(k, property, price, downRatio, state, reformPlan, owner));
 }
 
 // === v2: 売却フロー（査定・掲載・値下げ・取下げ） ===
@@ -5451,7 +5612,7 @@ export function currentYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
+  const L = { CONFIG, yen, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, STRUCT_VALUE_FACTOR, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -8912,6 +9073,10 @@ function openKpiModal(which, keepBulk = false) {
       const occ = unitN ? Math.round(occN / unitN * 100) : 0;
       const adviceLines = L.propertyAdviceLines(p);
       const listing = (state.listings || []).find(l => l.propertyId === p.id);
+      // v19: 買付を承諾すると state.listings からは消えて state.pendingSales に移る。ここを
+      // 取り逃すと「査定額＋売出設定へ」の分岐に落ちてopenSellWithAppraisal経由で価格決定
+      // 画面まで進めてしまい、最後にL.listForSaleが'pendingSale'で断る行き止まりになる（pendingを最優先で塞ぐ）。
+      const pending = (state.pendingSales || []).find(x => x.propertyId === p.id);
       const badges = [
         p.owner === 'corp' ? '<span class="bg-navy text-white rounded px-1">🏢法人</span>' : '<span class="bg-slate-200 text-slate-700 rounded px-1">👤個人</span>',
         listing ? `<span class="bg-amber-500 text-white rounded px-1">📢売出中${listing.listedMonths + 1}ヶ月目</span>` : '',
@@ -8966,7 +9131,16 @@ function openKpiModal(which, keepBulk = false) {
         </div>
         ${adviceLines.length ? `<button class="kpi-advice-toggle text-[11px] font-bold text-navy underline mt-1" data-id="${p.id}">${openPropAdviceIds.has(p.id) ? '▲ アドバイスを閉じる' : '💡 アドバイス'}</button>
         ${openPropAdviceIds.has(p.id) ? `<div class="mt-1 text-[11px] text-slate-600 bg-slate-50 rounded p-1.5 space-y-1">${adviceLines.map(t => `<div>${t}</div>`).join('')}</div>` : ''}` : ''}
-        ${la ? `<div class="mt-1 pt-1 border-t flex items-center justify-between"><span>査定額 <b class="text-emerald-700">${L.yen(la.amount)}</b> <span class="text-slate-500">（${laAge}）</span></span><button class="kpi-sell bg-emerald text-white rounded px-2 py-1" data-id="${p.id}">売出設定へ</button></div>` : ''}
+        ${pending
+          // v19: 決済待ちは成約価格に置き換え、売出の管理・設定を一切できなくする（ボタンを出さない）。
+          // 帯・アイコン・ボタンの有無で 査定額（緑・帯なし・ボタンあり）／売出価格（琥珀・帯あり・
+          // ボタンあり）／成約価格（緑・帯あり・ボタンなし）の3状態を見分けられるようにする。
+          ? `<div class="mt-1 bg-emerald-50 rounded px-1.5 py-1 flex items-center justify-between"><span>🤝 成約価格 <b class="text-emerald-700 font-bold">${L.yen(pending.price)}</b></span><span class="text-emerald-700 font-bold text-[11px]">📅 翌月に決済</span></div>`
+          : listing
+          // v19: 売出中は査定額でなく「いま出している売出価格」を見せる。査定額（emerald）と見た目を
+          // はっきり分け、上のバッジ（bg-amber-500）と同系にして「同じ状態」だと分かるようにする。
+          ? `<div class="mt-1 bg-amber-50 rounded px-1.5 py-1 flex items-center justify-between"><span>📢 売出価格 <b class="text-amber-700 font-bold">${L.yen(listing.askingPrice)}</b> <span class="text-slate-500">（売出中${listing.listedMonths + 1}ヶ月目）</span></span><button class="kpi-sell bg-amber-500 text-white rounded px-2 py-1" data-id="${p.id}">売出を管理 ›</button></div>`
+          : la ? `<div class="mt-1 pt-1 border-t flex items-center justify-between"><span>査定額 <b class="text-emerald-700">${L.yen(la.amount)}</b> <span class="text-slate-500">（${laAge}）</span></span><button class="kpi-sell bg-emerald text-white rounded px-2 py-1" data-id="${p.id}">売出設定へ</button></div>` : ''}
       </div>`;
     }).join('')}</div>
     ${bulkMode ? '<button id="kpi-bulk-run" class="w-full bg-navy text-white rounded py-2 text-sm font-bold mt-2">🔍 チェックした物件をまとめて査定する</button>' : ''}` : '<div class="text-slate-500 text-sm">まだ物件を所有していません。営業→買付で増やしましょう。</div>';
@@ -9050,16 +9224,25 @@ function openKpiModal(which, keepBulk = false) {
     pushLog(`まとめて査定を依頼した（${ids.length}件・行動力-${cost}）`);
     save(); renderPanelRight();
     kpiPropsScrollTop = bodyEl.scrollTop;
+    // v19: 査定を実行したらまとめて査定モードは自動で終わる（keepBulk=trueのままだと再描画後も
+    // チェックUIが残り続けてしまうため、ここでbulkModeを明示的に落としてから開き直す）。
+    bulkMode = false;
     close(); openKpiModal('props', true);
   });
   boxEl.querySelectorAll('.kpi-sell').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const id = parsePropId(b.dataset.id);
     const pp = state.properties.find(x => x.id === id);
-    if (!pp?.lastAppraisal) return;
+    // v19: 決済待ちの物件は押せる導線そのものを塞ぐ保険（Aでボタン自体は既に出していないが、
+    // 他の経路や再描画のタイミングで残る可能性を潰す）。
+    if ((state.pendingSales || []).some(x => x.propertyId === id)) return;
+    // v19: 売出中は査定額（lastAppraisal）が無くても開けるようにする（openSellWithAppraisalの
+    // 側でlistingがあればdrawListingManageへ流れるので、渡す査定額は参考値でよい）。
+    const listing = (state.listings || []).find(l => l.propertyId === id);
+    if (!pp?.lastAppraisal && !listing) return;
     kpiPropsScrollTop = bodyEl.scrollTop;
     close();
-    openSellWithAppraisal(id, pp.lastAppraisal.amount);
+    openSellWithAppraisal(id, pp.lastAppraisal?.amount ?? listing.askingPrice);
   }));
 }
 
@@ -9299,8 +9482,14 @@ function taxTabHtml(state, uiState) {
   // （現金は1つなので、合計と現金超過の警告だけは両方を合わせた総額で判定する）。
   const schedule = [...(state.taxSchedule || [])].sort((a, b) => a.month - b.month);
   const scheduleTotal = schedule.reduce((t, x) => t + x.amount, 0);
+  // v19: theadではなく各thにstickyを付ける（iOS SafariはtheadへのstickyがOSバージョンによって効かない）。
   const scheduleTableHtml = (rows) => `<table class="w-full text-xs">
-      <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1">名目</th><th class="pb-1 text-right">金額</th><th class="pb-1"></th></tr></thead>
+      <thead><tr class="text-slate-500 text-left">
+        <th class="pb-1 sticky top-0 z-10 bg-white">年月</th>
+        <th class="pb-1 sticky top-0 z-10 bg-white">名目</th>
+        <th class="pb-1 text-right sticky top-0 z-10 bg-white">金額</th>
+        <th class="pb-1 sticky top-0 z-10 bg-white"></th>
+      </tr></thead>
       <tbody>${rows.map(x => {
         const left = x.month - state.month;
         // v17: 予定納税・中間納付の払い過ぎは還付（マイナス金額）になる。そのまま「-¥xxx」と
@@ -9614,6 +9803,9 @@ function openMoneyHub(initialTab = 'month') {
 function openSellWithAppraisal(propId, appraisal) {
   const p = state.properties.find(x => x.id === propId);
   if (!p) return;
+  // v19: 決済待ちの物件はどの入口から来ても価格決定画面に入り込めないよう、専用の
+  // 決済待ち画面（openSell）へ委譲する（新しい画面は作らない）。
+  if ((state.pendingSales || []).some(x => x.propertyId === propId)) { openSell(propId); return; }
   const m = document.getElementById('sell-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
@@ -9696,7 +9888,7 @@ function openDetail(propId, from, back) {
   // v8.19: 「年間収支・運営費の内訳」は所有・市場のどちらも情報過多になるため、デフォルトは常に格納。
   let active = 0, saleSimOpen = false, gpiOpen = false;
   // v16: 収支タブは「総合損益だけ表示し詳細は格納」。開閉はタブを跨いで保持する。
-  let plBreakdownOpen = false, plMonthlyOpen = false;
+  let plBreakdownOpen = false, plMonthlyOpen = false, plNetOpen = false, plValueOpen = false;
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   const draw = () => {
     // state を書き換える操作（おまかせ契約の切替等）は structuredClone で新しい物件オブジェクトを作るため、
@@ -9791,8 +9983,10 @@ function openDetail(propId, from, back) {
     }
     if (tabs[active] === 'レントロール') { body.innerHTML = rentRollTab(p, from); wireFillButtons(body, p, from); }
     if (tabs[active] === '収支') {
-      body.innerHTML = plTab(p, { plBreakdownOpen, plMonthlyOpen });
+      body.innerHTML = plTab(p, { plBreakdownOpen, plMonthlyOpen, plNetOpen, plValueOpen });
       body.querySelector('.pl-toggle-breakdown')?.addEventListener('click', () => { plBreakdownOpen = !plBreakdownOpen; redrawKeepScroll(); });
+      body.querySelector('.pl-toggle-net')?.addEventListener('click', () => { plNetOpen = !plNetOpen; redrawKeepScroll(); });
+      body.querySelector('.pl-toggle-value')?.addEventListener('click', () => { plValueOpen = !plValueOpen; redrawKeepScroll(); });
       body.querySelector('.pl-toggle-monthly')?.addEventListener('click', () => { plMonthlyOpen = !plMonthlyOpen; redrawKeepScroll(); });
     }
     if (tabs[active] === '融資') {
@@ -10273,8 +10467,17 @@ function scorecardRowsHtml(card, opts = {}) {
   rows.push(`<tr class="border-t"><td>${sold ? '売却価格' : '現在の時価（参考）'}</td><td class="text-right">${L.yen(card.exitPrice)}</td></tr>`);
   if (sold) rows.push(`<tr><td>売却時諸費用</td><td class="text-right">${L.yen(-card.saleCost)}</td></tr>`);
   rows.push(`<tr><td>キャピタルゲイン</td><td class="text-right">${capGainSign}${L.yen(card.capGain)}</td></tr>`);
+  // v19: この行だけでは何を根拠に出た数字か分からないという指摘への対応。式をそのまま注記する
+  // （売却前は「売却価格」ではなくまだ売っていないので「現在の時価」と書き分ける）。
+  rows.push(`<tr><td colspan="2" class="text-[10px] text-slate-500 pt-0.5">キャピタルゲイン ＝ ${sold ? '売却価格' : '現在の時価'} −（簿価 ＋ 購入時諸費用）− 売却諸費用（マイナスは0）</td></tr>`);
   rows.push(`<tr><td>譲渡税</td><td class="text-right">${L.yen(-card.capTax)}</td></tr>`);
+  // v19: 総合損益の検算に投下自己資金が要るのに表に無かったので追加する。内訳は畳まず、
+  // 注記1行で頭金／購入時諸費用／工事費等の累計を出す（頭金はequityInから逆算する）。
+  const downPaid = card.equityIn - card.acqCost - card.capexTotal;
+  rows.push(`<tr class="border-t"><td>投下自己資金</td><td class="text-right">${L.yen(card.equityIn)}</td></tr>`);
+  rows.push(`<tr><td colspan="2" class="text-[10px] text-slate-500 pt-0.5">頭金 ${L.yen(downPaid)} ＋ 購入時諸費用 ${L.yen(card.acqCost)} ＋ 工事費等の累計 ${L.yen(card.capexTotal)}</td></tr>`);
   rows.push(`<tr><td>${sold ? '売却手取り' : 'いま売った場合の手取り（概算）'}</td><td class="text-right">${L.yen(card.netProceeds)}</td></tr>`);
+  rows.push(`<tr class="border-t"><td colspan="2" class="text-[10px] text-slate-500 pt-0.5">総合損益 ＝ 手取り ＋ 累計CF − 投下自己資金</td></tr>`);
   return `<table class="w-full text-sm tabular-nums">${rows.join('')}</table>`;
 }
 
@@ -10409,8 +10612,14 @@ function monthlyCashBox(state, uiState) {
     const breakdown = cashCategoryRowsHtml(state, rowSummary, uiState.trendItemOpen, 'trend-cat-toggle', L.fmtYM(row.month));
     return `${headerRow}<tr class="border-t"><td colspan="4" class="p-0">${breakdown}</td></tr>`;
   }).join('');
+  // v19: theadではなく各thにstickyを付ける（iOS SafariはtheadへのstickyがOSバージョンによって効かない）。
   const trendHtml = `<table class="w-full text-[11px] tabular-nums mt-1">
-    <thead><tr class="text-slate-500 text-left"><th class="pb-1">年月</th><th class="pb-1 text-right">収入</th><th class="pb-1 text-right">支出</th><th class="pb-1 text-right">収支</th></tr></thead>
+    <thead><tr class="text-slate-500 text-left">
+      <th class="pb-1 sticky top-0 z-10 bg-white">年月</th>
+      <th class="pb-1 text-right sticky top-0 z-10 bg-white">収入</th>
+      <th class="pb-1 text-right sticky top-0 z-10 bg-white">支出</th>
+      <th class="pb-1 text-right sticky top-0 z-10 bg-white">収支</th>
+    </tr></thead>
     <tbody>${trendRows}</tbody>
   </table>`;
 
@@ -10513,8 +10722,17 @@ function overviewTab(p, from, opts = {}) {
 }
 
 function rentRollTab(p, from) {
+  // v19: theadではなく各thにstickyを付ける（iOS SafariはtheadへのstickyがOSバージョンによって効かない）。
+  // 末尾の「合計」行は固定しないのでtbody側に残す。
   return `<table class="w-full text-xs">
-    <tr class="text-slate-500"><th class="text-left">部屋</th><th>間取り</th><th>家賃</th><th>状況</th><th></th></tr>
+    <thead><tr class="text-slate-500">
+      <th class="text-left sticky top-0 z-10 bg-white">部屋</th>
+      <th class="sticky top-0 z-10 bg-white">間取り</th>
+      <th class="sticky top-0 z-10 bg-white">家賃</th>
+      <th class="sticky top-0 z-10 bg-white">状況</th>
+      <th class="sticky top-0 z-10 bg-white"></th>
+    </tr></thead>
+    <tbody>
     ${p.units.map((u, i) => `<tr class="border-t"><td>${i + 1}号室</td>
       <td class="text-center">${u.layout ? `${u.layout}・${u.sizeSqm}㎡` : '—'}</td>
       <td class="text-center">${L.yen(u.rent)}${u.pendingRent != null ? `<div class="text-[10px] text-indigo-600 font-bold whitespace-nowrap">退去後 ${L.yen(u.pendingRent)}</div>` : ''}</td>
@@ -10530,6 +10748,7 @@ function rentRollTab(p, from) {
     <tr class="border-t-2 font-bold"><td>合計</td><td class="text-center">—</td>
       <td class="text-center">${L.yen(p.units.reduce((s, u) => s + u.rent, 0))}</td>
       <td class="text-center">${p.units.filter(u => u.occupied).length}/${p.units.length}戸</td><td></td></tr>
+    </tbody>
   </table>
   ${from === 'owned' && p.units.some(u => !u.occupied && !u.needsRestore)
     ? `<div class="mt-2 text-[11px] text-slate-600 bg-slate-50 rounded p-2">📣 ${term('ad', 'AD')}は<b>決まるまで毎月効き続けます</b>。出した月に決まらなくても無駄にはなりません。自主${term('kyakuduke', '客付け')}は行動力の続く限り何度でも挑戦できます。</div>` : ''}
@@ -10736,6 +10955,14 @@ function plTab(p, opts = {}) {
   return `<div class="border rounded-lg p-3">${scorecardSummaryHtml(card)}${deprLine}</div>
     <div class="mt-3">${collapseHeader('pl-toggle-breakdown', !!opts.plBreakdownOpen, '損益の内訳', `手取り見込 <span class="text-amber-700">${L.yen(card.netProceeds)}</span>`)}</div>
     ${opts.plBreakdownOpen ? `<div class="mt-1 border rounded-lg p-3">${scorecardRowsHtml(card, { sold: false })}</div>` : ''}
+    <div class="mt-2">${collapseHeader('pl-toggle-net', !!opts.plNetOpen, 'いま売った場合の手取りの内訳', `手取り見込 <span class="text-amber-700">${L.yen(card.netProceeds)}</span>`)}</div>
+    ${opts.plNetOpen ? `<div class="mt-1">${netProceedsBox(p, card.exitPrice)}</div>` : ''}
+    <div class="mt-2">${collapseHeader('pl-toggle-value', !!opts.plValueOpen, '時価の算定根拠', '')}</div>
+    ${opts.plValueOpen ? `<div class="mt-1 border rounded-lg p-3 text-[11px] text-slate-600 space-y-1">
+      <div>現在の時価は購入価格を起点に、毎月ゆっくり下がる（木造 -0.15%／鉄骨 -0.1%／RC -0.05%）。</div>
+      <div>大規模修繕の完了で ×1.08、バリューアップで家賃の上昇倍率ぶん、境界確定の測量で ×1.03。</div>
+      <div>不動産屋の査定額はこれとは別物で、収益還元（満室想定の家賃 ÷ 市場利回り）に入居率・躯体・手入れの係数を掛けた適正価格の 92% を基準に、目利きレベルぶんの誤差が乗る。</div>
+    </div>` : ''}
     <div class="mt-2">${collapseHeader('pl-toggle-monthly', !!opts.plMonthlyOpen, `月次明細（直近${p.history.length}ヶ月）`, `直近月CF <span class="${(last?.cf ?? 0) >= 0 ? 'text-emerald-700' : 'text-red-600'}">${last ? signedYen(last.cf) : '—'}</span>`)}</div>
     ${opts.plMonthlyOpen ? monthlyPlTable(p) : ''}`;
 }
@@ -10761,6 +10988,8 @@ function loanScheduleHeadHtml(sm) {
     ${row('金利（年）', `${(sm.rate * 100).toFixed(2)}%`)}
     ${row('返済年数', `${sm.years}年（${sm.monthsTotal}回）`)}
     ${row('毎月返済額', L.yen(sm.monthlyPay))}
+    ${sm.graceMonths > 0 ? row('元金据置', `${sm.graceMonths}ヶ月（あと${Math.max(0, sm.graceMonths - sm.monthsPaid)}ヶ月）`) : ''}
+    ${sm.graceMonths > 0 ? row('据置後の毎月返済', L.yen(sm.monthlyPayAfterGrace)) : ''}
     ${row('支払総利息（完済まで）', L.yen(sm.totalInterest))}
     <div class="border-t pt-1 mt-1">
       ${row('返済済み', `${sm.monthsPaid}回 / ${sm.monthsTotal}回`)}
@@ -11354,12 +11583,13 @@ function reformFinanceCompareBox(rs, p, plan) {
 // 4行全滅（空室の多い物件でDSCR不足等）した場合にヒントが何も出なかった（列挙し忘れではなく
 // 発動条件が狭すぎた取りこぼし）。「4行すべて否決」だけをガードにし、リフォームを外す提案①は
 // リフォームを選んでいるときだけ内側で判定する形に変える。
-function reformRejectHint(p, price, downRatio, state, plan, maxDownPct, rs) {
+// v19: owner（購入名義）を渡すと公庫の4,800万円枠をその名義で判定する。省略時は'personal'。
+function reformRejectHint(p, price, downRatio, state, plan, maxDownPct, rs, owner = 'personal') {
   if (!rs.every(r => !r.approved)) return '';
   const reformTotal = L.purchaseReformTotal(p, plan);
   // ① リフォームを選んでいて、外せば通る銀行があるか（未選択なら外しようがないのでスキップ）
   if (reformTotal > 0) {
-    const withoutReform = L.reviewAllBanks(p, price, downRatio, state, null);
+    const withoutReform = L.reviewAllBanks(p, price, downRatio, state, null, owner);
     const okWithout = withoutReform.find(r => r.approved);
     if (okWithout) {
       return `<div class="text-[11px] text-amber-800 bg-amber-50 rounded px-2 py-1.5">💡 リフォームを外せば ${okWithout.label} が通ります。</div>`;
@@ -11368,7 +11598,7 @@ function reformRejectHint(p, price, downRatio, state, plan, maxDownPct, rs) {
   // ② 頭金を5%刻みで上げ、現金上限（maxDownPct）まで最初に通る割合を探す（リフォーム未選択でもここに来る）
   const startPct = Math.floor(downRatio * 100 / 5) * 5 + 5;
   for (let pct = startPct; pct <= maxDownPct; pct += 5) {
-    const rs2 = L.reviewAllBanks(p, price, pct / 100, state, plan);
+    const rs2 = L.reviewAllBanks(p, price, pct / 100, state, plan, owner);
     const ok = rs2.find(r => r.approved);
     if (ok) {
       const loanNow = Math.round(price * (1 - pct / 100)) + reformTotal;
@@ -11396,6 +11626,8 @@ function showPayment(propId, price, close) {
   const cashNeed = price + cashClosing;
   let downRatio = 0.2;
   let buyOwner = 'personal';   // v3.5: 法人設立済みなら購入名義を選べる
+  // v19: 公庫のときだけ選べる元金据置（なし/1年/2年）。既定はなし（0ヶ月）。
+  let graceMonths = 0;
   // v8.8: 諸費用・評価の内訳はプルダウン開閉式。押すと開き、もう一度押すと格納する。
   let openCash = false, openCredit = false, openLoan = false;
   // v15: リフォーム一体型融資の選択。見出し（合計額）は常に見せ、明細は押したときだけ開く。
@@ -11408,7 +11640,8 @@ function showPayment(propId, price, close) {
     const closing = L.closingCostOf(p, price, Math.round(price * (1 - downRatio)));
     const maxDownPct = Math.max(0, Math.min(100, Math.floor((state.cash - closing) / price * 100)));
     if (downRatio > maxDownPct / 100) downRatio = maxDownPct / 100;
-    const rs = L.reviewAllBanks(p, price, downRatio, state, reformPlan);
+    // v19: 公庫の4,800万円枠は名義（個人／法人）ごとの総枠なので、選んでいる購入名義を渡す。
+    const rs = L.reviewAllBanks(p, price, downRatio, state, reformPlan, buyOwner);
     // v15: リフォーム費を借りるぶんだけ借入額が増える。諸費用（抵当権設定登記・融資事務手数料）は
     // この借入総額を基準に計算しないとリフォームを乗せても諸費用が動かず金額が食い違う。
     const loanTotal = Math.round(price * (1 - downRatio)) + L.purchaseReformTotal(p, reformPlan);
@@ -11445,7 +11678,7 @@ function showPayment(propId, price, close) {
         ${reformNoiBox(p, reformPlan)}
         <div id="pay-banks"></div>
         ${reformFinanceCompareBox(rs, p, reformPlan)}
-        ${reformRejectHint(p, price, downRatio, state, reformPlan, maxDownPct, rs)}
+        ${reformRejectHint(p, price, downRatio, state, reformPlan, maxDownPct, rs, buyOwner)}
       </div>
       </div>
       <div class="p-4 pt-1.5 border-t shrink-0"><button id="pay-cancel" class="w-full text-slate-500 text-sm">買付を取り下げる（ペナルティなし）</button></div></div>`);
@@ -11465,6 +11698,29 @@ function showPayment(propId, price, close) {
     // v11.6: 融資タブ（bankReviewList）と表記を揃えるため◯／✕を復活。背景色・借りるボタン・
     // タップで理由を見る操作はそのまま維持する（可否の伝え方を重ねるだけで、操作性は変えない）。
     const bankNameStyle = 'font-size:clamp(0.65rem,3.5vw,0.875rem)';
+    // v19: 公庫の承認カードだけ「元金据置」の3択（既存のDIY/業者・満額/指値と同じ枠カード型）を出す。
+    // 各カードに据置中・据置後の毎月返済を実額で併記し、既定は「なし」。公庫以外の銀行では出さない。
+    const graceCardHtml = (r) => {
+      if (r.bankKey !== 'kouko') return '';
+      const cards = [0, 12, 24].map(g => {
+        const loan = { principal: r.terms.loanAmount, rate: r.terms.rate, years: r.terms.years, graceMonths: g };
+        const duringPay = L.loanPaymentOf(loan, 0);
+        const afterPay = L.loanPaymentOf(loan, g);
+        const label = g === 0 ? 'なし' : `${g / 12}年`;
+        const selected = graceMonths === g;
+        return `<button class="grace-pick border-2 rounded-lg p-1.5 text-center ${selected ? 'border-white bg-white/15' : 'border-white/30'}" data-g="${g}">
+          <div class="font-bold text-xs">${label}</div>
+          ${g > 0
+            ? `<div class="text-[10px] text-white/80 mt-0.5">据置中 ${L.yen(duringPay)}/月</div><div class="text-[10px] text-white/80">据置後 ${L.yen(afterPay)}/月</div>`
+            : `<div class="text-[10px] text-white/80 mt-0.5">毎月 ${L.yen(afterPay)}</div>`}
+        </button>`;
+      }).join('');
+      return `<div class="mt-1.5 border-t border-white/20 pt-1.5">
+        <div class="text-[11px] font-bold">元金据置</div>
+        <div class="grid grid-cols-3 gap-1 mt-1">${cards}</div>
+        ${graceMonths > 0 ? `<div class="text-[10px] text-amber-200 mt-1">最初の${graceMonths / 12}年は利息のみ。元金が減らないぶん、据置後の返済は重くなります。</div>` : ''}
+      </div>`;
+    };
     banksDiv.innerHTML = rs.map(r => r.approved
       ? `<div class="border rounded p-1.5 mb-1 bg-navy text-white">
           <div class="flex items-center justify-between gap-1.5">
@@ -11473,6 +11729,7 @@ function showPayment(propId, price, close) {
           </div>
           <div class="text-[11px] text-white/80 mt-0.5">金利${(r.terms.rate * 100).toFixed(2)}%${guaranteeNote(r.bankKey)}・${r.terms.years}年</div>
           <div class="text-[11px] text-white/80">月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div>
+          ${graceCardHtml(r)}
           <button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button></div>`
       : `<div class="bank-rejected border rounded p-1.5 mb-1 bg-slate-50 cursor-pointer" data-k="${r.bankKey}">
           <div class="flex items-center justify-between gap-1.5">
@@ -11485,6 +11742,11 @@ function showPayment(propId, price, close) {
       const r = rs.find(x => x.bankKey === el.dataset.k);
       if (!r) return;
       alert(`${r.label}は現在の条件では借りられません。\n\n${r.reasons.map(x => x.msg).join('\n')}`);
+    }));
+    banksDiv.querySelectorAll('.grace-pick').forEach(b => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      graceMonths = Number(b.dataset.g);
+      draw();
     }));
     const range = box.querySelector('#pay-down-range');
     range.addEventListener('input', () => {
@@ -11534,7 +11796,8 @@ function showPayment(propId, price, close) {
       tutMaybeAdvance('payment');
     });
     box.querySelectorAll('.pay-bank').forEach(b => b.addEventListener('click', () => {
-      const r = L.buyPropertyV2(state, propId, { method: b.dataset.k, downRatio, price, owner: buyOwner, reformPlan });
+      // v19: graceMonthsは公庫以外ではbuyPropertyV2側で必ず0にクランプされるので、そのまま渡してよい。
+      const r = L.buyPropertyV2(state, propId, { method: b.dataset.k, downRatio, price, owner: buyOwner, reformPlan, graceMonths });
       state = r.state; r.logs.forEach(pushLog); save(); navReset(); render(); close(); checkEnd();
       // v15: リフォームを一緒に借りたときは演出の2行目にも込みであることを出す。
       const reformTotal = L.purchaseReformTotal(p, reformPlan);
@@ -11600,6 +11863,31 @@ function openCorpTransfer(propId) {
   });
 }
 
+// v19: 売却系3画面（査定依頼・価格決定・売出中管理）共通の現況カード。売る判断の材料は
+// 直前まで見ていた一覧・詳細と同じ指標（入居/躯体/手入・家賃・直近CF・残債・保有期間）で、
+// 売却画面に来た時点で改めて出し直す。openKpiModalの物件行と同じ組み立て方に合わせる。
+function sellStatusCard(p) {
+  const occN = p.units.filter(u => u.occupied).length, unitN = p.units.length;
+  const occ = unitN ? Math.round(occN / unitN * 100) : 0;
+  const rentNow = Math.round(L.egiAnnual(p) / 12);
+  const lastCf = p.history.at(-1)?.cf;
+  const held = L.heldMonthsOf(state, p);
+  const payoff = L.loanPayoffOf(p);
+  return `<div class="border rounded-lg p-2 text-xs space-y-1">
+    <div class="space-y-0.5">
+      ${miniStatBar('入居', occ, statValuePair(`${occN}/${unitN}`, `${occ}%`), 'bg-emerald-500')}
+      ${miniStatBar('躯体', Math.round(p.repairState), statValue(`${Math.round(p.repairState)}%`), 'bg-sky-500')}
+      ${miniStatBar('手入', Math.round(p.careState ?? p.repairState), statValue(`${Math.round(p.careState ?? p.repairState)}%`), 'bg-amber-500')}
+    </div>
+    <div class="grid grid-cols-2 gap-x-2 gap-y-0.5 pt-1 border-t text-slate-600">
+      <div>家賃 <b class="text-slate-700">${L.yen(rentNow)}</b>/月</div>
+      <div>直近CF <b class="${lastCf == null ? 'text-slate-400' : lastCf >= 0 ? 'text-emerald-700' : 'text-red-600'}">${lastCf == null ? '—' : L.yen(lastCf)}</b></div>
+      <div>残債 <b class="text-slate-700">${L.yen(payoff)}</b></div>
+      <div>保有 <b class="text-slate-700">${Math.floor(held / 12)}年${held % 12}ヶ月</b></div>
+    </div>
+  </div>`;
+}
+
 function openSell(propId) {
   const p = state.properties.find(x => x.id === propId);
   if (!p) return;
@@ -11643,6 +11931,8 @@ function openSell(propId) {
         <button id="sl-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     </div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+    ${sellStatusCard(p)}
+    <button id="sl-detail" class="w-full border rounded py-1.5 text-xs text-navy font-bold">🏠 物件情報を見る ›</button>
     <div class="text-sm">まず不動産屋に査定を依頼しよう（行動力-5）</div>
     <button id="sl-appraise" class="w-full bg-navy text-white rounded py-2">査定を依頼する</button>
     <button id="sl-cancel" class="w-full text-slate-500 text-sm">やめる</button>
@@ -11651,6 +11941,9 @@ function openSell(propId) {
   m.appendChild(box);
   box.querySelector('#sl-cancel').addEventListener('click', close);
   box.querySelector('#sl-x').addEventListener('click', close);
+  // v19: 売却画面から物件詳細へ寄り道できるようにする。backにこの売却画面を開き直す
+  // コールバックを渡し、詳細の「← 戻る」で査定依頼画面へ戻れるようにする。
+  box.querySelector('#sl-detail').addEventListener('click', () => { close(); openDetail(propId, 'owned', () => openSell(propId)); });
   box.querySelector('#sl-appraise').addEventListener('click', () => {
     if (state.actionPower < 5) { alert('行動力が足りません'); return; }
     const r = L.requestAppraisal(state, propId, Math.random);
@@ -11708,36 +12001,48 @@ function netProceedsBox(p, price, hideWait = false) {
 // v11.2: 売り出し成功後の戻り先は afterList で別指定する（省略時はbackを流用）。openSell()自身をbackに
 // 渡す呼び出し元だと、backをそのまま流用すると掲載直後のopenSell()再実行が「既に掲載中」を検知して
 // 管理画面（5%値下げ/取り下げ）を初回から開いてしまうため、backと切り離した。
-function drawPricing(m, p, appraisal, close, back, afterList = back) {
+// v19: opts.mode で新規掲載（'new'・既定）と価格変更（'edit'）を切り替える。editはdrawListingManageの
+// 「価格を変更する」から開き、確定時に行動力-5でL.updateListingを呼ぶ（新規掲載は従来どおり行動力を使わない）。
+function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) {
   m.innerHTML = '';
-  let price = appraisal;
+  const mode = opts.mode === 'edit' ? 'edit' : 'new';
+  const min = Math.max(10000, Math.round(appraisal * 0.5));
+  const max = Math.round(appraisal * 2);
+  // v19: editのスライダー初期値は「いま出している売出価格」。基準額の0.5〜2.0倍から外れる場合は
+  // レンジ外の値を渡すとスライダーが壊れるためクランプする。
+  let price = mode === 'edit' ? Math.min(max, Math.max(min, opts.listing.askingPrice)) : appraisal;
   const gpi = L.gpiAnnual(p);
   const yieldOf = (v) => (v > 0 ? (gpi / v * 100).toFixed(1) : '-');
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchase/openWorkMenuと同じ構造）。
   // 内訳表・アコーディオン・ボタン2つと中身が多く、低い端末では見出しごと流れて消えていたため。
   const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
-      <div class="flex justify-between items-center gap-2">${back ? '<button id="sl-back" class="text-xs text-navy shrink-0">← 戻る</button>' : ''}<h2 class="font-bold truncate">売出価格を決める</h2><button id="sl-x2" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+      <div class="flex justify-between items-center gap-2">${back ? '<button id="sl-back" class="text-xs text-navy shrink-0">← 戻る</button>' : ''}<h2 class="font-bold truncate">${mode === 'edit' ? '売出価格を変更する' : '売出価格を決める'}</h2><button id="sl-x2" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     </div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+    ${sellStatusCard(p)}
+    <button id="sl-detail2" class="w-full border rounded py-1.5 text-xs text-navy font-bold">🏠 物件情報を見る ›</button>
     <div class="text-sm">不動産会社の査定額（参考）: <b>${L.yen(appraisal)}</b>（利回り${yieldOf(appraisal)}%）</div>
-    <div class="text-center text-2xl font-black text-navy"><span class="text-xs font-normal text-slate-500 align-middle">価格</span> <span id="sl-price-v">${L.yen(appraisal)}</span></div>
-    <input id="sl-price-range" type="range" min="${Math.max(10000, Math.round(appraisal * 0.5))}" max="${Math.round(appraisal * 2)}" step="10000" value="${appraisal}" class="w-full">
+    <div class="text-center text-2xl font-black text-navy"><span class="text-xs font-normal text-slate-500 align-middle">価格</span> <span id="sl-price-v">${L.yen(price)}</span></div>
+    <input id="sl-price-range" type="range" min="${min}" max="${max}" step="10000" value="${price}" class="w-full">
     <div class="flex gap-1 text-xs">
       ${[0.9, 1.0, 1.1, 1.2].map(f => `<button class="sl-preset flex-1 border rounded py-1" data-f="${f}">査定×${Math.round(f * 100)}%</button>`).join('')}
     </div>
-    <div class="text-center text-sm text-slate-600">この価格の${term('yield_gross', '表面利回り')} <span id="sl-yield" class="font-bold text-lg text-emerald-700">${yieldOf(appraisal)}</span>%
+    <div class="text-center text-sm text-slate-600">この価格の${term('yield_gross', '表面利回り')} <span id="sl-yield" class="font-bold text-lg text-emerald-700">${yieldOf(price)}</span>%
       <div class="text-[11px] text-slate-500">（満室想定・年間家賃収入 ${L.yen(gpi)} 基準）</div></div>
-    <div id="sl-net">${netProceedsBox(p, appraisal)}</div>
+    <div id="sl-net">${netProceedsBox(p, price)}</div>
     <div>
       ${collapseHeader('sl-toggle-tip', false, '💡 価格設定のコツ', '')}
       <div id="sl-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">安くすれば早く売れ、高いほど時間がかかる。訳あり物件を高利回りで仕入れ、通常の利回り水準の価格で売り抜く戦略も。</div>
     </div>
-    <button id="sl-list" class="w-full bg-emerald text-white rounded py-2">この価格で売りに出す</button>
+    <button id="sl-list" class="w-full bg-emerald text-white rounded py-2">${mode === 'edit' ? 'この価格に変更する（行動力-5）' : 'この価格で売りに出す'}</button>
     <button id="sl-cancel2" class="w-full text-slate-500 text-sm">やめる</button>
     </div>
   </div>`);
   m.appendChild(box);
+  // v19: 詳細画面から戻ってきたときに同じ画面（同じmode/価格の基準）を開き直せるようにする。
+  const reopen = () => { m.classList.remove('hidden'); m.classList.add('flex'); drawPricing(m, p, appraisal, close, back, afterList, opts); };
+  box.querySelector('#sl-detail2').addEventListener('click', () => { close(); openDetail(p.id, 'owned', reopen); });
   const range = box.querySelector('#sl-price-range');
   const updatePrice = () => {
     price = Math.max(10000, Number(range.value));
@@ -11756,6 +12061,16 @@ function drawPricing(m, p, appraisal, close, back, afterList = back) {
   });
   box.querySelector('#sl-list').addEventListener('click', () => {
     updatePrice();
+    if (mode === 'edit') {
+      // v19: 任意の価格変更は5%値下げと同じく行動力-5（承認済みの判断ポイント）。
+      if (state.actionPower < 5) { alert('行動力が足りません'); return; }
+      state.actionPower -= 5;
+      state = L.updateListing(state, p.id, price).state;
+      pushLog(`${p.label} の売出価格を ${L.yen(price)} に変更した（行動力-5）`);
+      save(); render(); close();
+      afterList?.();
+      return;
+    }
     const r = L.listForSale(state, p.id, price, appraisal);
     // v8.2: 決済待ち・掲載中・未所有は logic 側で弾かれる。理由を出して黙って落とさない。
     if (!r.listed) {
@@ -11780,24 +12095,39 @@ function drawPricing(m, p, appraisal, close, back, afterList = back) {
 function drawListingManage(m, p, listing, close) {
   m.innerHTML = '';
   const downTo = Math.round(listing.askingPrice * 0.95 / 10000) * 10000;
+  // v19: 価格変更（edit）の基準額。編集開始時点の査定額が無ければ物件の最新査定額、
+  // それも無ければ現在の売出価格そのものを基準にする（スライダーの中心が消えないように）。
+  const basis = listing.appraisal ?? p.lastAppraisal?.amount ?? listing.askingPrice;
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
+  // v19: ✕しか無く前の画面へ戻れなかったため「← 戻る」を追加（drawPricingのsl-backと同じ流儀）。
   const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
       <div class="flex justify-between items-start gap-2">
+        <button id="sl-back3" class="text-xs text-navy shrink-0">← 戻る</button>
         <div class="min-w-0 flex-1"><h2 class="font-bold truncate">${p.name || p.label}</h2><div class="text-[11px] text-slate-500">売出中 ${listing.listedMonths}ヶ月目</div></div>
         <button id="sl-x3" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     </div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+    ${sellStatusCard(p)}
+    <button id="sl-detail3" class="w-full border rounded py-1.5 text-xs text-navy font-bold">🏠 物件情報を見る ›</button>
     <div class="text-sm">売出価格: <b>${L.yen(listing.askingPrice)}</b></div>
-    <button id="sl-down" class="w-full border rounded py-2 text-sm">5%値下げする → ${L.yen(downTo)}</button>
+    <button id="sl-repricing" class="w-full border border-navy text-navy rounded py-2 text-sm font-bold">価格を変更する（行動力-5）</button>
+    <button id="sl-down" class="w-full border rounded py-2 text-sm">5%値下げする → ${L.yen(downTo)}（行動力-5）</button>
     <button id="sl-delist" class="w-full border rounded py-2 text-sm">掲載を取り下げる</button>
     <button id="sl-close" class="w-full text-slate-500 text-sm">閉じる</button>
     </div>
   </div>`);
   m.appendChild(box);
+  box.querySelector('#sl-detail3').addEventListener('click', () => { close(); openDetail(p.id, 'owned', () => openSell(p.id)); });
+  box.querySelector('#sl-repricing').addEventListener('click', () => {
+    drawPricing(m, p, basis, close, () => drawListingManage(m, p, listing, close), null, { mode: 'edit', listing });
+  });
   box.querySelector('#sl-down').addEventListener('click', () => {
+    // v19: 5%値下げも任意の価格変更と同じく行動力-5に統一（承認済みの判断ポイント）。
+    if (state.actionPower < 5) { alert('行動力が足りません'); return; }
+    state.actionPower -= 5;
     state = L.updateListing(state, p.id, downTo).state;
-    pushLog(`${p.label} を ${L.yen(downTo)} に値下げした`); save(); render(); close();
+    pushLog(`${p.label} を ${L.yen(downTo)} に値下げした（行動力-5）`); save(); render(); close();
   });
   box.querySelector('#sl-delist').addEventListener('click', () => {
     state = L.delist(state, p.id).state;
@@ -11805,6 +12135,9 @@ function drawListingManage(m, p, listing, close) {
   });
   box.querySelector('#sl-close').addEventListener('click', close);
   box.querySelector('#sl-x3').addEventListener('click', close);
+  box.querySelector('#sl-back3').addEventListener('click', () => {
+    if (navStack.length > 1) navBack(); else close();
+  });
 }
 
 function showOfferModal(listing) {
@@ -11970,8 +12303,9 @@ function workOptions(p, category) {
 }
 
 // v8: qualityMult はDIYミニゲームの出来ばえ（業者発注では常に1で無関係）。
-function runWork(propId, sel, diy, financed, qualityMult = 1) {
-  const opts = { diy, financed, qualityMult };
+// v19: lenderKey（省略可）を渡すと選んだレンダー（bank/shinpan/secured）別の判定・金利・期間で組む。
+function runWork(propId, sel, diy, financed, qualityMult = 1, lenderKey = undefined) {
+  const opts = { diy, financed, qualityMult, lenderKey };
   if (sel.type === 'restore') return L.startRestore(state, propId, sel.unitIndex, opts);
   if (sel.type === 'valueup') return L.startValueUp(state, propId, sel.planKey, opts);
   return L.startRepair(state, propId, sel.type, opts);
@@ -12048,23 +12382,38 @@ function openWorkMenu(propId, category, back, initialSel = null) {
           <div class="text-xs text-slate-600">費用 <b>${L.yen(sel.cost)}</b>・行動力5だけ・工期${months}ヶ月</div>
           <div class="text-xs text-navy">${loanOk ? '高いが手が空く。リフォームローンも使える' : '高いが手が空く'}</div></button>`;
     } else {
-      const loanAmount = L.reformLoanAmount(sel.cost, state.creditScore);
-      const down = sel.cost - loanAmount;
       const openLoans = (p.reformLoans || []).length;
-      const loanOk = L.canUseReformLoan(sel.cost, state.creditScore);
-      const blockedReason = sel.cost < L.REFORM_LOAN_MIN_COST
-        ? `工事費が${L.yen(L.REFORM_LOAN_MIN_COST)}未満のため、少額工事は現金のみです`
-        : '信用度が基準未満のため、現在は融資を利用できません';
+      // v19: リフォームローンを銀行（無担保）／信販／有担保の3択にする。既存のDIY＝緑枠／
+      // 業者＝紺枠と同じ「枠カード型」で、現金＋3レンダーの計4択に揃える。
+      const lenderCards = ['bank', 'shinpan', 'secured'].map(key => {
+        const lender = L.REFORM_LENDERS[key];
+        const usable = L.canUseReformLoan(sel.cost, state.creditScore, key);
+        const loanAmount = Math.min(L.reformLoanAmount(sel.cost, state.creditScore), lender.maxAmount);
+        const down = sel.cost - loanAmount;
+        const rate = L.reformLenderRate(key, sel.cost);
+        const cashShort = usable && state.cash < down;
+        let reason = '';
+        if (!usable) {
+          if (sel.cost < L.REFORM_LOAN_MIN_COST) reason = `工事費が${L.yen(L.REFORM_LOAN_MIN_COST)}未満のため、少額工事は現金のみです`;
+          else if (state.creditScore < lender.minCredit) reason = `信用度${lender.minCredit}以上で使えます（現在${state.creditScore}）`;
+          else if (sel.cost > lender.maxAmount) reason = `この工事費（${L.yen(sel.cost)}）は上限${L.yen(lender.maxAmount)}を超えています`;
+        }
+        const off = !usable || cashShort;
+        return `<button class="wk-lender w-full border-2 rounded-lg p-3 text-left ${off ? 'opacity-40 border-slate-300' : 'border-navy hover:bg-slate-50'}" data-k="${key}" ${off ? 'disabled' : ''}>
+          <div class="font-bold text-sm">${lender.label}</div>
+          ${usable ? `<div class="text-xs text-slate-600 mt-0.5">借入 <b>${L.yen(loanAmount)}</b>・${down > 0 ? `頭金 <b>${L.yen(down)}</b>` : '<b>頭金なし（全額借入）</b>'}・金利${(rate * 100).toFixed(2)}%・${lender.years}年</div>
+            ${lender.secured ? `<div class="text-xs text-amber-700 mt-0.5">抵当権設定費用 ${L.yen(L.securedReformFees(loanAmount))}が別途かかります・工期が1ヶ月延びます</div>` : ''}
+            ${cashShort ? `<div class="text-xs text-red-600 mt-0.5">🚫 頭金${L.yen(down)}の現金が足りません</div>` : ''}`
+            : `<div class="text-xs text-red-600 mt-0.5">🚫 ${reason}</div>`}
+        </button>`;
+      }).join('');
       headHtml = `${head(true)}<h2 class="font-bold">${sel.label}｜支払い方法</h2>`;
       body = `<div class="text-sm">費用 <b>${L.yen(sel.cost)}</b>（現金 ${L.yen(state.cash)}）</div>
         <button id="wk-cash" class="w-full border rounded-lg py-2.5 text-sm font-bold ${state.cash < sel.cost ? 'opacity-40' : 'hover:bg-slate-50'}" ${state.cash < sel.cost ? 'disabled' : ''}>現金で支払う（${L.yen(sel.cost)}）</button>
-        ${loanOk ? `<button id="wk-loan" class="w-full bg-navy text-white rounded-lg py-2.5 text-sm font-bold ${state.cash < down ? 'opacity-40' : ''}" ${state.cash < down ? 'disabled' : ''}>
-          リフォームローンを使う（頭金${L.yen(down)}＋借入${L.yen(loanAmount)}）</button>
-        <div class="text-xs text-slate-500">金利${(L.reformLoanRateFor(sel.cost) * 100).toFixed(1)}%・${L.CONFIG.reformLoanYears}年。借入可能額は信用度で変わります。
-          ${openLoans ? `この物件には返済中のローンが${openLoans}本ありますが、重ねて借りられます。` : ''}</div>
+        <div class="space-y-1.5">${lenderCards}</div>
+        ${openLoans ? `<div class="text-xs text-slate-500">この物件には返済中のリフォームローンが${openLoans}本ありますが、重ねて借りられます。</div>` : ''}
         <div>${collapseHeader('wk-toggle-tip', false, '💡 現金かローンか', '')}
-          <div id="wk-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">急がないなら現金のほうが総支払いは少ない（利息がかからないぶん）。手元の現金を他の投資や備えに残しておきたいなら、ローンで頭金を抑えるのも有効。</div></div>`
-          : `<div class="text-xs text-red-600">🚫 ${blockedReason}</div>`}`;
+          <div id="wk-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">急がないなら現金のほうが総支払いは少ない（利息がかからないぶん）。手元の現金を他の投資や備えに残しておきたいなら、ローンで頭金を抑えるのも有効。信用度が高いほど頭金なしで全額借りられる。</div></div>`;
     }
 
     const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
@@ -12090,20 +12439,22 @@ function openWorkMenu(propId, category, back, initialSel = null) {
     });
     box.querySelector('#wk-pro')?.addEventListener('click', () => { step = 3; draw(); });
     box.querySelector('#wk-cash')?.addEventListener('click', () => order(false));
-    box.querySelector('#wk-loan')?.addEventListener('click', () => order(true));
+    box.querySelectorAll('.wk-lender').forEach(b => b.addEventListener('click', () => order(true, b.dataset.k)));
     box.querySelector('.wk-toggle-tip')?.addEventListener('click', () => {
       box.querySelector('#wk-tip-body').classList.toggle('hidden');
       box.querySelector('.wk-toggle-tip .inline-block').classList.toggle('rotate-90');
     });
   };
 
-  const order = (financed) => {
+  const order = (financed, lenderKey) => {
     if (state.actionPower < 5) { alert('行動力が足りません'); return; }
-    const r = runWork(propId, sel, false, financed);
+    const r = runWork(propId, sel, false, financed, 1, lenderKey);
     if (!r.started) { alert(r.reason === 'cash' ? '現金が足りません' : '発注できませんでした'); return; }
     state = r.state;
     const p = state.properties.find(x => x.id === propId);
-    pushLog(`${p.name || p.label} の${sel.label}を業者へ発注（${r.financed ? `リフォームローン${L.yen(r.loanAmount)}` : `現金${L.yen(r.cost)}`}）`);
+    // v19: どのレンダーで借りたかを発注ログに残す。
+    const lenderLabel = lenderKey ? L.REFORM_LENDERS[lenderKey].label : null;
+    pushLog(`${p.name || p.label} の${sel.label}を業者へ発注（${r.financed ? `${lenderLabel}${L.yen(r.loanAmount)}` : `現金${L.yen(r.cost)}`}）`);
     save(); render(); close();
     showRepairEffect(propId, `🔨 ${sel.label} を発注（工期${r.monthsTotal || r.months || 1}ヶ月）`);
   };
