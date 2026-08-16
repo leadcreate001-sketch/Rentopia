@@ -7538,7 +7538,6 @@ function cityBuildingScreenPositions() {
 
   // ==== inlined from src/ui.mjs（import行のみ除去）====
 // src/ui.mjs
-
 const SAVE_KEY = 'leverage_master_save_v2';
 let state = null;
 
@@ -7613,6 +7612,12 @@ function navReset() {
   navStack = [];
   navForward = [];
 }
+
+// v20: 明示的に閉じる（✕／閉じる／やめる／背景タップ）ときは履歴も捨てる。閉じた画面が
+// 履歴に残り続けると、別経路で開いた画面から戻ったときに「復活」して見える（幽霊履歴）。
+// close() 自体には入れないこと。画面遷移は「close(); 次を開く」で書かれており、
+// close() で履歴を消すと遷移先の「戻る」が全部死ぬ。
+const dismiss = (close) => () => { close(); navReset(); };
 
 // タイトル画面の背景／ロゴ画像。ユーザーが用意した webp/png を base64 data-URI でここに入れる。
 // 空文字のあいだは CSS/インラインSVGのフォールバックで表示される（画像なしでも完成品として成立する）。
@@ -9078,8 +9083,6 @@ function openKpiModal(which, keepBulk = false) {
       // 画面まで進めてしまい、最後にL.listForSaleが'pendingSale'で断る行き止まりになる（pendingを最優先で塞ぐ）。
       const pending = (state.pendingSales || []).find(x => x.propertyId === p.id);
       const badges = [
-        p.owner === 'corp' ? '<span class="bg-navy text-white rounded px-1">🏢法人</span>' : '<span class="bg-slate-200 text-slate-700 rounded px-1">👤個人</span>',
-        listing ? `<span class="bg-amber-500 text-white rounded px-1">📢売出中${listing.listedMonths + 1}ヶ月目</span>` : '',
         // v8.2: 承諾済みで決済待ちの物件は、一覧でもそれと分かるようにする
         (state.pendingSales || []).some(x => x.propertyId === p.id)
           ? '<span class="bg-emerald-600 text-white rounded px-1 font-bold">✅売却成立・翌月決済</span>' : '',
@@ -9116,7 +9119,11 @@ function openKpiModal(which, keepBulk = false) {
         <div class="text-[11px] leading-tight text-emerald-700 font-bold">家賃 ${manYen(rentNow)}/月</div>
         <div class="text-[11px] leading-tight font-bold ${lastCf == null ? 'text-slate-400' : lastCf >= 0 ? 'text-emerald-700' : 'text-red-600'}">CF ${lastCf == null ? '—' : (lastCf >= 0 ? '+' : '') + manYen(lastCf)}</div>
       </div>`;
+      // v20: 名義バッジは状態バッジ群に混ぜず、カード最上段の独立行に左寄せで固定する（件数が
+      // 増えても毎回目で探さずに済むように）。
+      const ownerBadge = p.owner === 'corp' ? '<span class="bg-navy text-white rounded px-1">🏢法人</span>' : '<span class="bg-slate-200 text-slate-700 rounded px-1">👤個人</span>';
       return `<div class="w-full border rounded p-2 text-xs ${bulkMode ? '' : 'hover:bg-slate-50'}">
+        <div class="mb-1">${ownerBadge}</div>
         <div class="kpi-prop flex items-center gap-2 ${bulkMode ? '' : 'cursor-pointer'}" data-id="${p.id}">
           ${bulkMode ? `<input type="checkbox" class="kpi-check w-4 h-4 shrink-0" data-id="${p.id}">` : ''}
           ${iconSide}
@@ -9139,8 +9146,8 @@ function openKpiModal(which, keepBulk = false) {
           : listing
           // v19: 売出中は査定額でなく「いま出している売出価格」を見せる。査定額（emerald）と見た目を
           // はっきり分け、上のバッジ（bg-amber-500）と同系にして「同じ状態」だと分かるようにする。
-          ? `<div class="mt-1 bg-amber-50 rounded px-1.5 py-1 flex items-center justify-between"><span>📢 売出価格 <b class="text-amber-700 font-bold">${L.yen(listing.askingPrice)}</b> <span class="text-slate-500">（売出中${listing.listedMonths + 1}ヶ月目）</span></span><button class="kpi-sell bg-amber-500 text-white rounded px-2 py-1" data-id="${p.id}">売出を管理 ›</button></div>`
-          : la ? `<div class="mt-1 pt-1 border-t flex items-center justify-between"><span>査定額 <b class="text-emerald-700">${L.yen(la.amount)}</b> <span class="text-slate-500">（${laAge}）</span></span><button class="kpi-sell bg-emerald text-white rounded px-2 py-1" data-id="${p.id}">売出設定へ</button></div>` : ''}
+          ? `<div class="mt-1 bg-amber-50 rounded px-1.5 py-1 flex items-center justify-between"><span>売出価格 <b class="text-amber-700 font-bold">${L.yen(listing.askingPrice)}</b> <span class="text-slate-500">（${listing.listedMonths + 1}ヶ月目）</span></span><button class="kpi-sell bg-amber-500 text-white rounded px-2 py-1" data-id="${p.id}">売出設定 ›</button></div>`
+          : la ? `<div class="mt-1 pt-1 border-t flex items-center justify-between"><span>査定額 <b class="text-emerald-700">${L.yen(la.amount)}</b> <span class="text-slate-500">（${laAge}）</span></span><button class="kpi-sell bg-emerald text-white rounded px-2 py-1" data-id="${p.id}">売出設定 ›</button></div>` : ''}
       </div>`;
     }).join('')}</div>
     ${bulkMode ? '<button id="kpi-bulk-run" class="w-full bg-navy text-white rounded py-2 text-sm font-bold mt-2">🔍 チェックした物件をまとめて査定する</button>' : ''}` : '<div class="text-slate-500 text-sm">まだ物件を所有していません。営業→買付で増やしましょう。</div>';
@@ -9174,7 +9181,7 @@ function openKpiModal(which, keepBulk = false) {
   // スクロールコンテナ要素は bodyEl という別名にする（同名の再宣言はSyntaxErrorになる）。
   const bodyEl = boxEl.querySelector('.overflow-y-auto');
   if (which === 'props') bodyEl.scrollTop = kpiPropsScrollTop;
-  boxEl.querySelector('#kpi-close').addEventListener('click', () => { kpiPropsScrollTop = 0; close(); });
+  boxEl.querySelector('#kpi-close').addEventListener('click', () => { kpiPropsScrollTop = 0; close(); navReset(); });   // v20: 明示的に閉じたら幽霊履歴を残さない
   boxEl.querySelectorAll('.kpi-prop').forEach(b => b.addEventListener('click', () => {
     if (bulkMode) return;   // まとめて査定中は行クリックで詳細を開かない（チェック操作を優先）
     kpiPropsScrollTop = bodyEl.scrollTop;
@@ -9340,12 +9347,12 @@ function openSoldRecordsModal(back) {
   };
 
   drawList();
-  overlay.querySelector('#sold-close').addEventListener('click', close);
+  overlay.querySelector('#sold-close').addEventListener('click', dismiss(close));   // v20: 明示的に閉じたら幽霊履歴を残さない
   overlay.querySelector('#sold-back').addEventListener('click', () => {
     // v15: 履歴に前の画面があればnavBackを優先し、無ければ従来のbackコールバックにフォールバックする
     if (navStack.length > 1) navBack(); else { close(); back && back(); }
   });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
 }
 
 // v16: 帳簿・納税の画面。今年の損益と税額の概算・繰越損失・納税予定・経費の内訳をまとめる。
@@ -9791,11 +9798,11 @@ function openMoneyHub(initialTab = 'month') {
     }));
   };
   draw();
-  overlay.querySelector('#money-close').addEventListener('click', close);
+  overlay.querySelector('#money-close').addEventListener('click', dismiss(close));   // v20: 明示的に閉じたら幽霊履歴を残さない
   overlay.querySelector('#money-back').addEventListener('click', () => {
     if (navStack.length > 1) navBack(); else close();
   });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
 }
 
 // v3.5: 一括査定の結果から直接売出設定へ（査定は取得済み。既に売出中なら管理画面へ）
@@ -9938,7 +9945,7 @@ function openDetail(propId, from, back) {
       <div id="dt-body" class="p-4 text-sm overflow-y-auto min-h-0 flex-1"></div>
       ${footer}</div>`);
     m.appendChild(box);
-    box.querySelector('#dt-close').addEventListener('click', close);
+    box.querySelector('#dt-close').addEventListener('click', dismiss(close));
     if (back) box.querySelector('#dt-back').addEventListener('click', () => {
       // v15: 履歴に前の画面があればnavBackを優先し、無ければ従来のbackコールバックにフォールバックする
       if (navStack.length > 1) navBack(); else { close(); back(); }
@@ -10197,7 +10204,7 @@ function openGlossaryModal() {
     });
   };
   drawTermsToggle();
-  box.querySelector('#gl-close').addEventListener('click', close);
+  box.querySelector('#gl-close').addEventListener('click', dismiss(close));
 }
 
 // 構造の表示名。'木造' には既に「造」が入っているので、S・RCのときだけ「造」を足す
@@ -10881,8 +10888,8 @@ function openRecruitPicker(p, unitIndex, onAd, onSelf) {
     close(); onAd(Number(b.dataset.m));
   }));
   box.querySelector('#rc-self').addEventListener('click', () => { close(); onSelf(); });
-  box.querySelector('#rc-cancel').addEventListener('click', close);
-  box.querySelector('#rc-x').addEventListener('click', close);
+  box.querySelector('#rc-cancel').addEventListener('click', dismiss(close));
+  box.querySelector('#rc-x').addEventListener('click', dismiss(close));
 }
 
 // v3.10: 建物構成サマリ（例: 1K×6戸・平均22㎡）
@@ -11066,7 +11073,7 @@ function openLoanSchedule(propId, back) {
     tabsBox.querySelectorAll('.ls-tab').forEach(b => b.addEventListener('click', () => { active = Number(b.dataset.i); draw(); }));
   };
   draw();
-  overlay.querySelector('#ls-close').addEventListener('click', close);
+  overlay.querySelector('#ls-close').addEventListener('click', dismiss(close));
   overlay.querySelector('#ls-back').addEventListener('click', () => {
     if (navStack.length > 1) navBack(); else { close(); back?.(); }
   });
@@ -11230,8 +11237,8 @@ function openPurchase(propId, back) {
   m.appendChild(box);
   // 詳細は買付モーダルを閉じてから開く（重なりで見えなくなる問題を解消）。詳細から買付へ「戻る」で戻れる。
   box.querySelector('#of-detail').addEventListener('click', () => { close(); openDetail(propId, 'market', () => openPurchase(propId, back)); });
-  box.querySelector('#of-cancel').addEventListener('click', close);
-  box.querySelector('#of-x').addEventListener('click', close);
+  box.querySelector('#of-cancel').addEventListener('click', dismiss(close));
+  box.querySelector('#of-x').addEventListener('click', dismiss(close));
   if (back) box.querySelector('#of-back').addEventListener('click', () => {
     // v15: 履歴に前の画面があればnavBackを優先し、無ければ従来のbackコールバックにフォールバックする
     if (navStack.length > 1) navBack(); else { close(); back(); }
@@ -11850,8 +11857,8 @@ function openCorpTransfer(propId) {
     </div>
   </div>`);
   m.appendChild(box);
-  box.querySelector('#tc-x').addEventListener('click', close);
-  box.querySelector('#tc-cancel').addEventListener('click', close);
+  box.querySelector('#tc-x').addEventListener('click', dismiss(close));
+  box.querySelector('#tc-cancel').addEventListener('click', dismiss(close));
   box.querySelector('#tc-run').addEventListener('click', () => {
     const r = L.transferToCorp(state, propId);
     if (!r.done) { alert(r.reason === 'cash' ? '現金が足りません' : '移転できませんでした'); return; }
@@ -11919,10 +11926,14 @@ function openSell(propId) {
       </div>
     </div>`);
     m.appendChild(box2);
-    box2.querySelector('#sl-ok').addEventListener('click', close);
-    box2.querySelector('#sl-x0').addEventListener('click', close);
+    box2.querySelector('#sl-ok').addEventListener('click', dismiss(close));   // v20: 明示的に閉じたら幽霊履歴を残さない
+    box2.querySelector('#sl-x0').addEventListener('click', dismiss(close));
     return;
   }
+  // v20: C-1修正で価格決定画面（drawPricing）まで戻れるようになったため、査定済みなら
+  // 「査定を依頼する（行動力-5）」をまた見せて課金されるように誤解させない。既存査定額があれば
+  // それを使って価格決定画面へ直行できるボタンを主とし、査定を取り直す操作は副次ボタンに残す。
+  const la = p.lastAppraisal;
   // v14: ヘッダー固定＋本文スクロールの標準型に統一。中身は短いが型は他モーダルと揃える。
   const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
@@ -11933,17 +11944,27 @@ function openSell(propId) {
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     ${sellStatusCard(p)}
     <button id="sl-detail" class="w-full border rounded py-1.5 text-xs text-navy font-bold">🏠 物件情報を見る ›</button>
+    ${la ? `
+    <div class="text-sm">不動産会社の査定額: <b>${L.yen(la.amount)}</b> <span class="text-slate-500">（${state.month - la.month === 0 ? '今月' : `${state.month - la.month}ヶ月前`}）</span></div>
+    <button id="sl-use-appraisal" class="w-full bg-navy text-white rounded py-2">この査定額で価格を決める ›</button>
+    <button id="sl-appraise" class="w-full border rounded py-2 text-sm">もう一度査定を依頼する（行動力-5）</button>
+    ` : `
     <div class="text-sm">まず不動産屋に査定を依頼しよう（行動力-5）</div>
     <button id="sl-appraise" class="w-full bg-navy text-white rounded py-2">査定を依頼する</button>
+    `}
     <button id="sl-cancel" class="w-full text-slate-500 text-sm">やめる</button>
     </div>
   </div>`);
   m.appendChild(box);
-  box.querySelector('#sl-cancel').addEventListener('click', close);
-  box.querySelector('#sl-x').addEventListener('click', close);
+  box.querySelector('#sl-cancel').addEventListener('click', dismiss(close));   // v20: 明示的に閉じたら幽霊履歴を残さない
+  box.querySelector('#sl-x').addEventListener('click', dismiss(close));
   // v19: 売却画面から物件詳細へ寄り道できるようにする。backにこの売却画面を開き直す
   // コールバックを渡し、詳細の「← 戻る」で査定依頼画面へ戻れるようにする。
   box.querySelector('#sl-detail').addEventListener('click', () => { close(); openDetail(propId, 'owned', () => openSell(propId)); });
+  // v20: 行動力を消費せず既存査定額のまま価格決定画面へ直行する（C-3）。
+  box.querySelector('#sl-use-appraisal')?.addEventListener('click', () => {
+    drawPricing(m, p, la.amount, close, () => openSell(propId), null);
+  });
   box.querySelector('#sl-appraise').addEventListener('click', () => {
     if (state.actionPower < 5) { alert('行動力が足りません'); return; }
     const r = L.requestAppraisal(state, propId, Math.random);
@@ -12004,13 +12025,26 @@ function netProceedsBox(p, price, hideWait = false) {
 // v19: opts.mode で新規掲載（'new'・既定）と価格変更（'edit'）を切り替える。editはdrawListingManageの
 // 「価格を変更する」から開き、確定時に行動力-5でL.updateListingを呼ぶ（新規掲載は従来どおり行動力を使わない）。
 function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) {
-  m.innerHTML = '';
   const mode = opts.mode === 'edit' ? 'edit' : 'new';
+  // v20: 詳細画面から戻ってきたときに同じ画面を開き直せるようにする。
+  // navGoのopenにも使い回すため、関数冒頭（navGo呼び出しより前）で定義する。
+  // resumePrice: 検討中だったスライダーの位置。物件情報を見に寄り道して戻ってきたときに
+  // 価格が査定額／掲載価格へ巻き戻ると、いくらにするか考え直しになるため引き継ぐ。
+  // （priceはこの下で宣言するが、reopenが実行されるのは初期化後なので参照して問題ない）
+  const reopen = () => { m.classList.remove('hidden'); m.classList.add('flex'); drawPricing(m, p, appraisal, close, back, afterList, { ...opts, resumePrice: price }); };
+  // v20: sellPrice系は履歴に未登録だったため、← 戻るがひとつ前ではなく手前まで一気に飛んでいた。
+  // ここで登録し、入れ物の表示状態も必ず戻す（close()の後に描かれても見えなくならないように）。
+  navGo({ key: mode === 'edit' ? `sellPrice:${p.id}:edit` : `sellPrice:${p.id}`, open: reopen });
+  m.classList.remove('hidden'); m.classList.add('flex');
+  m.innerHTML = '';
   const min = Math.max(10000, Math.round(appraisal * 0.5));
   const max = Math.round(appraisal * 2);
   // v19: editのスライダー初期値は「いま出している売出価格」。基準額の0.5〜2.0倍から外れる場合は
   // レンジ外の値を渡すとスライダーが壊れるためクランプする。
-  let price = mode === 'edit' ? Math.min(max, Math.max(min, opts.listing.askingPrice)) : appraisal;
+  // v20: resumePrice（寄り道から戻ったときの復元値）があればそれを優先する。いずれもレンジ内へ丸める。
+  const clampPrice = (v) => Math.min(max, Math.max(min, v));
+  let price = opts.resumePrice != null ? clampPrice(opts.resumePrice)
+    : mode === 'edit' ? clampPrice(opts.listing.askingPrice) : appraisal;
   const gpi = L.gpiAnnual(p);
   const yieldOf = (v) => (v > 0 ? (gpi / v * 100).toFixed(1) : '-');
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchase/openWorkMenuと同じ構造）。
@@ -12030,7 +12064,10 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
     </div>
     <div class="text-center text-sm text-slate-600">この価格の${term('yield_gross', '表面利回り')} <span id="sl-yield" class="font-bold text-lg text-emerald-700">${yieldOf(price)}</span>%
       <div class="text-[11px] text-slate-500">（満室想定・年間家賃収入 ${L.yen(gpi)} 基準）</div></div>
-    <div id="sl-net">${netProceedsBox(p, price)}</div>
+    <div>
+      ${collapseHeader('sl-net-toggle', false, '売却の内訳を見る（税・手数料・残債）', `手取り <span id="sl-net-sum" class="text-amber-700">${L.yen(L.saleBreakdown(state, p, price).net)}</span>`)}
+      <div id="sl-net" class="hidden mt-1">${netProceedsBox(p, price)}</div>
+    </div>
     <div>
       ${collapseHeader('sl-toggle-tip', false, '💡 価格設定のコツ', '')}
       <div id="sl-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">安くすれば早く売れ、高いほど時間がかかる。訳あり物件を高利回りで仕入れ、通常の利回り水準の価格で売り抜く戦略も。</div>
@@ -12040,8 +12077,6 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
     </div>
   </div>`);
   m.appendChild(box);
-  // v19: 詳細画面から戻ってきたときに同じ画面（同じmode/価格の基準）を開き直せるようにする。
-  const reopen = () => { m.classList.remove('hidden'); m.classList.add('flex'); drawPricing(m, p, appraisal, close, back, afterList, opts); };
   box.querySelector('#sl-detail2').addEventListener('click', () => { close(); openDetail(p.id, 'owned', reopen); });
   const range = box.querySelector('#sl-price-range');
   const updatePrice = () => {
@@ -12049,12 +12084,19 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
     box.querySelector('#sl-price-v').textContent = L.yen(price);
     box.querySelector('#sl-yield').textContent = yieldOf(price);
     box.querySelector('#sl-net').innerHTML = netProceedsBox(p, price);   // v8.1: 手取りも追従させる
+    box.querySelector('#sl-net-sum').textContent = L.yen(L.saleBreakdown(state, p, price).net);   // v20: 折りたたみサマリーも追従させる
   };
   range.addEventListener('input', updatePrice);
   box.querySelectorAll('.sl-preset').forEach(b => b.addEventListener('click', () => {
     range.value = Math.round(appraisal * Number(b.dataset.f) / 10000) * 10000;
     updatePrice();
   }));
+  // v20: 売却の内訳（税・手数料・残債）は既定で閉じておく。スライダー操作の邪魔にならないよう
+  // にする一方、手取りだけはsl-net-sumで常時見える（サマリーはupdatePriceで追従）。
+  box.querySelector('.sl-net-toggle').addEventListener('click', () => {
+    box.querySelector('#sl-net').classList.toggle('hidden');
+    box.querySelector('.sl-net-toggle .inline-block').classList.toggle('rotate-90');
+  });
   box.querySelector('.sl-toggle-tip').addEventListener('click', () => {
     box.querySelector('#sl-tip-body').classList.toggle('hidden');
     box.querySelector('.sl-toggle-tip .inline-block').classList.toggle('rotate-90');
@@ -12067,7 +12109,9 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
       state.actionPower -= 5;
       state = L.updateListing(state, p.id, price).state;
       pushLog(`${p.label} の売出価格を ${L.yen(price)} に変更した（行動力-5）`);
-      save(); render(); close();
+      // v20: 用が済んで画面を閉じる場面でも履歴を捨てる。残すと、変更後に開いた画面で「戻る」を
+      // 押したときに変更前の価格のままの決定画面が復活する（afterListより前に捨て、戻り先を根にする）。
+      save(); render(); close(); navReset();
       afterList?.();
       return;
     }
@@ -12077,22 +12121,28 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
       alert({ pendingSale: 'この物件は買付を承諾済みです。翌月の決済を待ってください。',
         alreadyListed: 'この物件はすでに売り出し中です。',
         notOwned: 'この物件はもう所有していません。' }[r.reason] || '売りに出せませんでした');
-      close(); return;
+      close(); navReset(); return;   // v20: 行き止まりなので履歴も残さない
     }
     state = r.state;
     pushLog(`${p.label} を ${L.yen(price)} で売りに出した（表面${yieldOf(price)}%）`);
-    save(); render(); close();
+    // v20: 掲載が済んだら履歴を捨てる。残すと、戻り先の一覧で「戻る」を押したときに
+    // 掲載済み物件の価格決定画面が復活し、そこで売りに出すとalreadyListedで行き止まりになる。
+    save(); render(); close(); navReset();
     afterList?.();   // v11.2: 売り出し後の戻り先（backとは別。openSell経由では管理画面を初回に開かせないためnull）
   });
   box.querySelector('#sl-back')?.addEventListener('click', () => {
     // v15: 履歴に前の画面があればnavBackを優先し、無ければ従来のbackコールバックにフォールバックする
     if (navStack.length > 1) navBack(); else { close(); back(); }
   });
-  box.querySelector('#sl-cancel2').addEventListener('click', close);
-  box.querySelector('#sl-x2').addEventListener('click', close);
+  box.querySelector('#sl-cancel2').addEventListener('click', dismiss(close));   // v20: 明示的に閉じたら幽霊履歴を残さない
+  box.querySelector('#sl-x2').addEventListener('click', dismiss(close));
 }
 
 function drawListingManage(m, p, listing, close) {
+  // v20: sell:<id>は入口openSellと同じキーなのでnavGoの重複排除が効き、履歴は1件のまま。
+  // openが毎回stateから掲載を引き直すので、価格変更後に古い売出価格が復元される事故も防げる。
+  navGo({ key: `sell:${p.id}`, open: () => openSell(p.id) });
+  m.classList.remove('hidden'); m.classList.add('flex');
   m.innerHTML = '';
   const downTo = Math.round(listing.askingPrice * 0.95 / 10000) * 10000;
   // v19: 価格変更（edit）の基準額。編集開始時点の査定額が無ければ物件の最新査定額、
@@ -12127,14 +12177,16 @@ function drawListingManage(m, p, listing, close) {
     if (state.actionPower < 5) { alert('行動力が足りません'); return; }
     state.actionPower -= 5;
     state = L.updateListing(state, p.id, downTo).state;
-    pushLog(`${p.label} を ${L.yen(downTo)} に値下げした（行動力-5）`); save(); render(); close();
+    // v20: 用が済んで閉じる場面は履歴も捨てる（残すと値下げ前の管理画面が「戻る」で復活する）。
+    pushLog(`${p.label} を ${L.yen(downTo)} に値下げした（行動力-5）`); save(); render(); close(); navReset();
   });
   box.querySelector('#sl-delist').addEventListener('click', () => {
     state = L.delist(state, p.id).state;
-    pushLog(`${p.label} の掲載を取り下げた`); save(); render(); close();
+    // v20: 掲載が無くなった以上、売出中前提の画面を履歴から復元させない。
+    pushLog(`${p.label} の掲載を取り下げた`); save(); render(); close(); navReset();
   });
-  box.querySelector('#sl-close').addEventListener('click', close);
-  box.querySelector('#sl-x3').addEventListener('click', close);
+  box.querySelector('#sl-close').addEventListener('click', dismiss(close));   // v20: 明示的に閉じたら幽霊履歴を残さない
+  box.querySelector('#sl-x3').addEventListener('click', dismiss(close));
   box.querySelector('#sl-back3').addEventListener('click', () => {
     if (navStack.length > 1) navBack(); else close();
   });
@@ -12420,7 +12472,7 @@ function openWorkMenu(propId, category, back, initialSel = null) {
       <div class="p-4 pb-2 border-b shrink-0">${headHtml}</div>
       <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">${body}</div></div>`);
     m.appendChild(box);
-    box.querySelector('#wk-x').addEventListener('click', close);
+    box.querySelector('#wk-x').addEventListener('click', dismiss(close));
     box.querySelector('#wk-back')?.addEventListener('click', () => {
       // v15: 内部のstep（工事内容選択→支払い方法）はここでは1に戻すだけ。この画面自体から
       // 抜けるとき（step===1）だけnavBack（無ければ従来のbackコールバック）に委ねる。
@@ -13378,7 +13430,7 @@ function openSoldSnapshot(p) {
       <div class="text-[11px] text-slate-500">この物件は他の買主で成約済みのため、買付・お気に入り登録はできません。</div>
     </div></div>`);
   m.appendChild(box);
-  box.querySelector('#ss-close').addEventListener('click', close);
+  box.querySelector('#ss-close').addEventListener('click', dismiss(close));
 }
 
 // v8.8: 通知の種類ごとの表示設定（持続／一時／非通知）。開閉はバランスシート詳細と同じ「押して開閉」方式。
@@ -13433,7 +13485,7 @@ function openNotificationsModal() {
     ${rows}</div></div>`);
   m.appendChild(box);
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
-  box.querySelector('#notifs-close').addEventListener('click', close);
+  box.querySelector('#notifs-close').addEventListener('click', dismiss(close));
   box.querySelector('#notifs-settings-toggle').addEventListener('click', () => {
     notifSettingsOpen = !notifSettingsOpen; openNotificationsModal();
   });
@@ -13591,8 +13643,8 @@ function openSearchModal() {
   searchBtn.addEventListener('pointerup', srStop);
   searchBtn.addEventListener('pointerleave', srStop);
   searchBtn.addEventListener('pointercancel', srStop);
-  box.querySelector('#btn-search-close').addEventListener('click', close);
-  box.querySelector('#search-x').addEventListener('click', close);
+  box.querySelector('#btn-search-close').addEventListener('click', dismiss(close));
+  box.querySelector('#search-x').addEventListener('click', dismiss(close));
 }
 
 // v3: 営業は1押し=行動力2。ポータルサイト巡回・電話・訪問などの行動がランダムに出て、
@@ -13751,8 +13803,8 @@ function openRegionPanel(key) {
       </div></div>`);
     document.body.appendChild(overlay);
     const close = () => overlay.remove();
-    overlay.querySelector('#rg-ok').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#rg-ok').addEventListener('click', dismiss(close));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
     return;
   }
 
@@ -13791,8 +13843,8 @@ function openRegionPanel(key) {
     </div></div>`);
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
-  overlay.querySelector('#rg-ok').addEventListener('click', close);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('#rg-ok').addEventListener('click', dismiss(close));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
 }
 
 // 解放演出。🔒が砕ける → 地図がそのエリアへ回る → 黒い土地に色が戻り、橋が架かる（島は航路と✈️）。
