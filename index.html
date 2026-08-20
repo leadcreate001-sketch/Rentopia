@@ -16,6 +16,30 @@
       500: '#10b981', 600: '#059669', 700: '#047857', 800: '#065f46', 900: '#064e3b', 950: '#022c22' },
   } } } };
 </script>
+<script>
+  // v25: 画面の明るさ（ライト／ダーク／自動）。<html> に data-theme を載せるだけで、
+  // 実際の色は下の <style> 内の html[data-theme="dark"] ルールが決める。
+  // Tailwind CDN やモジュールの読み込みより「前」にここで適用しないと、
+  // 起動直後に白い画面が一瞬見えてから暗くなる（チラつき）。だから設定画面ではなくheadに置く。
+  (function () {
+    var KEY = 'rentopia_theme';   // 'light' | 'dark' | 'auto'
+    var mq  = window.matchMedia('(prefers-color-scheme: dark)');
+    var pref = localStorage.getItem(KEY) || 'auto';
+    function apply() {
+      var dark = pref === 'dark' || (pref === 'auto' && mq.matches);
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    }
+    window.RentopiaTheme = {
+      get:    function ()  { return pref; },
+      set:    function (v) { pref = v; localStorage.setItem(KEY, v); apply(); },
+      isDark: function ()  { return document.documentElement.getAttribute('data-theme') === 'dark'; },
+    };
+    // 「自動」のときだけOS側の設定変更に追従する
+    if (mq.addEventListener) mq.addEventListener('change', function () { if (pref === 'auto') apply(); });
+    else if (mq.addListener) mq.addListener(function () { if (pref === 'auto') apply(); });
+    apply();
+  })();
+</script>
 <style>
   html, body { font-family: system-ui, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; height: 100%; overscroll-behavior: none; }
 
@@ -179,7 +203,7 @@
     /* v8.9: スマホ版はヘッダーの🎵🔊📖リセットを削除し、代わりに現金・行動力を
        常時表示にする（#hud-clock-extra）。ヘッダー自体をモーダル群（最大z-50）より
        前面にして、物件情報などを開いても最上部の帯だけは常に見えるようにする。 */
-    #btn-bgm, #btn-mute, #btn-terms, #btn-reset { display: none; }
+    #btn-bgm, #btn-mute, #btn-terms, #btn-settings { display: none; }
     header { position: relative; z-index: 55 !important; }
     /* v8.17: 💰現金・📈月CF・⚡行動力の3項目が詰まって見えたのでinline-flex+gapで間隔を空ける。 */
     #hud-clock-extra { display: inline-flex; align-items: center; gap: 10px; }
@@ -230,6 +254,67 @@
     left:  calc(env(safe-area-inset-left,  0px) + 4px);
     right: calc(env(safe-area-inset-right, 0px) + 4px);
   }
+
+  /* ============================================================
+     v25: ダークモード。html[data-theme="dark"] のときだけ、モーダル等で使っている
+     Tailwind のユーティリティクラスを暗い側へ読み替える。ui.mjs は一切書き換えない方式なので、
+     新しい画面を足しても同じクラスを使っている限り自動で追従する。
+     地図上のHUD（.hud-*）は元から濃紺なので触らない ＝ ライト（既定）は現状の見た目のまま。
+     ※ 素の .border を先に、色指定つきの .border-navy 等を後に置くこと
+       （詳細度が同じなので、後に書いたルールが勝って色が決まる）。
+     ============================================================ */
+  html[data-theme="dark"] body        { background: #0b1220; color: #e2e8f0; }
+  html[data-theme="dark"] .bg-canvas  { background-color: #0b1220; }
+  html[data-theme="dark"] .text-ink   { color: #e2e8f0; }
+
+  /* 面（カード・下地）。白カード→濃紺、その中の薄いグレー帯→さらに暗い色で沈める */
+  html[data-theme="dark"] .bg-white     { background-color: #1e293b; }
+  html[data-theme="dark"] .bg-slate-50  { background-color: #0f172a; }
+  html[data-theme="dark"] .bg-slate-100 { background-color: #1e293b; }
+  html[data-theme="dark"] .bg-slate-200 { background-color: #334155; }
+  html[data-theme="dark"] .bg-slate-300 { background-color: #475569; }
+
+  /* 文字。濃い→薄いの順序を保ったまま明暗を反転させる */
+  html[data-theme="dark"] .text-slate-400 { color: #94a3b8; }
+  html[data-theme="dark"] .text-slate-500 { color: #a3b2c7; }
+  html[data-theme="dark"] .text-slate-600 { color: #cbd5e1; }
+  html[data-theme="dark"] .text-slate-700 { color: #e2e8f0; }
+  html[data-theme="dark"] .text-slate-800,
+  html[data-theme="dark"] .text-slate-900 { color: #f1f5f9; }
+
+  /* 金額・強調色。600〜800 の濃い階調は暗い背景で沈むので、HUDと同じ明るい側へ寄せる */
+  html[data-theme="dark"] .text-emerald,
+  html[data-theme="dark"] .text-emerald-600,
+  html[data-theme="dark"] .text-emerald-700,
+  html[data-theme="dark"] .text-emerald-800 { color: #4ade80; }
+  html[data-theme="dark"] .text-red-600,
+  html[data-theme="dark"] .text-red-700,
+  html[data-theme="dark"] .text-red-800     { color: #f87171; }
+  html[data-theme="dark"] .text-amber-600,
+  html[data-theme="dark"] .text-amber-700,
+  html[data-theme="dark"] .text-amber-800   { color: #fbbf24; }
+  html[data-theme="dark"] .text-rose-600    { color: #fb7185; }
+  html[data-theme="dark"] .text-indigo-600  { color: #a5b4fc; }
+  html[data-theme="dark"] .text-navy        { color: #93c5fd; }
+
+  /* 淡色の下地（注意書き・成功／失敗のブロック）。ベタ塗りだと浮くので半透明で乗せる */
+  html[data-theme="dark"] .bg-amber-50    { background-color: rgba(251,191,36,0.12); }
+  html[data-theme="dark"] .bg-amber-100   { background-color: rgba(251,191,36,0.18); }
+  html[data-theme="dark"] .bg-emerald-50  { background-color: rgba(74,222,128,0.12); }
+  html[data-theme="dark"] .bg-emerald-100 { background-color: rgba(74,222,128,0.18); }
+  html[data-theme="dark"] .bg-red-50      { background-color: rgba(248,113,113,0.12); }
+  html[data-theme="dark"] .bg-red-100     { background-color: rgba(248,113,113,0.18); }
+
+  /* 枠線 */
+  html[data-theme="dark"] .border,
+  html[data-theme="dark"] .border-t,
+  html[data-theme="dark"] .border-b,
+  html[data-theme="dark"] .border-slate-200,
+  html[data-theme="dark"] .border-slate-300   { border-color: #334155; }
+  html[data-theme="dark"] .border-navy        { border-color: #3b82f6; }
+  html[data-theme="dark"] .border-red-300     { border-color: #b91c1c; }
+  html[data-theme="dark"] .border-emerald-200,
+  html[data-theme="dark"] .border-emerald-500 { border-color: #047857; }
 </style>
 </head>
 <body class="bg-canvas text-ink overflow-hidden flex flex-col">
@@ -248,7 +333,9 @@
       <button id="btn-result" class="text-lg leading-none hidden" title="リザルトを見る">🏆</button><button id="btn-bgm" class="text-lg leading-none" title="BGMの気分を変える">🎵</button>
       <button id="btn-mute" class="text-lg leading-none" title="音のON/OFF">🔊</button>
       <button id="btn-terms" class="text-lg leading-none" title="用語ヘルプのON/OFF">📖</button>
-      <button id="btn-reset" class="text-xs underline">リセット</button>
+      <!-- v25: 「リセット」直行をやめ、⚙️設定（画面の明るさ・BGM・用語ハイライト・リセット）の入口にした。
+           リセットは戻せない操作なので、BGMと並ぶワンタップの位置に置かない。 -->
+      <button id="btn-settings" class="text-lg leading-none" title="設定">⚙️</button>
     </div>
   </header>
 
@@ -3742,7 +3829,7 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
     taxableSalesByYear: { personal: {}, corp: {} },
     salesSearch: { spent: 0, threshold: null },
     nextPropertyId: 1,
-    unlockedRegions: ['main'],   // v9-A: 解放済みの陸地。開発区・競売区・海外は条件を満たすと増える
+    unlockedRegions: ['main'],   // v9-A: 解放済みの陸地。開発区・民泊区・海外は条件を満たすと増える
 
     learnedTerms: [],   // v8: 用語クイズで正解した用語キー（用語集の習得マーク用）
     buffs: [],          // v8: 一時的な有利効果（現状は「耳より情報」＝次の指値+10pt のみ）
@@ -4075,7 +4162,7 @@ const CARE_CLAIMS = [
 const safeNet = (s) => netWorth({ ...s, properties: s.properties || [] });
 
 // 2026-07-26: 3エリアを正式名称にリネーム（構想メモ[[12_v9構想メモ_新築と未開拓エリア]]の呼称に統一）。
-// 「gate」は入場資格のバッジ文言。中身（新築/競売/海外の実際のプレイ内容）は本書の時点では未着手・
+// 「gate」は入場資格のバッジ文言。中身（新築/民泊/海外の実際のプレイ内容）は本書の時点では未着手・
 // 保留中で、ready:false のあいだは解放条件も画面には出さない（ui.mjs 側でモザイク表示にする）。
 export const REGIONS = {
   main: {
@@ -4093,11 +4180,11 @@ export const REGIONS = {
       { key: 'networth', label: '純資産',   need: 30_000_000,  fmt: 'yen',   cur: s => safeNet(s) },
     ] },
   },
-  auction: {
-    key: 'auction', label: '競売', icon: '⚖️', ready: false,
-    gate: '入場条件：競売プレイヤー限定',
+  minpaku: {
+    key: 'minpaku', label: '民泊', icon: '🏖️', ready: false,
+    gate: '入場条件：民泊運営者限定',
     lat: 0.05, lon: -1.99, radius: 0.68, roadTo: 'main',
-    desc: '市場価格以下の物件を入札で競り落とし、価値を再構築して高利回りを狙えるエリアです。',
+    desc: '観光客向けに短期で貸し出すエリアです。月々の家賃相場に縛られず、稼働率しだいで通常の賃貸を大きく超える収益を狙えます。',
     unlock: { mode: 'and', conds: [
       { key: 'junk', label: '訳あり物件の再生', need: 3, fmt: 'count', cur: s => s.stats?.junkRepairs ?? 0 },
     ] },
@@ -4751,6 +4838,8 @@ export function advanceMonth(state, rng = Math.random) {
   s.listings = pruneListings(s).listings;
   for (const l of s.listings) {
     l.listedMonths += 1;
+    l.priceHistory = normalizeListingHistory(l);
+    l.priceHistory.at(-1).months += 1;
     if (!l.offer) {
       const p = s.properties.find(x => x.id === l.propertyId);
       if (!p) continue;   // 念のための二重防御（pruneListings で除かれているはず）
@@ -4776,7 +4865,7 @@ export function advanceMonth(state, rng = Math.random) {
     }
   }
   // v9-A: エリアの解放。ready=false のあいだは checkRegionUnlocks が常に空を返すので、
-  // ここは中身（新築・競売・海外）が実装されるまで眠っている。
+  // ここは中身（新築・民泊・海外）が実装されるまで眠っている。
   const newlyUnlocked = checkRegionUnlocks(s);
   for (const key of newlyUnlocked) {
     unlockRegion(s, key);
@@ -4934,6 +5023,12 @@ export function migrateSave(state) {
   };
   (s.properties || []).forEach(fixLegacyProperty);
   (s.market || []).forEach(fixLegacyProperty);
+  // v25: 競売エリアを民泊エリアへ改称したため、旧キーのセーブを読み替える。
+  if (Array.isArray(s.unlockedRegions)) {
+    s.unlockedRegions = s.unlockedRegions.map(k => k === 'auction' ? 'minpaku' : k);
+  }
+  (s.properties || []).forEach(p => { if (p.region === 'auction') p.region = 'minpaku'; });
+  (s.market || []).forEach(p => { if (p.region === 'auction') p.region = 'minpaku'; });
   return s;
 }
 
@@ -5258,8 +5353,15 @@ export function listForSale(state, propertyId, askingPrice, appraisal = null) {
   if (!s.properties.some(p => p.id === propertyId)) {
     return { state: s, listed: false, reason: 'notOwned' };
   }
-  s.listings.push({ propertyId, askingPrice, appraisal, listedMonths: 0, offer: null });
+  s.listings.push({ propertyId, askingPrice, appraisal, listedMonths: 0, offer: null, priceHistory: [{ price: askingPrice, fromMonth: s.month, months: 0 }] });
   return { state: s, listed: true };
+}
+
+// v25: 売出履歴（どの金額で何ヶ月売り出したか）。旧セーブには priceHistory が無いので、
+// 無い/空なら listing の現在値から1件だけの履歴を組み立てて返す（listing 自体は書き換えない）。
+export function normalizeListingHistory(listing) {
+  if (listing?.priceHistory?.length) return listing.priceHistory;
+  return [{ price: listing.askingPrice, fromMonth: null, months: listing.listedMonths ?? 0 }];
 }
 
 // v8.2: 掲載の整合を取り直す。所有していない物件・決済待ちの物件の掲載は捨てる。
@@ -5277,7 +5379,15 @@ export function updateListing(state, propertyId, newPrice) {
   const s = structuredClone(state);
   s.listings = s.listings || [];
   const l = s.listings.find(x => x.propertyId === propertyId);
-  if (l) { l.askingPrice = newPrice; l.offer = null; }
+  if (l) {
+    if (newPrice !== l.askingPrice) {
+      l.priceHistory = normalizeListingHistory(l);
+      l.priceHistory.push({ price: newPrice, fromMonth: s.month, months: 0 });
+      if (l.priceHistory.length > 12) l.priceHistory = l.priceHistory.slice(-12);
+    }
+    l.askingPrice = newPrice;
+    l.offer = null;
+  }
   return { state: s };
 }
 
@@ -5850,7 +5960,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -5887,7 +5997,7 @@ let rafId = 0, lastFrame = 0;
 let pingItem = null;  // 一覧「地図を見る」からのピン（クリックまで維持）
 let viewAnim = null;  // v5: 翌月ボタンでゆっくり初期位置へ戻す回転アニメ
 
-// v9-A: 世界は4つの陸地でできている（本土・開発区・競売区・海外の島）。
+// v9-A: 世界は4つの陸地でできている（本土・開発区・民泊区・海外の島）。
 // 座標と半径は logic.mjs の REGIONS が持ち、city.mjs は描くだけにする。
 // 各陸地は本土と同じ同心円構造（中心＝都心コア／外周＝郊外・地方）を、半径に対する比率で持つ。
 // 既存ロジックの areaKey(urban/local) は、陸地ごとの「都心コア寄り／郊外〜地方寄り」の半径帯へ対応させる。
@@ -5945,6 +6055,21 @@ const HIGHWAY_ROAD_HALF = L.ROAD_W * 0.42 / 2;   // 街道の路面半幅（draw
 // 建物サイズ×0.60(filler)/1.0(実物件の基準)から実際に描かれる最大幅の半分を求める。
 const PROP_HALF = PROP_SIZE * 1.14 / 2;          // 実物件の最大幅ジャンル(区分, g.w=1.14)を基準にした半幅
 const FILLER_HALF = FILLER_SIZE * 0.30 * 1.3;    // 雰囲気建物の最大幅(wide最大1.3)を基準にした半幅
+
+// v25: 所有物件の見え方の調整値。?tune=1 のパネルがここを直接書き換えると次のフレームから反映される。
+// PROP_SIZE 自体は建物の配置（PROP_HALF＝当たり判定）の計算に使われており、
+// 変えると街の並び方まで変わってしまう。だから「描画するときだけ所有物件を拡縮する」sizeScale にしている。
+const OWNED_TUNE = {
+  sizeScale:  1.00,    // 所有物件だけの表示倍率（未所有はこの影響を受けない）
+  ringWidth:  0.10,    // 点滅枠の太さ（建物サイズに対する比率）
+  ringMinPx:  1.5,     // 点滅枠の最小太さ(px)
+  pulseBase:  0.725,   // 点滅の下限（0で完全に消える）
+  pulseAmp:   0.275,   // 点滅の振れ幅
+  pulseSpeed: 3.6,     // 点滅の速さ（rad/秒。3.6 ≒ 周期1.75秒）
+  haloX:      0.72,    // 足元ハローの横半径（建物サイズ比）
+  haloY:      0.22,    // 足元ハローの縦半径（建物サイズ比）
+  haloAlpha:  0.28,    // 足元ハローの濃さ
+};
 
 // v5: ズームと建物サイズの関係。Rはzoomに比例するので、建物をRに比例させるだけだと
 // 密集度がズームによらず一定になってしまう。そこで
@@ -6064,8 +6189,8 @@ function drawBuilding(x, y, size, o) {
     // 2026-08-10: 太さ(0.10)・最小px(1.5)はオーナーが?ring=1の実機調整ツールで確定した値。
     // 点滅の周期・下限・色はツールの既定値のまま変更されなかったため、ツール追加前の元の式に戻した。
     const t = performance.now() / 1000;
-    const pulse = 0.725 + 0.275 * Math.sin(t * 3.6);   // 周期約1.75秒・振幅0.45〜1.0で完全には消えない「呼吸」表現
-    const ring = Math.max(1.5, size * 0.10);           // 2026-08-10 実機確定値
+    const pulse = OWNED_TUNE.pulseBase + OWNED_TUNE.pulseAmp * Math.sin(t * OWNED_TUNE.pulseSpeed);   // 周期約1.75秒・振幅0.45〜1.0で完全には消えない「呼吸」表現
+    const ring = Math.max(OWNED_TUNE.ringMinPx, size * OWNED_TUNE.ringWidth);           // 2026-08-10 実機確定値
     // 2026-08-11: リングの色を入居率で変える。旧drawBadgesの入居率ドットは、①「一部入居」の色が
     // 金色リングとΔE 0.0で同一（識別不能）、②背景がリングと空で半々に割れて一定の下地に乗らない、
     // ③リングの点滅を継承してちらつく、の三重苦で読めなかった。リング自体を染めれば面積が大きく
@@ -6718,7 +6843,7 @@ const LAND_RIVER_LL = (() => {
   return out;
 })();
 
-// 陸地内部の路地＋環状路。現状の街道は国内↔新築・国内↔競売の2本のみで、陸地の内部・海外島には
+// 陸地内部の路地＋環状路。現状の街道は国内↔新築・国内↔民泊の2本のみで、陸地の内部・海外島には
 // 道が無いため、建物を「道沿い」に見せる土台としてここで生成する。
 // 海・池・川に当たったら打ち切らず、続きを別の道として残す（打ち切ると路地が激減し、
 // 建物が半分しか置けなくなる。川は渡ってよい前提で、橋は描画側で別途扱う）。
@@ -6740,7 +6865,7 @@ const LAND_LANES = (() => {
       }
       if (run.length >= 3) lanes.push({ pts: run, len: polyLen(run), clear: c, roadHalf: ALLEY_ROAD_HALF });
     };
-    // 2026-08-09: 街道（国内↔新築・国内↔競売）の陸上区間も「建物を並べる道」として登録する。
+    // 2026-08-09: 街道（国内↔新築・国内↔民泊）の陸上区間も「建物を並べる道」として登録する。
     // これが無いと街道沿いだけが幅広い空き地になり、都心が街道で分断されて見えていた
     // （world-sample.tmp.html は sh.roads に街道の陸上区間を入れてから路地を足している）。
     // 街道は路面が広いので、路地の倍の余裕（L.ROAD_CLEAR）を空ける。サンプルの roadClear と同じ扱い。
@@ -6789,7 +6914,7 @@ function canPlaceBuildingAt(r, x, y, bldHalf = 0) {
   if (inAnyLakeOf(r.key, x, y, 0) || nearRiverOf(r.key, x, y, r.radius * 0.012)) return false;
   if (nearHillOf(r.key, x, y)) return false;
   const ll = xyLL(r, x, y);
-  if (nearRoad(ll.lat, ll.lon, HIGHWAY_ROAD_HALF + bldHalf)) return false;   // 国内↔新築・国内↔競売の街道の上には置かない
+  if (nearRoad(ll.lat, ll.lon, HIGHWAY_ROAD_HALF + bldHalf)) return false;   // 国内↔新築・国内↔民泊の街道の上には置かない
   // 2026-08-09: 路地・環状路も実際の描画幅で避ける（従来はここでLAND_LANESを一切見ておらず、
   // laneHugXYの候補生成が失敗してslotForのフォールバックに落ちたケースで道に建つ不具合の直接原因だった）。
   if (LAND_LANES[r.key].some(lane => distPath(x, y, lane.pts, lane.roadHalf + bldHalf) < lane.roadHalf + bldHalf)) return false;
@@ -6957,7 +7082,7 @@ const FILLER_SLOTS = (() => {
         else if (nearRiverOf(r.key, p.x, p.y, 0)) bad.push({ region: r.key, issue: 'river', source: 'slotFor', lat: ll.lat, lon: ll.lon });
         else if (nearRoad(ll.lat, ll.lon, HIGHWAY_ROAD_HALF + PROP_HALF)) bad.push({ region: r.key, issue: 'road', source: 'slotFor', lat: ll.lat, lon: ll.lon });
         else if (nearHillOf(r.key, p.x, p.y)) bad.push({ region: r.key, issue: 'hill', source: 'slotFor', lat: ll.lat, lon: ll.lon });
-        // 2026-08-09: 路地も対象に追加（fillerと同じ理由。slotForのフォールバックは特にauction/overseasの
+        // 2026-08-09: 路地も対象に追加（fillerと同じ理由。slotForのフォールバックは特にminpaku/overseasの
         // 「地方」帯で高頻度に使われており、路地チェックが無いまま「問題なし」と報告していた）。
         else if (LAND_LANES[r.key].some(lane => distPath(p.x, p.y, lane.pts, lane.roadHalf + PROP_HALF) < lane.roadHalf + PROP_HALF)) bad.push({ region: r.key, issue: 'lane', source: 'slotFor', lat: ll.lat, lon: ll.lon });
       }
@@ -6985,11 +7110,11 @@ function slotFor(regionKey, areaKey, seed) {
   // （rad/angの式自体はレビュー指定のまま変更しない）。
   // 2026-08-09: 以前はここで海・池・川・山・街道を手書きの条件で個別に判定しており、路地
   // （LAND_LANES）を一切見ていなかった。このフォールバックは上の laneHugXY が失敗したときに
-  // 使われる経路で、auction/overseasの「地方」帯では実測で58.7%〜100%の高頻度でここに落ちて
+  // 使われる経路で、minpaku/overseasの「地方」帯では実測で58.7%〜100%の高頻度でここに落ちて
   // いたため、道路密度の高いエリアの実物件が実質「道を避けない」状態になっていた（今回の主要バグ
   // の1つ）。canPlaceBuildingAt に一本化し、路地も含めた地形判定を通す。
   // 2026-08-09追記: 路地チェックを追加した結果、試行回数が旧来の8回のままだと
-  // auction/overseasのように陸地が小さく路地本数が少ない陸地の「都心」帯（CORE_RATIO拡大で
+  // minpaku/overseasのように陸地が小さく路地本数が少ない陸地の「都心」帯（CORE_RATIO拡大で
   // 対象範囲も広がった）で8回とも失敗し、検証されていない firstLL をそのまま返すケースが
   // 実測で最大27.8%まで増えてしまった（laneHugXY・fallback成功時はどちらも重なり0%なのに対し、
   // このfirstLL経由だけが重なりの発生源だった）。laneHugXY が既に使っている試行回数40に揃えて
@@ -7479,10 +7604,10 @@ function draw(ts) {
     .filter(it => it.pr.z > 0.04)
     .sort((a, b) => a.pr.y - b.pr.y)
     .forEach(it => {
-      const size = pUnit * (0.80 + it.pr.z * 0.55);
+      const size = pUnit * (0.80 + it.pr.z * 0.55) * (it.kind === 'owned' ? OWNED_TUNE.sizeScale : 1);
       if (it.kind === 'owned') {   // 所有物件の足元に淡いハロー（自分の物件を見分けやすく）
-        ctx.save(); ctx.globalAlpha = 0.28; ctx.fillStyle = '#a7f3d0';
-        ctx.beginPath(); ctx.ellipse(it.pr.x, it.pr.y, size * 0.72, size * 0.22, 0, 0, TAU); ctx.fill(); ctx.restore();
+        ctx.save(); ctx.globalAlpha = OWNED_TUNE.haloAlpha; ctx.fillStyle = '#a7f3d0';
+        ctx.beginPath(); ctx.ellipse(it.pr.x, it.pr.y, size * OWNED_TUNE.haloX, size * OWNED_TUNE.haloY, 0, 0, TAU); ctx.fill(); ctx.restore();
       }
       const o = buildingOptsFor(it.p, it.kind === 'owned');
       drawBuilding(it.pr.x, it.pr.y, size, { ...o, alpha: it.kind === 'owned' ? 1 : 0.85 });
@@ -8236,7 +8361,7 @@ function showTitle(hasSave) {
     if (hasSave) ttlContinueGame(); else ttlLightToast('セーブデータがありません');
   });
   box.querySelector('#ttl-ic-achievements').addEventListener('click', () => openAchievementsModal());
-  box.querySelector('#ttl-ic-settings').addEventListener('click', () => openTitleSettingsModal());
+  box.querySelector('#ttl-ic-settings').addEventListener('click', () => openSettingsModal());
 }
 
 // v-title: 通算実績（新設）。state.badges は1プレイ分でリセットされるため、初回解除日を横断して記録する。
@@ -8382,7 +8507,10 @@ function openAchievementsModal() {
 }
 
 // 丸アイコン⚙️「設定」。既存機能を束ねるだけ（新機能は作らない）。
-function openTitleSettingsModal() {
+// v25: タイトル画面専用ではなくヘッダー／ドロワーからも開くため関数名を「設定」向けに改名した。
+function openSettingsModal() {
+  const curTheme = window.RentopiaTheme?.get() ?? 'auto';
+  const themeBtn = (theme, label) => `<button class="theme-pick border rounded py-2 text-xs font-bold${curTheme === theme ? ' bg-navy text-white' : ''}" data-theme="${theme}">${label}</button>`;
   const overlay = el(`<div id="lm-settings-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header">
     <div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col" style="max-height:85dvh">
       <div class="p-4 pb-2 border-b shrink-0">
@@ -8392,6 +8520,15 @@ function openTitleSettingsModal() {
         </div>
       </div>
       <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+        <div class="border rounded-lg p-2">
+          <div class="text-xs font-bold text-slate-600 mb-1.5">🎨 画面の明るさ</div>
+          <div class="grid grid-cols-3 gap-1">
+            ${themeBtn('light', '☀️ ライト')}
+            ${themeBtn('dark', '🌙 ダーク')}
+            ${themeBtn('auto', '🔄 自動')}
+          </div>
+          <div class="text-[10px] text-slate-500 mt-1">「自動」は端末（OS）の設定に合わせて切り替わります</div>
+        </div>
         <button id="ttlset-bgm" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">🎵 BGMの気分</button>
         <button id="ttlset-mute" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">${muted ? '🔇 ミュート中（タップで解除）' : '🔊 音あり（タップでミュート）'}</button>
         <button id="ttlset-terms" class="w-full border rounded-lg py-2.5 text-sm text-left px-3">${termsOff ? '📕 用語ハイライト OFF（タップでON）' : '📖 用語ハイライト ON（タップでOFF）'}</button>
@@ -8403,9 +8540,13 @@ function openTitleSettingsModal() {
   const close = () => overlay.remove();
   overlay.querySelector('#ttlset-close').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelectorAll('.theme-pick').forEach(b => b.addEventListener('click', () => {
+    window.RentopiaTheme?.set(b.dataset.theme);
+    close(); openSettingsModal();
+  }));
   overlay.querySelector('#ttlset-bgm').addEventListener('click', () => openBgmModal());
-  overlay.querySelector('#ttlset-mute').addEventListener('click', () => { setMuted(!muted); updateMuteButton(); close(); openTitleSettingsModal(); });
-  overlay.querySelector('#ttlset-terms').addEventListener('click', () => { setTermsOff(!termsOff); close(); openTitleSettingsModal(); });
+  overlay.querySelector('#ttlset-mute').addEventListener('click', () => { setMuted(!muted); updateMuteButton(); close(); openSettingsModal(); });
+  overlay.querySelector('#ttlset-terms').addEventListener('click', () => { setTermsOff(!termsOff); close(); openSettingsModal(); });
   overlay.querySelector('#ttlset-reset').addEventListener('click', () => {
     if (confirm('データをリセットしますか？')) { localStorage.removeItem(SAVE_KEY); location.reload(); }
   });
@@ -8469,10 +8610,10 @@ const TUTORIAL_STEPS = [
   // PCは常設の右パネルにスキルが出ているので触れるだけでよいが、スマホは≡の中でしか見えない。
   { key: 'panel', keep: [], info: true, targets: ['panel-left', 'mobile-status'], glowExtra: ['m-menu'],
     text: 'ここに現金・月CF・バランスシート。純資産や負債といった財務の状況、法人成りもこの中から。経過年数と年齢は画面いちばん上に出ている。スキル状況（目利き力・交渉力・自主管理）もここから確認できる。スマホは右下の≡メニューにこれらがまとまっているので、あとで覗いてみて。' },
-  // v7.7: エリアピル（国内/新築/競売/海外）に一切触れていなかった。常時表示で鍵アイコンも
+  // v7.7: エリアピル（国内/新築/民泊/海外）に一切触れていなかった。常時表示で鍵アイコンも
   // 付いているため、無言だと「詰んだ？」と誤解されうる。今は国内だけで遊べることを伝える。
   { key: 'regions', keep: [], info: true, targets: ['region-pills'],
-    text: '🌏 ここは進出エリア。今は「国内」だけで十分に遊べる。新築・競売・海外は条件を満たすと解放される、この先のお楽しみだ。' },
+    text: '🌏 ここは進出エリア。今は「国内」だけで十分に遊べる。新築・民泊・海外は条件を満たすと解放される、この先のお楽しみだ。' },
   { key: 'finish', keep: [], final: true,
     text: 'ひととおり触れた！ここまでの操作はリセットされ、本編は最初から始まる。' },
 ];
@@ -9077,7 +9218,7 @@ function openMobileDrawer() {
       <div class="flex gap-2 pt-1 hud-divide">
         <button id="dr-bgm" class="flex-1 hud-tile rounded-lg py-2 text-sm">🎵 BGM</button>
         <button id="dr-mute" class="flex-1 hud-tile rounded-lg py-2 text-sm">${muted ? '🔇 消音中' : '🔊 音あり'}</button>
-        <button id="dr-reset" class="flex-1 hud-tile rounded-lg py-2 text-sm hud-bad">リセット</button>
+        <button id="dr-settings" class="flex-1 hud-tile rounded-lg py-2 text-sm">⚙️ 設定</button>
       </div>
     </div></div></div>`);
   m.innerHTML = ''; m.appendChild(box);
@@ -9093,7 +9234,8 @@ function openMobileDrawer() {
   m.querySelector('#dr-glossary').addEventListener('click', () => go(openGlossaryModal));
   m.querySelector('#dr-bgm').addEventListener('click', () => go(openBgmModal));
   m.querySelector('#dr-mute').addEventListener('click', () => { setMuted(!muted); updateMuteButton(); close(); });
-  m.querySelector('#dr-reset').addEventListener('click', () => { if (confirm('データをリセットしますか？')) { localStorage.removeItem(SAVE_KEY); location.reload(); } });
+  // リセットは戻せない操作なので、BGMと並ぶワンタップの位置から設定モーダルの中へ移した
+  m.querySelector('#dr-settings').addEventListener('click', () => go(openSettingsModal));
 }
 
 function pushLog(msg){ state.log = state.log || []; state.log.unshift(msg); if(state.log.length>50) state.log.pop(); }
@@ -9322,7 +9464,7 @@ function openKpiModal(which, keepBulk = false) {
         <div class="font-bold text-slate-700">👤個人${persN}件 ・ 🏢法人${corpN}件</div>
         <div class="flex items-center gap-2">
           ${soldN ? `<button id="kpi-sold-link" class="text-[11px] text-navy underline font-bold shrink-0">売却済 ${soldN}件 ›</button>` : ''}
-          <button id="kpi-bulk-toggle" class="border rounded px-2 py-1 font-bold ${bulkMode ? 'bg-navy text-white' : 'text-navy'}">${bulkMode ? '✕ まとめて査定を終了' : '☑ まとめて査定'}</button>
+          <button id="kpi-bulk-toggle" class="border rounded px-2 py-1 font-bold ${bulkMode ? 'bg-navy text-white' : 'text-navy'}">${bulkMode ? '✕ まとめて査定' : '☑ まとめて査定'}</button>
         </div>
       </div>
       ${bulkMode ? `<div class="text-[11px] text-slate-500 mb-1">査定したい物件にチェック → 下の「査定する」（1件につき行動力-5）</div>
@@ -9555,7 +9697,7 @@ function openSoldRecordsModal(back) {
     const summaryHtml = `<div class="border rounded-lg p-3 mb-3 ${plus ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}">
       <div class="text-[11px] font-bold text-slate-500">📜 これまでの売却成績</div>
       <div class="flex items-baseline justify-between gap-2 mt-0.5">
-        <span class="text-xs text-slate-600">通算損益</span>
+        <span class="text-lg text-slate-600">通算損益</span>
         <span class="font-bold text-lg tabular-nums ${plus ? 'text-emerald-700' : 'text-red-600'}">${signedYen(summary.totalPl)}</span>
       </div>
       <div class="text-xs text-slate-600 mt-1">売却 ${summary.count}件 ・ 勝率 ${Math.round(summary.winRate * 100)}%（${summary.wins}勝${summary.count - summary.wins}敗）</div>
@@ -9897,7 +10039,7 @@ function assetsTabHtml(state) {
         <button id="mh-sold" class="w-full border rounded-lg bg-slate-50 hover:bg-slate-100 py-2 px-3 text-left">
           <div class="text-[11px] text-slate-500 font-bold">📜 売却した物件の記録（${soldRecs.length}件）</div>
           <div class="flex items-center justify-between gap-2 mt-0.5">
-            <span class="text-xs text-slate-600">通算損益</span>
+            <span class="text-sm text-slate-600">通算損益</span>
             <span class="text-sm font-bold tabular-nums ${soldSum.totalPl >= 0 ? 'text-emerald-700' : 'text-red-600'}">${signedYen(soldSum.totalPl)} ›</span>
           </div>
         </button>
@@ -12294,6 +12436,31 @@ function openCorpTransfer(propId) {
 // v21: opts.detailBtnを立てると、独立ボタンだった「🏠 物件情報を見る」をカード最下部の
 // フッター行として取り込む（現況カードと物件情報導線を一体化・§3-C）。クリックは呼び出し側が
 // `.ssc-detail` で拾って配線する（このカード自身は物件idを知らないため）。
+// v25: 売出履歴（どの金額で何ヶ月売り出したか）。listingが無ければ何も出さない。
+function listingHistoryBlock(listing) {
+  if (!listing) return '';
+  const hist = L.normalizeListingHistory(listing);
+  const rows = hist.map((entry, i) => {
+    const last = i === hist.length - 1;
+    const period = last ? `${entry.months + 1}ヶ月目（現在）` : `${entry.months}ヶ月`;
+    return `<div class="flex justify-between${last ? ' font-bold text-slate-700' : ''}"><span class="tabular-nums">${L.yen(entry.price)}</span><span class="text-slate-500">${period}</span></div>`;
+  }).join('');
+  return `<div class="border rounded-lg p-2 text-xs">
+    <div class="font-bold text-slate-600 mb-1">売出履歴</div>
+    <div class="space-y-0.5">${rows}</div>
+  </div>`;
+}
+
+// v25: 売出中管理画面（drawListingManage）の「不動産会社の査定額」行。openSell側と表記を揃える。
+// 額はlisting.appraisal優先、無ければp.lastAppraisal.amount。どちらも無ければ何も出さない。
+function listingAppraisalRow(p, listing) {
+  const amount = listing.appraisal ?? p.lastAppraisal?.amount;
+  if (amount == null) return '';
+  const la = p.lastAppraisal;
+  const elapsed = la ? (state.month - la.month === 0 ? '今月' : `${state.month - la.month}ヶ月前`) : '';
+  return `<div class="text-sm">不動産会社の査定額: <b>${L.yen(amount)}</b> ${elapsed ? `<span class="text-slate-500">（${elapsed}）</span>` : ''}</div>`;
+}
+
 function sellStatusCard(p, opts = {}) {
   const occN = p.units.filter(u => u.occupied).length, unitN = p.units.length;
   const occ = unitN ? Math.round(occN / unitN * 100) : 0;
@@ -12589,8 +12756,11 @@ function drawListingManage(m, p, listing, close) {
         <button id="sl-x3" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     </div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+    ${listingHistoryBlock(listing)}
+    ${listingAppraisalRow(p, listing)}
     <div class="text-sm">売出価格: <b>${L.yen(listing.askingPrice)}</b></div>
-    <button id="sl-repricing" class="w-full border border-navy text-navy rounded py-2 text-sm font-bold">価格を変更する（行動力-5）</button>
+    <!-- このボタンは価格決定画面を開くだけで行動力は消費しない。実際に消費するのは決定画面のsl-list側。 -->
+    <button id="sl-repricing" class="w-full border border-navy text-navy rounded py-2 text-sm font-bold">価格を変更する</button>
     <button id="sl-down" class="w-full border rounded py-2 text-sm">5%値下げする → ${L.yen(downTo)}（行動力-5）</button>
     <button id="sl-delist" class="w-full border rounded py-2 text-sm">掲載を取り下げる</button>
     <button id="sl-close" class="w-full text-slate-500 text-sm">閉じる</button>
@@ -13401,27 +13571,31 @@ function showExpFloats() {
 // 差分のフロート表示を添える。検知の仕組みはshowExpFloatsと同じ（render()後に前回値と比較）。
 let lastCash = null;
 let cashAnimGen = 0;   // 連続して現金が変わってもアニメーションが競合しないよう世代で判定する
+// v8.19: 表示先ごとに書式（fmt）が違う（PC左パネル/ヘッダーはyenShort、スマホ上部タイルはyen）ため、
+// 要素だけでなくfmtも一緒に返す。以前は要素だけを返し全箇所L.yen()で書いていたため、
+// カウントアップ演出の後にPC左パネル・ヘッダーまで全桁表示のまま残るバグがあった。
 function cashDisplayEls() {
   return [
-    document.getElementById('hud-cash'),
-    document.getElementById('hud-clock-cash'),
-    document.querySelector('#mobile-status .ms-kpi[data-kpi="cash"] div:last-child'),
-  ].filter(Boolean);
+    { el: document.getElementById('hud-cash'), fmt: L.yenShort },
+    { el: document.getElementById('hud-clock-cash'), fmt: L.yenShort },
+    { el: document.querySelector('#mobile-status .ms-kpi[data-kpi="cash"] div:last-child'), fmt: L.yen },
+  ].filter(x => x.el);
 }
 // PC/スマホ/ヘッダーのうち、実際にレイアウトされている（display:noneでない）ものを全て返す。
 // display:noneの要素はgetBoundingClientRectが幅・高さとも0になることを利用する。
 // v8.17: スマホ幅ではヘッダーとスマホ下部バーの現金が同時に見えているため、1箇所だけでなく
 // 見えている場所全てにフロートを出す（ヘッダーだけ出て市場ボタン上のタイルに出ない、を解消）。
 function visibleCashEls() {
-  return cashDisplayEls().filter(elm => {
-    const r = elm.getBoundingClientRect();
+  return cashDisplayEls().filter(x => {
+    const r = x.el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   });
 }
 // v8.17: 「増えた/減った」のひと突き拡縮だけを担当（テキストは書き換えない）。
 // 働く中はカウントアップ演出を使わない代わりに、tickごとにこれだけ当てて数字に反応を出す。
 function pulseCashPunch(elms, gain) {
-  elms.forEach(elm => {
+  elms.forEach(x => {
+    const elm = x.el;
     elm.classList.remove('cash-punch-up', 'cash-punch-down');
     void elm.offsetWidth;   // 同じアニメーションが連続でも毎回再生されるようリフローを挟む
     elm.classList.add(gain ? 'cash-punch-up' : 'cash-punch-down');
@@ -13462,16 +13636,19 @@ function showCashFloats() {
   const dur = 500;
   const t0 = performance.now();
   pulseCashPunch(els, gain);
-  els.forEach(elm => { elm.textContent = L.yen(from); });   // 一旦旧額に戻し、そこからカウントさせる
+  // v8.19: 旧額に戻す/カウントアップ中は表示先ごとのfmt（yenShort/yen）で書く。以前は全箇所
+  // L.yen()（全桁）で書いていたため、アニメーション終了後もPC左パネル・ヘッダーが全桁のまま残った。
+  els.forEach(x => { x.el.textContent = x.fmt(from); });   // 一旦旧額に戻し、そこからカウントさせる
   const tick = (t) => {
     if (gen !== cashAnimGen) return;   // 途中で次の変化が来たら古いループは打ち切る
     const p = Math.min(1, (t - t0) / dur);
     const cur = Math.round(from + diff * p);
-    els.forEach(elm => { elm.textContent = L.yen(cur); });
+    els.forEach(x => { x.el.textContent = x.fmt(cur); });
+    if (p >= 1) els.forEach(x => { x.el.textContent = x.fmt(state.cash); });   // 丸め誤差なく最終額・正しい書式で確定
     if (p < 1) requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
-  visibleCashEls().forEach(elm => floatCashDelta(elm, Math.abs(diff), gain));
+  visibleCashEls().forEach(x => floatCashDelta(x.el, Math.abs(diff), gain));
 }
 
 // v3.6: 決定的イベント共通の判子スタンプ演出。買付・購入・売却成立・法人化・法人移転で同じトーンに統一。
@@ -13642,7 +13819,7 @@ function floatEarn(btn, earned) {
 // 使わない（stopWork側でlastCashを同期して無効化している）。差分フロートだけはfloatCashDelta
 // （現金の増減全般で使う共通表示）と同じ見た目・位置・方向にして、働く以外の場合と統一する。
 function floatEarnAtCash(earned) {
-  visibleCashEls().forEach(elm => floatCashDelta(elm, earned, true));
+  visibleCashEls().forEach(x => floatCashDelta(x.el, earned, true));
 }
 
 // v3: DIY・業者発注の直後、地図を該当物件へ向け、どの物件に何が起きたかをフロート表示する。
@@ -14987,11 +15164,65 @@ initCity(document.getElementById('city-canvas'), {
     if (changed) { save(); render(); }
   }
 }
+
+// v25: マップの所有物件の見え方（サイズ・点滅枠・足元ハロー）を実機で詰めるための調整パネル。
+// ?tune=1 のときだけ出る。city.mjs の OWNED_TUNE を直接書き換えるので、次の描画フレームから反映される。
+function maybeOpenTunePanel() {
+  if (new URLSearchParams(location.search).get('tune') !== '1') return;
+  const TUNE_DEFAULTS = { ...OWNED_TUNE };
+  const FIELDS = [
+    { key: 'sizeScale',  label: '所有物件のサイズ',   min: 0.4, max: 2.5, step: 0.05 },
+    { key: 'ringWidth',  label: '枠の太さ',           min: 0.02, max: 0.30, step: 0.01 },
+    { key: 'ringMinPx',  label: '枠の最小太さ(px)',   min: 0, max: 8, step: 0.5 },
+    { key: 'pulseBase',  label: '点滅の下限',         min: 0, max: 1, step: 0.025 },
+    { key: 'pulseAmp',   label: '点滅の振れ幅',       min: 0, max: 0.5, step: 0.025 },
+    { key: 'pulseSpeed', label: '点滅の速さ',         min: 0, max: 10, step: 0.2 },
+    { key: 'haloX',      label: 'ハロー横',           min: 0, max: 1.5, step: 0.02 },
+    { key: 'haloY',      label: 'ハロー縦',           min: 0, max: 0.6, step: 0.02 },
+    { key: 'haloAlpha',  label: 'ハローの濃さ',       min: 0, max: 0.8, step: 0.02 },
+  ];
+  const row = (f) => `<div>
+    <div class="flex justify-between"><span>${f.label}</span><span id="tune-val-${f.key}">${OWNED_TUNE[f.key]}</span></div>
+    <input type="range" id="tune-in-${f.key}" min="${f.min}" max="${f.max}" step="${f.step}" value="${OWNED_TUNE[f.key]}" class="w-full">
+  </div>`;
+  const panel = el(`<div class="fixed z-[90] hud-panel rounded-xl p-3 text-xs space-y-2" style="right:8px; bottom:8px; width:240px; max-height:70vh; overflow-y:auto;">
+    <div class="flex justify-between items-center"><span class="font-bold">🛠️ マップ調整（?tune=1）</span><button id="tune-close" class="text-lg leading-none">✕</button></div>
+    ${FIELDS.map(row).join('')}
+    <div class="flex gap-2 pt-1">
+      <button id="tune-defaults" class="flex-1 border rounded py-1">↩️ 既定値に戻す</button>
+      <button id="tune-copy" class="flex-1 border rounded py-1">📋 値をコピー</button>
+    </div>
+    <textarea id="tune-out" readonly class="w-full text-[10px]" rows="4"></textarea>
+    <div class="hud-sub text-[10px]">所有物件が無いと変化が見えません。値が決まったら「値をコピー」して city.mjs の OWNED_TUNE に書き写してください。</div>
+  </div>`);
+  document.body.appendChild(panel);
+  panel.querySelector('#tune-close').addEventListener('click', () => panel.remove());
+  FIELDS.forEach(f => {
+    panel.querySelector(`#tune-in-${f.key}`).addEventListener('input', (e) => {
+      OWNED_TUNE[f.key] = parseFloat(e.target.value);
+      panel.querySelector(`#tune-val-${f.key}`).textContent = OWNED_TUNE[f.key];
+    });
+  });
+  const tuneString = () => FIELDS.map(f => `${f.key}: ${OWNED_TUNE[f.key]}`).join(', ');
+  panel.querySelector('#tune-defaults').addEventListener('click', () => {
+    FIELDS.forEach(f => {
+      OWNED_TUNE[f.key] = TUNE_DEFAULTS[f.key];
+      panel.querySelector(`#tune-in-${f.key}`).value = TUNE_DEFAULTS[f.key];
+      panel.querySelector(`#tune-val-${f.key}`).textContent = TUNE_DEFAULTS[f.key];
+    });
+  });
+  panel.querySelector('#tune-copy').addEventListener('click', async () => {
+    const s = tuneString();
+    try { await navigator.clipboard.writeText(s); } catch (e) { /* クリップボード不可でもtextareaに出すので落とさない */ }
+    panel.querySelector('#tune-out').value = s;
+  });
+}
+maybeOpenTunePanel();
+
 document.getElementById('btn-result')?.addEventListener('click', () => openResultScreen('clear'));
 
-document.getElementById('btn-reset').addEventListener('click', () => {
-  if (confirm('データをリセットしますか？')) { localStorage.removeItem(SAVE_KEY); location.reload(); }
-});
+// v25: ヘッダーの「リセット」を ⚙️設定 の入口に変更した（リセットは設定モーダルの中にある）。
+document.getElementById('btn-settings')?.addEventListener('click', openSettingsModal);
 
 // v18: ヘッダーの💰現金をタップすると「💰 お金」ハブが開く（既定は「今月」タブ）。
 document.getElementById('hud-clock-cash-btn')?.addEventListener('click', () => openMoneyHub('month'));
