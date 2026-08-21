@@ -24,7 +24,9 @@
   (function () {
     var KEY = 'rentopia_theme';   // 'light' | 'dark' | 'auto'
     var mq  = window.matchMedia('(prefers-color-scheme: dark)');
-    var pref = localStorage.getItem(KEY) || 'auto';
+    // v26: 既定は必ずライト。'auto'（OS追従）だと、OSがダークの端末は初回起動から
+    // いきなりダークで開いてしまう。ダークにしたい人は⚙️設定で明示的に選ぶ。
+    var pref = localStorage.getItem(KEY) || 'light';
     function apply() {
       var dark = pref === 'dark' || (pref === 'auto' && mq.matches);
       document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
@@ -267,9 +269,14 @@
   html[data-theme="dark"] .bg-canvas  { background-color: #0b1220; }
   html[data-theme="dark"] .text-ink   { color: #e2e8f0; }
 
-  /* 面（カード・下地）。白カード→濃紺、その中の薄いグレー帯→さらに暗い色で沈める */
-  html[data-theme="dark"] .bg-white     { background-color: #1e293b; }
-  html[data-theme="dark"] .bg-slate-50  { background-color: #0f172a; }
+  /* 面（カード・下地）。v26: 従来は .bg-white と .bg-slate-100 が両方 #1e293b で、
+     カード面・タブ帯・選択中タブが完全に同色になり、タブがどこにあるかも
+     どれが選択中かも見えなかった（お金／物件詳細／物件市場の3画面）。
+     明度が単調に並ぶよう作り直す：地 < カード < 淡い帯 < チップ・タブ帯 < さらに上。
+     カード面は≡メニュー（.hud-panel）と同じ暗さまで落とす。従来の #1e293b は
+     真っ暗な地図の上に大きな面で出ると眩しく、画面が白く光って見えていた。 */
+  html[data-theme="dark"] .bg-white     { background-color: #111a2e; }
+  html[data-theme="dark"] .bg-slate-50  { background-color: #172236; }
   html[data-theme="dark"] .bg-slate-100 { background-color: #1e293b; }
   html[data-theme="dark"] .bg-slate-200 { background-color: #334155; }
   html[data-theme="dark"] .bg-slate-300 { background-color: #475569; }
@@ -286,35 +293,85 @@
   html[data-theme="dark"] .text-emerald,
   html[data-theme="dark"] .text-emerald-600,
   html[data-theme="dark"] .text-emerald-700,
-  html[data-theme="dark"] .text-emerald-800 { color: #4ade80; }
+  html[data-theme="dark"] .text-emerald-800,
+  html[data-theme="dark"] .text-emerald-900 { color: #4ade80; }
+  html[data-theme="dark"] .text-red-500,
   html[data-theme="dark"] .text-red-600,
   html[data-theme="dark"] .text-red-700,
   html[data-theme="dark"] .text-red-800     { color: #f87171; }
   html[data-theme="dark"] .text-amber-600,
   html[data-theme="dark"] .text-amber-700,
   html[data-theme="dark"] .text-amber-800   { color: #fbbf24; }
-  html[data-theme="dark"] .text-rose-600    { color: #fb7185; }
+  html[data-theme="dark"] .text-rose-600,
+  html[data-theme="dark"] .text-rose-700    { color: #fb7185; }
+  html[data-theme="dark"] .text-sky-800     { color: #7dd3fc; }
   html[data-theme="dark"] .text-indigo-600  { color: #a5b4fc; }
   html[data-theme="dark"] .text-navy        { color: #93c5fd; }
 
-  /* 淡色の下地（注意書き・成功／失敗のブロック）。ベタ塗りだと浮くので半透明で乗せる */
+  /* 淡色の下地（注意書き・成功／失敗のブロック）。ベタ塗りだと浮くので半透明で乗せる。
+     v26: rose-50 / rose-100 / sky-50 / indigo-50 は割り当てが漏れていて、ダークでも
+     rgb(255,241,242) のような「ほぼ純白」のまま出ていた（売却損益サマリー・月次明細の
+     費用列・DIYの寸法注記・バリューアップ行）。同じ方式で暗い側へ寄せる。 */
   html[data-theme="dark"] .bg-amber-50    { background-color: rgba(251,191,36,0.12); }
   html[data-theme="dark"] .bg-amber-100   { background-color: rgba(251,191,36,0.18); }
   html[data-theme="dark"] .bg-emerald-50  { background-color: rgba(74,222,128,0.12); }
   html[data-theme="dark"] .bg-emerald-100 { background-color: rgba(74,222,128,0.18); }
   html[data-theme="dark"] .bg-red-50      { background-color: rgba(248,113,113,0.12); }
   html[data-theme="dark"] .bg-red-100     { background-color: rgba(248,113,113,0.18); }
+  html[data-theme="dark"] .bg-rose-50     { background-color: rgba(251,113,133,0.12); }
+  html[data-theme="dark"] .bg-rose-100    { background-color: rgba(251,113,133,0.18); }
+  html[data-theme="dark"] .bg-sky-50      { background-color: rgba(56,189,248,0.12); }
+  html[data-theme="dark"] .bg-indigo-50   { background-color: rgba(165,180,252,0.14); }
 
-  /* 枠線 */
+  /* :hover / :active の色。v26.1: ここが「ポインタを合わせた瞬間（スマホはタップした瞬間）に
+     真っ白になる」の正体だった。Tailwind は hover を `.hover\:bg-slate-50:hover` という
+     別のクラス名で出すため、上に並べた `.bg-slate-50` 等の読み替えは1つも効かず、
+     ダークでも #f8fafc（ほぼ純白）のまま残っていた。所有物件一覧の行がこれ。
+     ※タッチ端末は一度タップすると :hover が貼り付いたまま残るので、
+       ここは「わずかに持ち上がる」程度に留める（強い色にすると押した行が光り続ける）。 */
+  html[data-theme="dark"] .hover\:bg-slate-50:hover    { background-color: #1b2740; }
+  html[data-theme="dark"] .hover\:bg-slate-100:hover,
+  html[data-theme="dark"] .active\:bg-slate-100:active { background-color: #243146; }
+  html[data-theme="dark"] .hover\:bg-slate-200:hover   { background-color: #3b4a63; }
+  html[data-theme="dark"] .hover\:bg-emerald-50:hover  { background-color: rgba(74,222,128,0.18); }
+  html[data-theme="dark"] .hover\:bg-amber-100:hover   { background-color: rgba(251,191,36,0.24); }
+
+  /* 枠線（1）色クラスが付いていない「幅だけ」の枠。Tailwindの既定色 #e5e7eb は
+     暗い地の上で明るく光るのでグレーに落とす。
+     v26: .border-2 / .border-b-2 / .border-l / .border-r が漏れていて、初期設定ウィザードの
+     選択カードなどが明るいグレーの太枠のまま光っていたので足す。divide-y も同じ理由。 */
   html[data-theme="dark"] .border,
+  html[data-theme="dark"] .border-2,
   html[data-theme="dark"] .border-t,
   html[data-theme="dark"] .border-b,
+  html[data-theme="dark"] .border-b-2,
+  html[data-theme="dark"] .border-l,
+  html[data-theme="dark"] .border-r,
   html[data-theme="dark"] .border-slate-200,
   html[data-theme="dark"] .border-slate-300   { border-color: #334155; }
+  html[data-theme="dark"] .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-color: #334155; }
+
+  /* 枠線（2）色つきの枠。※必ず(1)より後に書くこと。
+     v26: ここが要点。`html[data-theme="dark"] .border`（詳細度0-2-1）は Tailwind が出す
+     `.border-amber-400`（詳細度0-1-0）より強いため、色つきクラスをここで明示的に
+     置き直さないと、ダークでは「注意」「危険」の色枠が全部ただのグレーに潰れる。
+     実測で border-amber-200/300/400/500・border-rose-200・border-red-600・
+     border-white 系が rgb(51,65,85) になっていた。 */
   html[data-theme="dark"] .border-navy        { border-color: #3b82f6; }
   html[data-theme="dark"] .border-red-300     { border-color: #b91c1c; }
+  html[data-theme="dark"] .border-red-600     { border-color: #ef4444; }
   html[data-theme="dark"] .border-emerald-200,
   html[data-theme="dark"] .border-emerald-500 { border-color: #047857; }
+  html[data-theme="dark"] .border-amber-200,
+  html[data-theme="dark"] .border-amber-300   { border-color: #b45309; }
+  html[data-theme="dark"] .border-amber-400,
+  html[data-theme="dark"] .border-amber-500   { border-color: #d97706; }
+  html[data-theme="dark"] .border-rose-200    { border-color: #9f1239; }
+  html[data-theme="dark"] .border-white       { border-color: #e2e8f0; }
+  html[data-theme="dark"] .border-white\/10   { border-color: rgba(226,232,240,0.10); }
+  html[data-theme="dark"] .border-white\/20   { border-color: rgba(226,232,240,0.20); }
+  html[data-theme="dark"] .border-white\/25   { border-color: rgba(226,232,240,0.25); }
+  html[data-theme="dark"] .border-white\/30   { border-color: rgba(226,232,240,0.30); }
 </style>
 </head>
 <body class="bg-canvas text-ink overflow-hidden flex flex-col">
@@ -6059,16 +6116,19 @@ const FILLER_HALF = FILLER_SIZE * 0.30 * 1.3;    // 雰囲気建物の最大幅(
 // v25: 所有物件の見え方の調整値。?tune=1 のパネルがここを直接書き換えると次のフレームから反映される。
 // PROP_SIZE 自体は建物の配置（PROP_HALF＝当たり判定）の計算に使われており、
 // 変えると街の並び方まで変わってしまう。だから「描画するときだけ所有物件を拡縮する」sizeScale にしている。
+// 2026-08-21: 下の値はオーナーが ?tune=1 のパネルで実機を見ながら確定させたもの。
+// 所有物件を一回り大きく（1.00→1.30）、枠を太く（0.10→0.16・最小1.5→3px）、
+// 足元ハローを広く濃く（横0.72→0.78・濃さ0.28→0.38）した。点滅の3値と縦半径は既定のまま。
 const OWNED_TUNE = {
-  sizeScale:  1.00,    // 所有物件だけの表示倍率（未所有はこの影響を受けない）
-  ringWidth:  0.10,    // 点滅枠の太さ（建物サイズに対する比率）
-  ringMinPx:  1.5,     // 点滅枠の最小太さ(px)
+  sizeScale:  1.30,    // 所有物件だけの表示倍率（未所有はこの影響を受けない）
+  ringWidth:  0.16,    // 点滅枠の太さ（建物サイズに対する比率）
+  ringMinPx:  3,       // 点滅枠の最小太さ(px)
   pulseBase:  0.725,   // 点滅の下限（0で完全に消える）
   pulseAmp:   0.275,   // 点滅の振れ幅
   pulseSpeed: 3.6,     // 点滅の速さ（rad/秒。3.6 ≒ 周期1.75秒）
-  haloX:      0.72,    // 足元ハローの横半径（建物サイズ比）
+  haloX:      0.78,    // 足元ハローの横半径（建物サイズ比）
   haloY:      0.22,    // 足元ハローの縦半径（建物サイズ比）
-  haloAlpha:  0.28,    // 足元ハローの濃さ
+  haloAlpha:  0.38,    // 足元ハローの濃さ
 };
 
 // v5: ズームと建物サイズの関係。Rはzoomに比例するので、建物をRに比例させるだけだと
@@ -6186,11 +6246,11 @@ function drawBuilding(x, y, size, o) {
   if (owned) {                                    // 2026-08-09: 所有物件をひと目で分かるようにする金色の外枠。
     // シルエットを1本のパスにして太い線でstrokeすると線幅の半分が外側に出るため、縦横比によらず
     // 全方向へ均一な太さのリングになる（旧ctx.scale方式は上下左右のはみ出し量が食い違っていた）。
-    // 2026-08-10: 太さ(0.10)・最小px(1.5)はオーナーが?ring=1の実機調整ツールで確定した値。
-    // 点滅の周期・下限・色はツールの既定値のまま変更されなかったため、ツール追加前の元の式に戻した。
+    // 太さ・最小px・点滅の3値は OWNED_TUNE にまとめてある（?tune=1 のパネルで実機調整できる）。
+    // 2026-08-21にオーナーが太さ0.10→0.16・最小1.5→3pxへ確定。点滅の周期・下限は既定のまま。
     const t = performance.now() / 1000;
     const pulse = OWNED_TUNE.pulseBase + OWNED_TUNE.pulseAmp * Math.sin(t * OWNED_TUNE.pulseSpeed);   // 周期約1.75秒・振幅0.45〜1.0で完全には消えない「呼吸」表現
-    const ring = Math.max(OWNED_TUNE.ringMinPx, size * OWNED_TUNE.ringWidth);           // 2026-08-10 実機確定値
+    const ring = Math.max(OWNED_TUNE.ringMinPx, size * OWNED_TUNE.ringWidth);
     // 2026-08-11: リングの色を入居率で変える。旧drawBadgesの入居率ドットは、①「一部入居」の色が
     // 金色リングとΔE 0.0で同一（識別不能）、②背景がリングと空で半々に割れて一定の下地に乗らない、
     // ③リングの点滅を継承してちらつく、の三重苦で読めなかった。リング自体を染めれば面積が大きく
@@ -9215,9 +9275,8 @@ function openMobileDrawer() {
         <div class="font-bold hud-accent mb-1">🎓 スキル状況</div>
         ${skillRow('目利き力', 'appraisal')}${skillRow('交渉力', 'negotiation')}${skillRow('自主管理', 'selfmgmt')}
       </div>
+      <!-- v26: 🎵BGM・🔊音あり は⚙️設定の中に同じものがあり重複していたので、ここからは外した。 -->
       <div class="flex gap-2 pt-1 hud-divide">
-        <button id="dr-bgm" class="flex-1 hud-tile rounded-lg py-2 text-sm">🎵 BGM</button>
-        <button id="dr-mute" class="flex-1 hud-tile rounded-lg py-2 text-sm">${muted ? '🔇 消音中' : '🔊 音あり'}</button>
         <button id="dr-settings" class="flex-1 hud-tile rounded-lg py-2 text-sm">⚙️ 設定</button>
       </div>
     </div></div></div>`);
@@ -9232,8 +9291,6 @@ function openMobileDrawer() {
   m.querySelector('#dr-credit').addEventListener('click', () => go(() => openKpiModal('credit')));
   m.querySelector('#dr-log').addEventListener('click', () => go(openLogModal));
   m.querySelector('#dr-glossary').addEventListener('click', () => go(openGlossaryModal));
-  m.querySelector('#dr-bgm').addEventListener('click', () => go(openBgmModal));
-  m.querySelector('#dr-mute').addEventListener('click', () => { setMuted(!muted); updateMuteButton(); close(); });
   // リセットは戻せない操作なので、BGMと並ぶワンタップの位置から設定モーダルの中へ移した
   m.querySelector('#dr-settings').addEventListener('click', () => go(openSettingsModal));
 }
