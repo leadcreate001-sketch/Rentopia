@@ -5319,7 +5319,8 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
     msg: `総合評価が基準未満（${cr.total} < ${b.minCredit}）`
       + `［属性${cr.base}${cr.penalty ? `(管理状態-${cr.penalty})` : ''}`
       + `＋資産背景${cr.asset}＋自己資金${cr.down}］`
-      + `${cr.down < DOWN_PAYMENT_BONUS_MAX ? '／頭金を厚くすると評価が上がります' : ''}` });
+      + `${cr.down < DOWN_PAYMENT_BONUS_MAX ? '／頭金を厚くすると評価が上がります' : ''}`,
+    plain: '総合評価が基準未満' });
   if (property.junkFlags.length > 0 && !b.wakeOk) reasons.push({ code: 'WAKEARI_NG', msg: '瑕疵・事故物件のため取扱不可' });
   if (b.areaLimit && property.areaKey !== b.areaLimit) reasons.push({ code: 'AREA_NG', msg: `${b.label}の営業エリア外（地方・郊外のみ）` });
   // v19: 公庫だけは maxLoan を「この物件の借入額」ではなく「名義ごとの既存公庫借入＋今回」で見る
@@ -5330,7 +5331,8 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
     msg: bankKey === 'kouko'
       ? `日本政策金融公庫の枠は1事業者あたり${yen(b.maxLoan)}です`
         + `（既存の公庫借入 ${yen(koukoExisting)}／今回 ${yen(loanAmount)}／超過 ${yen(koukoExisting + loanAmount - b.maxLoan)}）`
-      : `融資額が取扱範囲外（${b.label}）` });
+      : `融資額が取扱範囲外（${b.label}）`,
+    ...(bankKey === 'kouko' ? { plain: `日本政策金融公庫の枠は1事業者あたり${yen(b.maxLoan)}です` } : {}) });
   // v8.7: 少額すぎる融資は銀行が扱わない。頭金の入れすぎで借入が数十万円になるのを防ぐ。
   // v16: 下限は「銀行ごとの実額」と「案件総額の20%」の大きい方（effectiveMinLoan）。
   // どちらで弾かれたかで打つ手が違う（実額＝この銀行では扱えない／比率＝頭金を減らせば通る）ため、
@@ -5339,7 +5341,8 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   if (loanAmount < minLoan.amount) reasons.push({ code: 'LOAN_TOO_SMALL',
     msg: minLoan.by === 'ratio'
       ? `融資額が少なすぎます（${yen(loanAmount)}／この案件では総額の${Math.round(MIN_LOAN_RATIO * 100)}%＝${yen(minLoan.amount)}から）／頭金を減らしてください`
-      : `融資額が少なすぎます（${yen(loanAmount)}／${b.label}は${yen(minLoan.amount)}から）` });
+      : `融資額が少なすぎます（${yen(loanAmount)}／${b.label}は${yen(minLoan.amount)}から）`,
+    ...(minLoan.by === 'ratio' ? { plain: '融資額が少なすぎます／頭金を減らしてください' } : {}) });
 
   const remainYears = usefulLifeRemaining(property.structure, property.builtAge);
   let years = b.termMax;
@@ -5360,7 +5363,8 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   // 年齢キャップが「実際に」否認の原因になった場合だけAGE_OVERを出す。
   // 築年数側の制約(LIFE_OVER・soft cap等)で既にtermMin未満だったケースまで年齢のせいにしない。
   if (years < b.termMin && preAgeYears >= b.termMin) {
-    reasons.push({ code: 'AGE_OVER', msg: `完済時年齢が上限(${CONFIG.maxAge}歳)を超えるため取扱不可（現在${age}歳・借入可能最長${maxTermByAge}年）` });
+    reasons.push({ code: 'AGE_OVER', msg: `完済時年齢が上限(${CONFIG.maxAge}歳)を超えるため取扱不可（現在${age}歳・借入可能最長${maxTermByAge}年）`,
+      plain: `完済時年齢が上限(${CONFIG.maxAge}歳)を超えるため取扱不可` });
   }
   years = Math.max(b.termMin, years);
 
@@ -5371,9 +5375,11 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   const ltvNow = loanAmount / Math.max(1, price);
   if (reformCost > 0) {
     if (ltvNow > ltvMax) reasons.push({ code: 'OVER_LTV',
-      msg: `リフォーム費を含めると借入がLTV上限（${Math.round(ltvMax * 100)}%）を超えます（現在${Math.round(ltvNow * 100)}%）／頭金を増やすかリフォームを減らしてください` });
+      msg: `リフォーム費を含めると借入がLTV上限（${Math.round(ltvMax * 100)}%）を超えます（現在${Math.round(ltvNow * 100)}%）／頭金を増やすかリフォームを減らしてください`,
+      plain: 'リフォーム費を含めると借入が多すぎます／頭金を増やすかリフォームを減らしてください' });
   } else if ((1 - downRatio) > ltvMax) {
-    reasons.push({ code: 'OVER_LTV', msg: `自己資金${Math.round((1 - ltvMax) * 100)}%以上が必要（LTV上限${Math.round(ltvMax * 100)}%）` });
+    reasons.push({ code: 'OVER_LTV', msg: `自己資金${Math.round((1 - ltvMax) * 100)}%以上が必要（LTV上限${Math.round(ltvMax * 100)}%）`,
+      plain: `自己資金${Math.round((1 - ltvMax) * 100)}%以上が必要` });
   }
 
   const rate = bankRate(bankKey, state);
@@ -5383,7 +5389,8 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   const noiReview = reformCost > 0 ? reviewNoiWithReform(property, reformPlan, state) : null;
   const noiForReview = noiReview ? noiReview.total : noiAnnualV2(property);
   const d = dscr(noiForReview, monthlyPay * 12);
-  if (d < CONFIG.minDscr) reasons.push({ code: 'DSCR_LOW', msg: `収支が返済に対して弱い（DSCR ${d.toFixed(2)} < ${CONFIG.minDscr}）` });
+  if (d < CONFIG.minDscr) reasons.push({ code: 'DSCR_LOW', msg: `収支が返済に対して弱い（DSCR ${d.toFixed(2)} < ${CONFIG.minDscr}）`,
+    plain: '収支が返済に対して弱い' });
 
   // v17: 融資事務手数料は銀行ごとの型に従うので、審査対象の銀行(bankKey)を渡す。
   const requiredCash = Math.round(price * downRatio) + closingCostOf(property, price, loanAmount, state.month, bankKey);
@@ -11799,7 +11806,9 @@ function openLoanSchedule(propId, back) {
 function financeTab(p) {
   const rs = L.reviewAllBanks(p, p.price, 0.2, state);
   return minCashLine(p)
-    + `<div class="text-xs text-slate-500 mt-2 mb-1">${term('own_cash', '頭金')}2割とした場合の事前審査見込み（${term('ltv')}80%）:</div>`
+    // v26.3: 見出しの「（LTV80%）」は「頭金2割」と同じことを専門用語で言い直しているだけなので外した
+    // （このタブから指標を消すというユーザー指示（2026-08-22）に揃える）。
+    + `<div class="text-xs text-slate-500 mt-2 mb-1">${term('own_cash', '頭金')}2割とした場合の事前審査見込み:</div>`
     + bankReviewList(rs)
     + `<div class="mt-2">
       ${collapseHeader('ft-toggle-tip', false, '💡 銀行の使い分け', '')}
@@ -11810,6 +11819,8 @@ function financeTab(p) {
 // v8.21: LTV・DSCRは否決理由に埋もれさせず、承認・否決を問わず銀行名の隣に常時表示する
 // （範囲内でも数値を出しておくことで、判断材料になる）。支払い方法画面（showPayment）と
 // 物件詳細の融資タブ（bankReviewList）の両方で使う共通部品。
+// v26.3: ユーザー指示（2026-08-22）により、表面には出さず、支払い方法画面の「詳細を見る」を
+// 開いたときだけ使う部品になった（物件詳細の融資タブでは使わなくなった）。
 function metricsBadge(r, muted) {
   const ltvOk = r.ltv <= r.ltvMax, dscrOk = r.dscr >= r.dscrMin;
   const tone = (ok) => muted ? '' : ok ? 'text-slate-500' : 'text-red-600 font-bold';
@@ -11832,12 +11843,14 @@ function guaranteeNote(bankKey) {
   return rate > 0 ? `（保証料 +${L.fmtTaxRate(rate)} 込み）` : '';
 }
 
-// v11.6: 融資タブはあくまで下見用のプレビューなので、可否は○×とLTV/DSCR・条件の数値だけで
-// 示す。色分け・否決理由・借りる操作は支払い方法画面（showPayment）側だけの役目にする。
+// v26.3: ユーザー指示（2026-08-22）により、指標と条件の数値をやめ、可否と否決理由だけの
+// 一覧にした（旧: 可否は○×とLTV/DSCR・条件の数値だけで示す。色分け・否決理由・借りる操作は
+// 支払い方法画面（showPayment）側だけの役目にする、というv11.6の切り分けだったが、
+// 否決理由もこちらに表示する形に変わったため、コメントを実態に合わせて書き換えている）。
 function bankReviewList(rs) {
   return `<div class="space-y-1">${rs.map(r => r.approved
-    ? `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">◯ ${r.label}</b>${metricsBadge(r, true)}</div><div class="text-xs">金利${(r.terms.rate * 100).toFixed(2)}%${guaranteeNote(r.bankKey)}・${r.terms.years}年・月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div></div>`
-    : `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">✕ ${r.label}</b>${metricsBadge(r, true)}</div></div>`).join('')}</div>`;
+    ? `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">◯ ${r.label}</b></div></div>`
+    : `<div class="border rounded p-2"><div class="flex items-center gap-2"><b class="min-w-0">✕ ${r.label}</b></div>${r.reasons.length ? `<div class="text-xs text-red-600 mt-0.5">${linkTerms(r.reasons.map(x => x.plain ?? x.msg).join('／'))}</div>` : ''}</div>`).join('')}</div>`;
 }
 
 // v8: 募集が建物ごと止まっている状態は、費用・行動力を払う前に理由を出して止める。
@@ -12365,6 +12378,10 @@ function showPayment(propId, price, close) {
   // v15: リフォーム一体型融資の選択。見出し（合計額）は常に見せ、明細は押したときだけ開く。
   let openReform = false;
   let reformPlan = { large: false, restore: false, maint: false };
+  // v26.3: 銀行カードの表面はLTV/DSCR等の指標を出さず、押したときだけ開く「詳細を見る」に
+  // 格納する。銀行ごとに独立して開閉するのでbankKeyの集合で持つ（draw()はモーダルを
+  // 作り直すので、開閉状態はクロージャ変数で持たないと消える＝graceOpen等と同じ扱い）。
+  const openBankDetail = new Set();
   const draw = () => {
     // v26.2: 諸費用・評価・リフォームの開閉や頭金スライダーの確定等、すべてdraw()を呼ぶため
     // 毎回m.innerHTML=''で本文のスクロール位置が0に戻っていた。今DOM上にあるスクロール
@@ -12464,25 +12481,34 @@ function showPayment(propId, price, close) {
       ? `<div class="border rounded p-1.5 mb-1 bg-navy text-white">
           <div class="flex items-center justify-between gap-1.5">
             <b class="min-w-0" style="${bankNameStyle}">◯ ${r.label}</b>
-            ${metricsBadge(r, true)}
           </div>
           <div class="text-[11px] text-white/80 mt-0.5">金利${(r.terms.rate * 100).toFixed(2)}%${guaranteeNote(r.bankKey)}・${r.terms.years}年</div>
-          <div class="text-[11px] text-white/80">月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div>
+          <div class="text-[11px] text-white/80">月返済${L.yen(r.terms.monthlyPay)}</div>
+          <button class="bank-detail-toggle text-[11px] text-white/70 mt-0.5" data-k="${r.bankKey}">${openBankDetail.has(r.bankKey) ? '▲ 詳細を閉じる' : '▶ 詳細を見る'}</button>
+          ${openBankDetail.has(r.bankKey) ? `<div class="text-[11px] text-white/80 mt-0.5">
+            ${metricsBadge(r, true)}<br>
+            要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}
+          </div>` : ''}
           ${r.bankKey === 'kouko' && graceOpen ? graceCardHtml(r) : ''}
           ${r.bankKey === 'kouko' && !graceOpen ? `<button class="grace-open w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button>` : ''}
           ${r.bankKey !== 'kouko' ? `<button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button>` : ''}
           </div>`
-      : `<div class="bank-rejected border rounded p-1.5 mb-1 bg-slate-50 cursor-pointer" data-k="${r.bankKey}">
+      : `<div class="border rounded p-1.5 mb-1 bg-slate-50" data-k="${r.bankKey}">
           <div class="flex items-center justify-between gap-1.5">
             <b class="min-w-0 text-slate-400" style="${bankNameStyle}">✕ ${r.label}</b>
-            ${metricsBadge(r, false)}
           </div>
-          ${r.reasons.filter(x => x.code !== 'OVER_LTV' && x.code !== 'DSCR_LOW').length
-            ? `<div class="text-[11px] text-red-600 mt-0.5">${linkTerms(r.reasons.filter(x => x.code !== 'OVER_LTV' && x.code !== 'DSCR_LOW').map(x => x.msg).join('／'))}</div>` : ''}</div>`).join('');
-    banksDiv.querySelectorAll('.bank-rejected').forEach(el => el.addEventListener('click', () => {
-      const r = rs.find(x => x.bankKey === el.dataset.k);
-      if (!r) return;
-      alert(`${r.label}は現在の条件では借りられません。\n\n${r.reasons.map(x => x.msg).join('\n')}`);
+          ${r.reasons.length
+            ? `<div class="text-[11px] text-red-600 mt-0.5">${linkTerms(r.reasons.map(x => x.plain ?? x.msg).join('／'))}</div>` : ''}
+          <button class="bank-detail-toggle text-[11px] text-slate-500 mt-0.5" data-k="${r.bankKey}">${openBankDetail.has(r.bankKey) ? '▲ 詳細を閉じる' : '▶ 詳細を見る'}</button>
+          ${openBankDetail.has(r.bankKey) ? `<div class="text-[11px] text-slate-500 mt-0.5">
+            ${metricsBadge(r, false)}<br>
+            ${linkTerms(r.reasons.map(x => x.msg).join('／'))}
+          </div>` : ''}</div>`).join('');
+    banksDiv.querySelectorAll('.bank-detail-toggle').forEach(b => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const k = b.dataset.k;
+      if (openBankDetail.has(k)) openBankDetail.delete(k); else openBankDetail.add(k);
+      draw();
     }));
     banksDiv.querySelectorAll('.grace-open').forEach(b => b.addEventListener('click', () => {
       graceOpen = true;
