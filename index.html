@@ -1258,7 +1258,7 @@ export function makeOffer(state, propertyId, cutRate, rng = Math.random) {
   return { state: s, accepted: false, price: 0, penalized, counterProposal };
 }
 
-export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price, owner = 'personal', reformPlan = null, rng = Math.random, graceMonths = 0 }) {
+export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price, owner = 'personal', reformPlan = null, rng = Math.random, graceMonths = 0, financeClosingCost = false }) {
   const s = structuredClone(state);
   const i = s.market.findIndex(x => x.id === propertyId);
   const p = s.market[i];
@@ -1269,7 +1269,14 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
   // v15: リフォーム一体型で借りる場合、物件融資額にリフォーム費を上乗せする。現金購入や
   // reformPlan省略時はreformCost=0になり、以降の計算は従来どおり。
   const reformCost = (method !== 'cash' && reformPlan) ? purchaseReformTotal(p, reformPlan) : 0;
-  const loanAmount = method === 'cash' ? 0 : Math.round(price * (1 - downRatio)) + reformCost;
+  // v28: 「諸費用も一緒に借りる」を選んだ場合、借入額は不動点（overLoanAmount）で求める。
+  // financeClosingCost省略時（従来の呼び出し）は従来どおりの式のまま、結果は1円も変わらない。
+  const closingIncludedFlag = method !== 'cash' && financeClosingCost;
+  const loanAmount = method === 'cash' ? 0
+    : closingIncludedFlag ? overLoanAmount(p, price, s.month, method, downRatio, reformCost)
+    : Math.round(price * (1 - downRatio)) + reformCost;
+  // v28: いくら諸費用ぶんを借りたか（reformIncluded と同じ考え方）。オーバーローンでないときは0。
+  const closingIncluded = closingIncludedFlag ? Math.max(0, loanAmount - (Math.round(price * (1 - downRatio)) + reformCost)) : 0;
   // v17: 融資事務手数料は銀行ごとの型（定率／定額）なので、実際に選んだ銀行を渡す
   // （現金購入はbankKeyがあっても loanAmount=0 で loanFee=0 のまま変わらない）。
   const costs = purchaseCosts(p, price, loanAmount, s.month, method !== 'cash' ? method : null);
@@ -1293,7 +1300,7 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
   } else {
     // v19: 公庫の4,800万円は1事業者あたりの枠なので、実際に買う名義を審査に渡す
     // （p.ownerはこの関数の冒頭で確定済み。渡さないと法人で買う物件まで個人の枠で判定される）。
-    const terms = reviewLoan(method, p, price, downRatio, s, reformPlan, p.owner).terms;
+    const terms = reviewLoan(method, p, price, downRatio, s, reformPlan, p.owner, financeClosingCost).terms;
     // v18.2: 借入の実行（入金）と物件代金・諸費用の支払い（出金）を2本の明細に分ける。
     // ただしloanAmountに上乗せしたリフォーム費（reformCost）は現金を経由しない
     // （上のreformCost>0ブロックのとおり、決済と同時に着工し「ここで現金は引かない」設計＝
@@ -1309,7 +1316,8 @@ export function buyPropertyV2(state, propertyId, { method, downRatio = 0, price,
     const grace = method === 'kouko' ? Math.max(0, Math.min(24, graceMonths, years * 12)) : 0;
     p.loan = { bankKey: method, principal: loanAmount,
       rate: bankRate(method, s), years, monthsPaid: 0, graceMonths: grace,
-      reformIncluded: reformCost || 0 };   // v15: 内訳の表示用に、いくらリフォームぶんかを残す
+      reformIncluded: reformCost || 0,     // v15: 内訳の表示用に、いくらリフォームぶんかを残す
+      closingIncluded };                   // v28: いくら諸費用ぶんを借りたか（オーバーローンでないなら0）
     s.bankRelations[method].loans += 1;
     p.downPaid = Math.round(price * downRatio);   // v15: 頭金。ローン完済でp.loanがnullになっても振り返れるよう保存する
   }
@@ -5246,12 +5254,108 @@ export const MIN_LOAN_RATIO = 0.20;
 // 保証料込みの高金利4.0%が最初から乗っている前提なので上乗せしない。信金・地銀は
 // 信用保証協会・保証会社の保証料を金利+0.2%で表現する（一括前払いだと定率手数料と
 // 合わせて借入額の4%超になり序盤が重すぎるため、金利上乗せに寄せてある）。
+// v28: オーバーローン帯（積算カバー率1.1以上）のLTV上限。当初 Infinity（無制限）にしていたが
+// 2つ問題があった。①リフォーム一体型を上乗せしてもLTV判定を素通りしてしまう ②画面表示が
+// 「LTV107%＜Infinity%」になる。実測（3,000件・ノンバンク）では諸費用込みのLTVは
+// 中央値1.081・p95 1.155・p99 1.224・最大1.337 だったので、1.20 なら諸費用込みの98.4%が
+// 収まり、リフォームの青天井な上乗せだけを止められる。残り1.6%（諸費用が特に重い物件）は
+// 諸費用の一部が自己負担になるが、実務でも銀行が諸費用全額を見ないことはある。
+export const OVER_LOAN_LTV_MAX = 1.20;
+
+// v28: ltvCeiling は「積算・属性でどれだけLTV上限が伸びても、その銀行がそれ以上は出さない」
+// という天井（§3-2）。既存の ltvMax（カバー率0.8未満の帯で使う銀行の基準値）とは役割が別なので
+// 両方を持つ。公庫は諸費用込み融資をしないため80%で据え置き、信金・地銀はフルローン(100%)まで、
+// ノンバンクだけオーバーローン可（天井なし＝Infinity）。
 export const BANKS = {
-  kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:5, termMax:10, ltvMax:0.80, maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'flat', guaranteeRate:0 },
-  chigin:  { key:'chigin',  label:'地方銀行',         baseRate:0.018, termMin:10, termMax:30, ltvMax:0.80, maxLoan:Infinity,   minLoan:3_000_000, minCredit:50, wakeOk:false, areaLimit:null,    lifeStrict:true,   minPrice:10_000_000, feeType:'rate', guaranteeRate:0.002 },
-  shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:'local', lifeStrict:'soft', minPrice:0, feeType:'rate', guaranteeRate:0.002 },
-  nonbank: { key:'nonbank', label:'ノンバンク',       baseRate:0.040, termMin:10, termMax:25, ltvMax:0.90, maxLoan:Infinity,   minLoan:  500_000, minCredit:25, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'rate', guaranteeRate:0 },
+  kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:5, termMax:10, ltvMax:0.80, ltvCeiling:0.80,      maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'flat', guaranteeRate:0 },
+  chigin:  { key:'chigin',  label:'地方銀行',         baseRate:0.018, termMin:10, termMax:30, ltvMax:0.80, ltvCeiling:1.00,      maxLoan:Infinity,   minLoan:3_000_000, minCredit:50, wakeOk:false, areaLimit:null,    lifeStrict:true,   minPrice:10_000_000, feeType:'rate', guaranteeRate:0.002 },
+  shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, ltvCeiling:1.00,      maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:'local', lifeStrict:'soft', minPrice:0, feeType:'rate', guaranteeRate:0.002 },
+  nonbank: { key:'nonbank', label:'ノンバンク',       baseRate:0.040, termMin:10, termMax:25, ltvMax:0.90, ltvCeiling:OVER_LOAN_LTV_MAX, maxLoan:Infinity,   minLoan:  500_000, minCredit:25, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'rate', guaranteeRate:0 },
 };
+
+// v28: 積算カバー率（sekisanValue ÷ price）→ LTV上限のバンド（要件定義書 §3-1）。
+// cap が null の帯は「銀行ごとの基準値（BANKS[key].ltvMax）をそのまま使う」の意味、
+// Infinity は「諸費用込み＝オーバーローン帯」の識別値。境界は以上／未満で切る。
+export const LTV_BANDS = [
+  { min: 0,   max: 0.8, cap: null },       // 銀行の基準（公庫/信金/地銀0.80・ノンバンク0.90）
+  { min: 0.8, max: 1.0, cap: 0.90 },
+  { min: 1.0, max: 1.1, cap: 1.00 },       // フルローン
+  { min: 1.1, max: Infinity, cap: OVER_LOAN_LTV_MAX }, // オーバーローン（諸費用込み）
+];
+export function ltvBandOf(coverRatio) {
+  const band = LTV_BANDS.find(b => coverRatio >= b.min && coverRatio < b.max);
+  return band ? band.cap : LTV_BANDS[LTV_BANDS.length - 1].cap;
+}
+
+// v28: 実効LTV上限。①積算カバー率でバンド上限を決め ②銀行の天井で頭打ちにし
+// ③カバー率0.8未満の帯だけ完済実績を加算して90%でクランプする（要件定義書 §3-3）。
+// 100%以上へは積算でしか到達できない、が不変条件（③を0.8未満の帯限定にすることで担保）。
+export function effectiveLtvMax(bankKey, property, price, state) {
+  const b = BANKS[bankKey];
+  const coverRatio = sekisanValue(property) / Math.max(1, price);
+  const bandCap = ltvBandOf(coverRatio);
+  let ltvMax = bandCap == null ? b.ltvMax : bandCap;            // ①
+  ltvMax = Math.min(ltvMax, b.ltvCeiling);                      // ②
+  if (coverRatio < 0.8) {                                       // ③
+    const rel = (state.bankRelations && state.bankRelations[bankKey]) || { paidOff: 0 };
+    const bonus = rel.paidOff >= 3 ? 0.10 : rel.paidOff >= 1 ? 0.05 : 0;
+    // 天井（②）は加算後も超えない。公庫はltvMax=ltvCeiling=0.80のため、加算があっても
+    // 「80%据え置き」（§3-2）が保たれる。
+    // 0.80 + 0.05 は二進浮動小数点で 0.8500000000000001 になる。表示側は Math.round で
+    // 丸めるので見た目には出ないが、この値がテストの期待値比較や将来の等値判定に漏れると
+    // 原因の分かりにくい不一致になるため、ここで小数2桁に丸めておく。
+    ltvMax = Math.min(Math.round((ltvMax + bonus) * 100) / 100, 0.90, b.ltvCeiling);
+  }
+  return { ltvMax, coverRatio, isOverLoan: coverRatio >= 1.1 };
+}
+
+// v28: 「諸費用も一緒に借りる」（オーバーローン）を選んだ場合の借入額。
+// 借入額 = round(価格×(1−頭金率)) + リフォーム費 + 諸費用(借入額) という不動点を反復で求める
+// （§4-3）。閉じた式は使わない（closingCostOfの中身が将来変わっても追随させるため）。
+// 上限8回・差1円以下で打ち切り。downRatio=0・reformCost=0（省略時）は従来どおり
+// 借入額=価格+諸費用(借入額) になり、既存呼び出しの結果は1円も変わらない。
+export function overLoanAmount(property, price, month, bankKey, downRatio = 0, reformCost = 0) {
+  const base = Math.round(price * (1 - downRatio)) + reformCost;
+  let loan = base;
+  for (let i = 0; i < 8; i++) {
+    const next = base + closingCostOf(property, price, loan, month, bankKey);
+    const diff = Math.abs(next - loan);
+    loan = next;
+    if (diff <= 1) break;
+  }
+  return Math.round(loan);
+}
+
+// v28: 担保割れ（残債 > 時価）。ローンが無い物件（残債0）は必ずfalseになる。
+export function isUnderwater(property) {
+  return loanPayoffOf(property) > timeValueOf(property);
+}
+
+// v28: 「耐えられる下落率」。買った直後の時価が何%下がったら、売っても借金が残るか。
+// 積算価格が時価を下支えするため担保割れ（isUnderwater）はめったに起きないが、それとは別に
+// 「どこまでなら値下がりに耐えられるか」を出すことで、買う前にレバレッジの怖さを伝える。
+// 式を複製せず、実際の購入経路（buyPropertyV2）と売却経路（saleBreakdown）をそのまま通す
+// （どちらかの計算式が将来変わっても、ここが黙ってズレないようにするため）。
+// buyPropertyV2 は内部で structuredClone するので、渡した state は変化しない。
+// 呼び出し側は審査に通る（terms が確定する）銀行を渡す前提とし、ここでは防御しない。
+export function dropCushionAtPurchase(state, property, price, { bankKey, downRatio = 0, reformPlan = null, financeClosingCost = false, owner = 'personal', graceMonths = 0 }) {
+  if (!state.market.some(x => x.id === property.id)) return null;
+  const bought = buyPropertyV2(state, property.id,
+    { method: bankKey, downRatio, price, owner, reformPlan, graceMonths, financeClosingCost }).state;
+  const p = bought.properties.find(x => x.id === property.id);
+  const timeValue = timeValueOf(p);
+  const netAtTimeValue = saleBreakdown(bought, p, timeValue).net;
+  if (netAtTimeValue < 0) return { cushion: 0, timeValue, netAtTimeValue };
+  // 売価を二分探索し、net >= 0 を満たす最小の売価を求める。その売価まで時価が下がっても
+  // 手取りは0以上＝それより下がると借金が残る、という境界を cushion（下落率）として返す。
+  let lo = 0, hi = timeValue;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (saleBreakdown(bought, p, mid).net >= 0) hi = mid; else lo = mid;
+  }
+  const cushion = (timeValue - hi) / timeValue;
+  return { cushion, timeValue, netAtTimeValue };
+}
 
 // この案件でその銀行が扱う最低の借入額。どちらの下限で弾かれたかを msg に出したいので、
 // 金額だけでなく理由（'amount' = 銀行の実額下限 / 'ratio' = 案件総額に対する比率）も返す。
@@ -5302,15 +5406,21 @@ export function koukoBalanceOf(state, owner) {
   }, 0));
 }
 
-export function reviewLoan(bankKey, property, price, downRatio, state, reformPlan = null, owner = 'personal') {
+export function reviewLoan(bankKey, property, price, downRatio, state, reformPlan = null, owner = 'personal', financeClosingCost = false) {
   const b = BANKS[bankKey];
   const reasons = [];
   // v15: リフォーム一体型を選んだ場合、借入額は物件購入ぶんにリフォーム費を上乗せする。
   // reformPlan省略時（従来の呼び出し）は reformCost=0 になり、以降の計算は完全に旧挙動と一致する。
   const reformCost = reformPlan ? purchaseReformTotal(property, reformPlan) : 0;
-  const loanAmount = Math.round(price * (1 - downRatio)) + reformCost;
+  // v28: 「諸費用も一緒に借りる」を選んだ場合、借入額は不動点（overLoanAmount）で求める。
+  // financeClosingCost省略時（従来の呼び出し）は従来どおりの式のまま、結果は1円も変わらない。
+  const loanAmount = financeClosingCost
+    ? overLoanAmount(property, price, state.month, bankKey, downRatio, reformCost)
+    : Math.round(price * (1 - downRatio)) + reformCost;
   const rel = (state.bankRelations && state.bankRelations[bankKey]) || { paidOff: 0 };
-  const ltvMax = bankKey === 'chigin' && rel.paidOff >= 3 ? 0.90 : b.ltvMax;
+  // v28: 積算カバー率→バンド→銀行の天井→完済実績の順で決める実効LTV上限に統合
+  // （旧「地銀・完済3件で90%」の特例分岐はこの中の③に統合済み）。
+  const ltvMax = effectiveLtvMax(bankKey, property, price, state).ltvMax;
 
   // v8.7: 審査は「本人属性＋資産背景＋この案件の自己資金の厚み」の合計で見る。
   // v8: 危険域の物件を抱えていると、その分だけ実効的な信用度が下がった状態で審査される。
@@ -5373,10 +5483,17 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   // 加算されない（工事費がそのまま資産価値になるわけではない）ため、ここは甘くしない。
   // reformCost=0のときは丸め差が出ないよう従来式のまま判定する（既存挙動を1ビットも変えない）。
   const ltvNow = loanAmount / Math.max(1, price);
-  if (reformCost > 0) {
+  if (reformCost > 0 || financeClosingCost) {
+    // v28: 何を借入に上乗せしたかで文言と打つ手が変わる。リフォームを選んでいないのに
+    // 「リフォームを減らしてください」と出すと、実行できない助言になってしまう。
+    const extras = [reformCost > 0 ? 'リフォーム費' : null, financeClosingCost ? '諸費用' : null].filter(Boolean);
+    const what = extras.join('と');
+    const how = extras.length === 2 ? '頭金を増やすか、リフォームか諸費用のどちらかを外してください'
+      : reformCost > 0 ? '頭金を増やすかリフォームを減らしてください'
+      : '頭金を増やすか、諸費用は自己資金で払ってください';
     if (ltvNow > ltvMax) reasons.push({ code: 'OVER_LTV',
-      msg: `リフォーム費を含めると借入がLTV上限（${Math.round(ltvMax * 100)}%）を超えます（現在${Math.round(ltvNow * 100)}%）／頭金を増やすかリフォームを減らしてください`,
-      plain: 'リフォーム費を含めると借入が多すぎます／頭金を増やすかリフォームを減らしてください' });
+      msg: `${what}を含めると借入がLTV上限（${Math.round(ltvMax * 100)}%）を超えます（現在${Math.round(ltvNow * 100)}%）／${how}`,
+      plain: `${what}を含めると借入が多すぎます／${how}` });
   } else if ((1 - downRatio) > ltvMax) {
     reasons.push({ code: 'OVER_LTV', msg: `自己資金${Math.round((1 - ltvMax) * 100)}%以上が必要（LTV上限${Math.round(ltvMax * 100)}%）`,
       plain: `自己資金${Math.round((1 - ltvMax) * 100)}%以上が必要` });
@@ -5393,7 +5510,10 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
     plain: '収支が返済に対して弱い' });
 
   // v17: 融資事務手数料は銀行ごとの型に従うので、審査対象の銀行(bankKey)を渡す。
-  const requiredCash = Math.round(price * downRatio) + closingCostOf(property, price, loanAmount, state.month, bankKey);
+  // v28: 「諸費用も一緒に借りる」ときは諸費用が借入に含まれているので、必要現金には足さない。
+  const requiredCash = financeClosingCost
+    ? Math.round(price * downRatio)
+    : Math.round(price * downRatio) + closingCostOf(property, price, loanAmount, state.month, bankKey);
   if (state.cash < requiredCash) reasons.push({ code: 'NO_CASH', msg: `自己資金が足りない（必要 ${yen(requiredCash)} / 手元 ${yen(state.cash)}）` });
 
   const approved = reasons.length === 0;
@@ -5402,7 +5522,7 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   // v15: リフォームを含むときは借入実額に対する比率を返す。表示バッジがこの値を使うため、
   // 否決理由と食い違うと「なぜ落ちたか分からない」状態になる。reformCost=0のときは
   // 従来どおり(1-downRatio)をそのまま返す（Math.round丸め差で既存挙動を変えないため）。
-  const ltvOut = reformCost > 0 ? ltvNow : 1 - downRatio;
+  const ltvOut = (reformCost > 0 || financeClosingCost) ? ltvNow : 1 - downRatio;
   return { bankKey, label: b.label, approved, reasons,
     ltv: ltvOut, ltvMax, dscr: d, dscrMin: CONFIG.minDscr,
     reformCost,               // v15: 一体型で借りるリフォーム費（0なら従来どおり）
@@ -5439,8 +5559,8 @@ export function primaryReason(reasons) {
 // 最も間口が広く、地方銀行は信用度50必須・訳あり不可・1,000万円未満取扱不可と最も狭い。
 // v19: 公庫の4,800万円は「1事業者あたり」の枠なので、どの名義で買うかによって残枠が変わる。
 // 審査の一覧にも同じ名義を通さないと、法人で買うつもりの物件が個人の枠で判定されてしまう。
-export function reviewAllBanks(property, price, downRatio, state, reformPlan = null, owner = 'personal') {
-  return ['nonbank', 'kouko', 'shinkin', 'chigin'].map(k => reviewLoan(k, property, price, downRatio, state, reformPlan, owner));
+export function reviewAllBanks(property, price, downRatio, state, reformPlan = null, owner = 'personal', financeClosingCost = false) {
+  return ['nonbank', 'kouko', 'shinkin', 'chigin'].map(k => reviewLoan(k, property, price, downRatio, state, reformPlan, owner, financeClosingCost));
 }
 
 // === v2: 売却フロー（査定・掲載・値下げ・取下げ） ===
@@ -6032,6 +6152,11 @@ export const TERMS = {
     calc: '担保評価には積算価格（土地＋建物の積み上げ）が使われるのが実務。「積算が出る／出ない」で融資額が左右される。',
     here: '融資審査ではLTV・DSCR・信用度と並んで、この担保評価が借りられる額を左右する。',
     hint: '積算価格が出にくい物件（築古で建物が0円に近い等）ほど、実務では融資が付きにくくなる。' },
+  drop_cushion: { scope: 'game', group: '融資', label: '耐えられる下落率',
+    def: '買った直後の時価から何%下がると、売っても手取りがマイナス（借金が残る）になるかという割合。',
+    calc: '耐えられる下落率 ＝（時価 − 手取りが0になる売価）÷ 時価。売価は税・諸費用・残債をすべて差し引いて手取り0になる境界を探して求める。',
+    here: '購入画面の頭金スライダーの下に表示。頭金を厚くするほど残債が減り、この割合は大きくなる。',
+    hint: '頭金0%のフルローンでは10〜20%ほどしかないことが多い。頭金を2〜3割入れると30〜40%台まで伸びる。数字が小さいほど、少しの値下がりで借金だけが残るレバレッジの強い買い方ということ。' },
   motokin_suechi: { scope: 'real', reading: 'がんきんすえおき', group: '融資', label: '元金据置',
     def: '返済期間の最初の一定期間、元金を減らさず利息だけを払う契約。',
     calc: '据置期間中は利息だけを払い、元金は1円も減らない。日本政策金融公庫の一般貸付では据置は2年以内が上限。',
@@ -6134,7 +6259,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -9686,6 +9811,8 @@ function openKpiModal(which, keepBulk = false) {
         // v4: 原状回復が済んでいない部屋は募集できない＝空室損が続くので一覧で目立たせる
         p.units.filter(u => u.needsRestore).length
           ? `<span class="bg-red-500 text-white rounded px-1">要原状回復${p.units.filter(u => u.needsRestore).length}室</span>` : '',
+        // v28: 残債が時価を上回っている（担保割れ）物件を一覧で目立たせる。
+        L.isUnderwater(p) ? '<span class="bg-red-500 text-white rounded px-1">担保割れ</span>' : '',
         p.diyProgress ? `<span class="bg-emerald-100 text-emerald-700 rounded px-1">🔨DIY中${Math.min(100, Math.round(p.diyProgress.done))}%</span>` : '',
         occ >= 100 ? '<span class="bg-emerald-100 text-emerald-700 rounded px-1">満室</span>' : `<span class="bg-slate-100 text-slate-600 rounded px-1">入居${occ}%</span>`,
       ].filter(Boolean).join(' ');
@@ -10576,7 +10703,7 @@ function openDetail(propId, from, back, opts = {}) {
             <button id="dt-close" class="text-slate-400 text-xl leading-none">✕</button>
           </div></div>
         <div class="flex items-center gap-2.5">${renderBuildingSVG(p, 'w-16 h-16')}
-          <div class="min-w-0 flex-1"><div class="font-bold truncate">${p.name || p.label} ${from === 'owned' ? `<span class="text-[11px] align-middle ${p.owner === 'corp' ? 'bg-navy text-white' : 'bg-slate-200 text-slate-700'} rounded px-1.5 py-0.5">${p.owner === 'corp' ? '🏢法人' : '👤個人'}</span>` : ''}</div><div class="text-[11px] text-slate-500">${p.label}${readOnly ? '<span class="ml-1.5 text-amber-700 font-bold">・売却の検討中｜閲覧のみ</span>' : ''}</div></div></div>
+          <div class="min-w-0 flex-1"><div class="font-bold truncate">${p.name || p.label} ${from === 'owned' ? `<span class="text-[11px] align-middle ${p.owner === 'corp' ? 'bg-navy text-white' : 'bg-slate-200 text-slate-700'} rounded px-1.5 py-0.5">${p.owner === 'corp' ? '🏢法人' : '👤個人'}</span>` : ''}${from === 'owned' && L.isUnderwater(p) ? '<span class="text-[11px] align-middle bg-red-500 text-white rounded px-1.5 py-0.5 ml-1">担保割れ</span>' : ''}</div><div class="text-[11px] text-slate-500">${p.label}${readOnly ? '<span class="ml-1.5 text-amber-700 font-bold">・売却の検討中｜閲覧のみ</span>' : ''}</div></div></div>
         <div class="flex items-center justify-between gap-2 mt-1">
           <span class="text-[11px] text-slate-500">${held != null ? `保有 ${Math.floor(held / 12)}年${held % 12}ヶ月` : ''}</span>
           ${readOnly ? '' : '<button class="dt-map-jump text-[11px] font-bold text-navy shrink-0 py-0.5 px-2 -mr-1 hover:bg-slate-50 rounded">📍地図を見る</button>'}
@@ -12267,6 +12394,21 @@ function creditSummaryBox(downRatio, open) {
   </div>`;
 }
 
+// v28: 「なぜこの物件はフルローンが付くのか」を積算カバー率で説明する
+// （要件定義書 §3-1・§4-4）。creditSummaryBoxのすぐ下に、既存の注記と同じ見た目の1行で出す。
+function sekisanCoverNote(p, price) {
+  const cover = L.sekisanValue(p) / Math.max(1, price);
+  const pct = Math.round(cover * 100);
+  // 帯が決めるのは「積算がどこまで許すか」の上限。実際にどこまで出るかは銀行の天井
+  // （公庫は80%据え置き）と完済実績でさらに絞られるので、断定せず「銀行があります」と書く。
+  // 各行の実際の可否は、この下の4行同時審査のカードが答えになる。
+  const desc = cover < 0.8 ? '頭金が要ります'
+    : cover < 1.0 ? '頭金10%まで下げられる銀行があります'
+    : cover < 1.1 ? 'フルローンを出せる銀行があります'
+    : '諸費用まで借りられる銀行があります';
+  return `<div class="text-[10px] text-slate-500">積算評価 ${L.yen(L.sekisanValue(p))}（価格の${pct}%）… ${desc}</div>`;
+}
+
 // v15: 買付画面から「購入資金とリフォーム資金を一本化した融資」を選べるようにする。
 // 見出しの合計額は常に見えるが、明細（何をいくらで直すか）は押すまで格納しておく
 // （初見で情報量が跳ね上がるのを避けるため）。チェックを触るたびに下の4行同時審査が
@@ -12301,6 +12443,21 @@ function reformLoanBox(p, plan, open) {
       </div>
     </div>
   </div>`;
+}
+
+// v28: 「諸費用も一緒に借りる」（オーバーローン）。リフォーム一体型融資と同じ枠組みの
+// 3つ目の項目として並べる。複数項目が無いので開閉は持たず、1行のチェックボックスで足りる。
+// 増える額は不動点（overLoanAmount）で求める。まだ銀行を選ぶ前なのでbankKeyはnull
+// （purchaseCostBoxが銀行未選択時の融資事務手数料を出すときと同じ扱い＝定率2.2%で見る）。
+function financeClosingCostBox(p, price, downRatio, reformPlan, checked) {
+  const reformCost = L.purchaseReformTotal(p, reformPlan);
+  const base = Math.round(price * (1 - downRatio)) + reformCost;
+  const extra = checked ? L.overLoanAmount(p, price, state.month, null, downRatio, reformCost) - base : 0;
+  return `<label class="flex items-center gap-2 rounded-lg bg-white border border-slate-300 p-1.5 text-xs cursor-pointer">
+    <input type="checkbox" class="finance-closing-check w-4 h-4 shrink-0" ${checked ? 'checked' : ''}>
+    <span class="flex-1 font-bold">📋 諸費用も一緒に借りる</span>
+    <span class="shrink-0 font-bold ${checked ? 'text-navy' : 'text-slate-400'}">${checked ? `＋${L.yen(extra)}` : '選択なし'}</span>
+  </label>`;
 }
 
 // v15: リフォームを乗せると返済は確実に増えるが、銀行が見る想定NOIも増える。
@@ -12403,6 +12560,8 @@ function showPayment(propId, price, close) {
   // v15: リフォーム一体型融資の選択。見出し（合計額）は常に見せ、明細は押したときだけ開く。
   let openReform = false;
   let reformPlan = { large: false, restore: false, maint: false };
+  // v28: 「諸費用も一緒に借りる」（オーバーローン）。リフォームと同じ枠組みの3つ目の項目。
+  let financeClosingCost = false;
   // v26.3: 銀行カードの表面はLTV/DSCR等の指標を出さず、押したときだけ開く「詳細を見る」に
   // 格納する。銀行ごとに独立して開閉するのでbankKeyの集合で持つ（draw()はモーダルを
   // 作り直すので、開閉状態はクロージャ変数で持たないと消える＝graceOpen等と同じ扱い）。
@@ -12419,7 +12578,22 @@ function showPayment(propId, price, close) {
     const maxDownPct = Math.max(0, Math.min(100, Math.floor((state.cash - closing) / price * 100)));
     if (downRatio > maxDownPct / 100) downRatio = maxDownPct / 100;
     // v19: 公庫の4,800万円枠は名義（個人／法人）ごとの総枠なので、選んでいる購入名義を渡す。
-    const rs = L.reviewAllBanks(p, price, downRatio, state, reformPlan, buyOwner);
+    const rs = L.reviewAllBanks(p, price, downRatio, state, reformPlan, buyOwner, financeClosingCost);
+    // v28: 「耐えられる下落率」。どの銀行を使っても購入直後の残債はほぼ同じなので、承認された
+    // 最初の1件だけで計算する（draw()1回につき1回。structuredClone＋二分探索を伴うため銀行ごとに
+    // 呼び直すと重い）。承認が1つも無ければ null のままにし、従来の説明文だけ残す。
+    const cushionApprover = rs.find(r => r.approved);
+    const cushion = cushionApprover
+      ? L.dropCushionAtPurchase(state, p, price,
+          { bankKey: cushionApprover.bankKey, downRatio, reformPlan, financeClosingCost, owner: buyOwner, graceMonths })
+      : null;
+    const cushionNoteHtml = () => {
+      if (!cushion) return `<div class="text-[10px] text-slate-500">スライダーで頭金の割合を自由に決められます</div>`;
+      if (cushion.cushion === 0) return `<div class="text-[10px] text-red-600">⚠️ いま売っても手取りはマイナスです</div>`;
+      const pct = (cushion.cushion * 100).toFixed(1);
+      const cls = cushion.cushion < 0.10 ? 'text-red-600' : cushion.cushion < 0.25 ? 'text-amber-700' : 'text-slate-500';
+      return `<div class="text-[10px] ${cls}">⚠️ 時価が ${pct}% 下がると、売っても借金が残ります</div>`;
+    };
     // v15: リフォーム費を借りるぶんだけ借入額が増える。諸費用（抵当権設定登記・融資事務手数料）は
     // この借入総額を基準に計算しないとリフォームを乗せても諸費用が動かず金額が食い違う。
     const loanTotal = Math.round(price * (1 - downRatio)) + L.purchaseReformTotal(p, reformPlan);
@@ -12444,13 +12618,15 @@ function showPayment(propId, price, close) {
       <div class="rounded-lg bg-slate-100 border border-slate-300 p-2 space-y-1.5">
         <div class="text-sm font-bold text-navy">🏦 融資（4行同時審査）</div>
         <div id="pay-credit">${creditSummaryBox(downRatio, openCredit)}</div>
+        ${sekisanCoverNote(p, price)}
         <div class="rounded-lg bg-white border-2 border-navy p-2 text-center">
           <div class="text-base font-bold">${term('own_cash', '頭金')} <span id="pay-down-pct">${Math.round(downRatio * 100)}%</span>＝<span id="pay-down-amt">${L.yen(Math.round(price * downRatio))}</span></div>
-          <div class="text-[11px] text-slate-600 mt-0.5">${term('closing_cost', '諸費用')}込み必要現金 <span id="pay-down-need" class="font-bold">${L.yen(Math.round(price * downRatio) + closing)}</span></div>
+          <div class="text-[11px] text-slate-600 mt-0.5"><span id="pay-down-need-label">${financeClosingCost ? `必要現金（${term('closing_cost', '諸費用')}は借入に含む）` : `${term('closing_cost', '諸費用')}込み必要現金`}</span> <span id="pay-down-need" class="font-bold">${L.yen(financeClosingCost ? Math.round(price * downRatio) : Math.round(price * downRatio) + closing)}</span></div>
         </div>
         <input id="pay-down-range" type="range" min="0" max="${maxDownPct}" step="1" value="${Math.round(downRatio * 100)}" class="w-full">
-        <div class="text-[10px] text-slate-500">スライダーで頭金の割合を自由に決められます</div>
+        ${cushionNoteHtml()}
         ${reformLoanBox(p, reformPlan, openReform)}
+        ${financeClosingCostBox(p, price, downRatio, reformPlan, financeClosingCost)}
         <div id="pay-loan-costs">${purchaseCostBox(p, price, loanTotal, `📋 ${term('closing_cost', '諸費用')}`, 'loan', openLoan)}</div>
         ${reformNoiBox(p, reformPlan)}
         <div id="pay-banks"></div>
@@ -12502,6 +12678,15 @@ function showPayment(propId, price, close) {
         <button class="grace-cancel w-full text-white/70 text-[11px] mt-1">選び直す</button>
       </div>`;
     };
+    // v28: フルローン以上（借入額 > 時価）で買うと、決済直後から担保割れになる。
+    // 「借りる」ボタンの上に警告を出すだけで購入は止めない（要件定義書 §5-4）。
+    // 紺背景カードの中なので、既存の元金据置の注記（text-amber-200）と同じ配色に揃える。
+    const underwaterNote = (r) => {
+      const tv = L.timeValueOf(p);
+      if (r.terms.loanAmount <= tv) return '';
+      const gap = r.terms.loanAmount - tv;
+      return `<div class="text-[11px] text-amber-200 mt-1.5">⚠️ 買った直後の残債 ${L.yen(r.terms.loanAmount)} が時価 ${L.yen(tv)} を上回ります（担保割れ ${L.yen(gap)}）。値下がりすると、売っても借金が残ります。</div>`;
+    };
     banksDiv.innerHTML = rs.map(r => r.approved
       ? `<div class="border rounded p-1.5 mb-1 bg-navy text-white">
           <div class="flex items-center justify-between gap-1.5">
@@ -12513,6 +12698,7 @@ function showPayment(propId, price, close) {
             ${metricsBadge(r, true)}<br>
             要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}
           </div>` : ''}
+          ${underwaterNote(r)}
           ${r.bankKey === 'kouko' && graceOpen ? graceCardHtml(r) : ''}
           ${r.bankKey === 'kouko' && !graceOpen ? `<button class="grace-open w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button>` : ''}
           ${r.bankKey !== 'kouko' ? `<button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button>` : ''}
@@ -12557,7 +12743,10 @@ function showPayment(propId, price, close) {
       const closingNow = L.closingCostOf(p, price, loanNow);
       box.querySelector('#pay-down-pct').textContent = `${pct}%`;
       box.querySelector('#pay-down-amt').textContent = L.yen(Math.round(price * pct / 100));
-      box.querySelector('#pay-down-need').textContent = L.yen(Math.round(price * pct / 100) + closingNow);
+      // v28: 諸費用も一緒に借りるを選んでいるときは、諸費用が借入に含まれるので現金には足さない。
+      box.querySelector('#pay-down-need').textContent = financeClosingCost
+        ? L.yen(Math.round(price * pct / 100))
+        : L.yen(Math.round(price * pct / 100) + closingNow);
       box.querySelector('#pay-loan-costs').innerHTML =
         purchaseCostBox(p, price, loanNow, `📋 ${term('closing_cost', '諸費用')}`, 'loan', openLoan);
       box.querySelector('#pay-credit').innerHTML = creditSummaryBox(pct / 100, openCredit);   // v8.7: 評価も追従
@@ -12568,6 +12757,11 @@ function showPayment(propId, price, close) {
     box.querySelectorAll('.reform-check').forEach(c => c.addEventListener('change', () => {
       reformPlan = { ...reformPlan, [c.dataset.k]: c.checked };
       openReform = true;   // 触った直後に閉じると結果が見えないので開いたままにする
+      draw();
+    }));
+    // v28: 「諸費用も一緒に借りる」チェック。触るたびに4行同時審査（rs）を引き直す。
+    box.querySelectorAll('.finance-closing-check').forEach(c => c.addEventListener('change', () => {
+      financeClosingCost = c.checked;
       draw();
     }));
     // v8.8: プルダウン開閉。box に委譲することで #pay-credit / #pay-loan-costs の innerHTML 差し替え後も効く。
@@ -12597,7 +12791,7 @@ function showPayment(propId, price, close) {
     });
     box.querySelectorAll('.pay-bank').forEach(b => b.addEventListener('click', () => {
       // v19: graceMonthsは公庫以外ではbuyPropertyV2側で必ず0にクランプされるので、そのまま渡してよい。
-      const r = L.buyPropertyV2(state, propId, { method: b.dataset.k, downRatio, price, owner: buyOwner, reformPlan, graceMonths });
+      const r = L.buyPropertyV2(state, propId, { method: b.dataset.k, downRatio, price, owner: buyOwner, reformPlan, graceMonths, financeClosingCost });
       state = r.state; r.logs.forEach(pushLog); save(); navReset(); render(); close(); checkEnd();
       // v15: リフォームを一緒に借りたときは演出の2行目にも込みであることを出す。
       const reformTotal = L.purchaseReformTotal(p, reformPlan);
