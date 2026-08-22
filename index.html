@@ -382,24 +382,36 @@
      ============================================================ */
   .sld-row { display: flex; align-items: center; gap: 8px; }
   .sld-row > input[type="range"] { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
+  /* v29.2: 44px角のタップ領域は維持したまま、見える面だけ36pxに落とす（padding + background-clip）。
+     従来の「1pxの枠線＋紺(#1e3a5f)の文字」は、指値カードの紺枠・満額カードの緑枠・CTAと
+     同じ強さでぶつかり、色分けされたカードの内側を分断していた。面だけの薄いチップにして
+     一段下げ、CTA（ベタ塗りのボタン）が常に一番目立つ状態に戻す。
+     ※ background-clip を効かせるため、色の上書きは background ショートハンドではなく
+       background-color で行うこと（ショートハンドは background-clip を初期値へ戻す）。 */
   .sld-btn {
-    flex: 0 0 auto; width: 44px; height: 44px; padding: 0;
+    flex: 0 0 auto; width: 44px; height: 44px;
+    padding: 4px 2px; box-sizing: border-box;
     display: flex; align-items: center; justify-content: center;
-    border: 1px solid #cbd5e1; border-radius: 10px;
-    background: #f1f5f9; color: #1e3a5f;
-    font-size: 22px; font-weight: 700; line-height: 1;
+    border: 0; border-radius: 9px;
+    background-color: rgba(15,23,42,0.06); background-clip: content-box;
+    color: #64748b;
+    font-size: 20px; font-weight: 700; line-height: 1;
     touch-action: manipulation; -webkit-user-select: none; user-select: none;
     -webkit-tap-highlight-color: transparent;
   }
-  .sld-btn:active            { background: #e2e8f0; }
-  .sld-btn:disabled          { opacity: 0.35; }
-  /* 地図上のHUD（?tune=1 の調整パネル）は幅240pxしかないので、そこだけ小さめにする */
-  .hud-panel .sld-btn {
-    width: 32px; height: 32px; font-size: 18px; border-radius: 8px;
-    border-color: #475569; background: rgba(51,65,85,0.55); color: #f1f5f9;
+  .sld-btn:active   { background-color: rgba(15,23,42,0.14); }
+  .sld-btn:disabled { opacity: 0.35; }
+  html[data-theme="dark"] .sld-btn        { background-color: rgba(255,255,255,0.10); color: #94a3b8; }
+  html[data-theme="dark"] .sld-btn:active { background-color: rgba(255,255,255,0.18); }
+  /* 地図上のHUD（?tune=1 の調整パネル）は幅240pxしかないので、そこだけ小さくする。
+     ダーク用ルール（詳細度0-2-1）に負けないよう、セレクタを2本並べて0-3-1を確保する。 */
+  .hud-panel .sld-btn,
+  html[data-theme="dark"] .hud-panel .sld-btn {
+    width: 32px; height: 32px; padding: 3px 1px; border-radius: 7px; font-size: 17px;
+    background-color: rgba(255,255,255,0.12); color: #cbd5e1;
   }
-  html[data-theme="dark"] .sld-btn        { border-color: #334155; background: #1e293b; color: #93c5fd; }
-  html[data-theme="dark"] .sld-btn:active { background: #334155; }
+  .hud-panel .sld-btn:active,
+  html[data-theme="dark"] .hud-panel .sld-btn:active { background-color: rgba(255,255,255,0.22); }
 </style>
 </head>
 <body class="bg-canvas text-ink overflow-hidden flex flex-col">
@@ -8292,15 +8304,15 @@ function el(html){ const t=document.createElement('template'); t.innerHTML=html.
 // スライダーは初期設定ウィザード・指値・頭金・売出価格など複数のモーダルで個別に組み立てられ、
 // しかも draw() でモーダルごと何度も作り直される。生成箇所を1つずつ書き換える方式は
 // 付け忘れ・再描画での消失が起きやすいので「DOMに現れた range を見つけたら包む」1か所に集約する。
-// ボタンは値を1ステップ動かしたあと input と change を両方 dispatch するので、
-// 既存のリスナー（頭金スライダーは change で draw() まで走る）は書き換えなしでそのまま効く。
+// 単発タップは input と change を両方、長押しリピート中は input だけを出し change は指を離した
+// ときに1回だけ（下の HOLD_* のコメント参照）。どちらも既存のリスナーを書き換えずに効く。
 function rangeStepOf(input) {
   const s = Number(input.step);            // step 未指定なら '' → 0、step="any" なら NaN
   return Number.isFinite(s) && s > 0 ? s : 1;
 }
 
-function nudgeRange(input, dir) {
-  if (input.disabled) return;
+function nudgeRange(input, dir, commit = true) {
+  if (input.disabled) return false;
   const step = rangeStepOf(input);
   const min = input.min === '' ? -Infinity : Number(input.min);
   const max = input.max === '' ? Infinity : Number(input.max);
@@ -8313,11 +8325,21 @@ function nudgeRange(input, dir) {
   next = Number(next.toFixed((String(step).split('.')[1] || '').length));
   if (next < min) next = min;
   if (next > max) next = max;
-  if (next === cur) return;                // 端に達している。イベントも出さない
+  if (next === cur) return false;          // 端に達している。イベントも出さない
   input.value = String(next);
   input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
+  if (commit) input.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
 }
+
+// v29.2: 長押しでリピートする。押している間は input だけを出し、指を離したときに change を
+// 1回だけ出す（＝実際のスライダーをドラッグしたときとまったく同じ順序）。頭金スライダーは
+// change で draw()＝モーダルごと作り直しまで走るので、リピート中に change を出すと押している
+// 最中にボタン自身が消えて連打が止まる。commit=false でその再描画を「離すまで」遅らせる。
+const HOLD_DELAY = 400;   // 押しっぱなしでリピートが始まるまで（ms）
+const HOLD_STEP  = 80;    // リピート間隔（ms）
+const HOLD_ACCEL = 20;    // 何回リピートしたら加速するか
+const HOLD_FAST  = 35;    // 加速後の間隔（ms）
 
 function wrapRangeWithSteppers(input) {
   if (input.dataset.stepper === '1' || !input.parentNode) return;
@@ -8332,7 +8354,46 @@ function wrapRangeWithSteppers(input) {
     b.textContent = label;
     b.setAttribute('aria-label', aria);
     b.disabled = input.disabled;           // 指値モーダルは売主次第でスライダーごと無効になる
-    b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); nudgeRange(input, dir); });
+    let delayTimer = 0, repeatTimer = 0, holding = false, moved = false;
+    const stopRepeat = () => {
+      clearTimeout(delayTimer); clearInterval(repeatTimer);
+      delayTimer = 0; repeatTimer = 0;
+    };
+    b.addEventListener('pointerdown', (e) => {
+      if (e.button > 0) return;            // 右クリック等は無視
+      e.preventDefault();
+      holding = true;
+      moved = nudgeRange(input, dir, false);
+      // 指がボタンから外れても離すまで追従させる（外れた瞬間に止まると連打しづらい）
+      try { b.setPointerCapture(e.pointerId); } catch { /* 取れなくても致命ではない */ }
+      delayTimer = setTimeout(() => {
+        let n = 0;
+        const tick = () => {
+          // モーダルが外から閉じられた等でスライダーごと消えたら止める（タイマーの取り残し防止）
+          if (!input.isConnected) { stopRepeat(); return; }
+          if (!nudgeRange(input, dir, false)) { stopRepeat(); return; }   // 上下限に達した
+          moved = true;
+          if (++n === HOLD_ACCEL) { clearInterval(repeatTimer); repeatTimer = setInterval(tick, HOLD_FAST); }
+        };
+        repeatTimer = setInterval(tick, HOLD_STEP);
+      }, HOLD_DELAY);
+    });
+    const endHold = () => {
+      if (!holding) return;
+      holding = false;
+      stopRepeat();
+      if (moved) input.dispatchEvent(new Event('change', { bubbles: true }));
+      moved = false;
+    };
+    b.addEventListener('pointerup', endHold);
+    b.addEventListener('pointercancel', endHold);
+    b.addEventListener('lostpointercapture', endHold);
+    b.addEventListener('click', (e) => {
+      // ポインタ操作は pointerdown/up で処理済みなので握りつぶす。キーボード（Enter/Space）は
+      // pointerdown が来ず click の detail が 0 になるので、そのときだけ1段動かす。
+      e.preventDefault(); e.stopPropagation();
+      if (e.detail === 0) nudgeRange(input, dir, true);
+    });
     return b;
   };
   row.appendChild(mkBtn(-1, '−', '少し減らす'));
@@ -13447,8 +13508,20 @@ function jumpToMapWithBubble(propId, from, backToDetail = true) {
   // ピンが画面の上のほうにあると吹き出しが画面外へはみ出すので、実測して押し下げる。
   const bb = bubble.getBoundingClientRect();
   if (bb.top < 8) bubble.style.top = Math.round(at.y + (8 - bb.top)) + 'px';
-  setTimeout(() => { bubble.style.opacity = '0'; }, 3800);
-  setTimeout(() => bubble.remove(), 4400);
+  // v29.1: 出したまま別の画面へ移ると、吹き出しだけが最前面（z-55）に残ってモーダルに被る。
+  // 画面遷移は必ずポインタ操作から始まるので、次の操作で消す（showRepairEffect と同じ形）。
+  let done = false, fadeTimer = 0;
+  const dismiss = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(fadeTimer);
+    document.removeEventListener('pointerdown', dismiss, true);
+    bubble.style.opacity = '0';
+    setTimeout(() => bubble.remove(), 500);
+  };
+  fadeTimer = setTimeout(dismiss, 3800);
+  // 表示のきっかけになったクリックそのもので即消えないよう、リスナーは次のループから有効にする。
+  setTimeout(() => { if (!done) document.addEventListener('pointerdown', dismiss, true); }, 0);
 }
 
 // === v4: 工事は「大分類（修繕/価値UP）→ 工事内容 → 実施方法（DIY/業者→借入）」の3階層 ===
