@@ -740,6 +740,76 @@ export function structuralDecay(property) {
   return DECAY_BY_AGE[ageBandOf(property.builtAge)] * (DECAY_BY_STRUCTURE[property.structure] ?? 1.0);
 }
 
+// 年間劣化率(%)。月次(structuralDecay と同じ係数)を12倍しただけ。構造係数は一重適用。
+export function annualDecay(builtAge, structure) {
+  return DECAY_BY_AGE[ageBandOf(builtAge)] * (DECAY_BY_STRUCTURE[structure] ?? 1.0) * 12;
+}
+
+// 大規模修繕の周期（年）。この周期で外壁・屋根・防水を打ち直すと躯体は100%に戻る想定。
+export const REPAIR_CYCLE = { '木造': 12, 'S': 14, 'RC': 16 };
+
+// 管理品質。売主がどれだけ手を入れてきたかを表す隠しパラメータで、
+// 躯体・手入れ・空室率の3つを同時に決める（バラバラの乱数にすると
+// 「ピカピカで満室なのに躯体40%」のような矛盾した物件が出るため）。
+export const MGMT_QUALITY_EFFECT = {
+  good:    { care: [85, 100], vacancy: 0.05 },
+  normal:  { care: [60,  85], vacancy: 0.12 },
+  neglect: { care: [15,  50], vacancy: 0.45 },
+};
+
+// 訳あり系統ごとの管理品質の出やすさ。相続・転勤で急いで売る売主は
+// 物件をきちんと管理していたことが多い＝訳ありでも躯体が良い、を表現する。
+export const MGMT_QUALITY_DIST = {
+  normal:            { good: 50, normal: 42, neglect:   8 },   // 通常物件
+  owner_circumstance:{ good: 50, normal: 45, neglect:   5 },   // 売主都合型
+  defect:            { good: 30, normal: 50, neglect:  20 },   // 物件瑕疵型
+  neglect_mgmt:      { good:  0, normal:  0, neglect: 100 },   // 管理放棄型
+  elderly:           { good: 10, normal: 40, neglect:  50 },   // 高齢型
+};
+
+export const JITTER = 0.15;   // 躯体初期値のばらつき（±15%）
+export const FLOOR  = 15;     // 躯体初期値の下限（0にすると買った瞬間「使用不能」で詰むため）
+
+const NEGLECT_JUNK = ['管理崩壊', '残置物', '立退き交渉中'];   // 管理が放棄されてきた証拠
+const DEFECT_JUNK  = ['事故歴', '再建築不可', '傾き'];        // 物件そのものの瑕疵（管理とは無関係）
+export const ELDERLY_REASON = '高齢で管理が難しくなった';
+
+// 優先順位: 管理放棄 > 高齢 > 瑕疵 > 売主都合 > 通常。
+// 管理の話（放棄・高齢）は躯体に直結するので、物件の瑕疵より優先して判定する。
+export function lineageOf(junkFlags = [], urgencyReason = null) {
+  if (junkFlags.some(f => NEGLECT_JUNK.includes(f))) return 'neglect_mgmt';
+  if (urgencyReason === ELDERLY_REASON) return 'elderly';
+  if (junkFlags.some(f => DEFECT_JUNK.includes(f))) return 'defect';
+  if (urgencyReason) return 'owner_circumstance';
+  return 'normal';
+}
+
+// 分布は合計が100でなくても正規化して使う。
+export function rollMgmtQuality(lineage, rng = Math.random) {
+  const d = MGMT_QUALITY_DIST[lineage] || MGMT_QUALITY_DIST.normal;
+  const total = d.good + d.normal + d.neglect;
+  if (total <= 0) return 'normal';
+  const r = rng() * total;
+  if (r < d.good) return 'good';
+  if (r < d.good + d.normal) return 'normal';
+  return 'neglect';
+}
+
+// 築年数・構造・管理品質から、その物件が「今どれだけ傷んでいるか」を決める。
+// good は周期どおり修繕してきた／normal は1回飛ばした／neglect は一度もやっていない。
+// 経過年ぶんの劣化を築年数の後ろから積むので、築45年でも直近に修繕していれば躯体は良い。
+export function initialRepairState(builtAge, structure, quality, rng = Math.random) {
+  const cycle = REPAIR_CYCLE[structure] ?? REPAIR_CYCLE['木造'];
+  let elapsed = quality === 'good' ? builtAge % cycle
+              : quality === 'normal' ? (builtAge % cycle) + cycle
+              : builtAge;
+  elapsed = Math.min(elapsed, builtAge);   // 築年数より前には遡れない（築浅では3種が同値になる）
+  let loss = 0;
+  for (let y = builtAge - elapsed; y < builtAge; y++) loss += annualDecay(y, structure);
+  const jitter = (1 - JITTER) + rng() * (JITTER * 2);
+  return Math.max(FLOOR, Math.min(100, Math.round(100 - loss * jitter)));
+}
+
 // === v8: 難易度モード ===
 // 中上級（normal）は v7 までと完全に同じ挙動になるよう、すべての係数を 1.0 / 0 に置いている。
 // 初心者（beginner）は「厳しさ」ではなく「取り返しのつかなさ」を削る方向で緩める——
@@ -970,6 +1040,8 @@ function addSpend(p, key, amount) {
   p.cum[key] = (p.cum[key] || 0) + Math.round(amount);
 }
 
+const URGENCY_REASONS = ['相続で現金化を急いでいる', '資金繰りで今月中に売りたい', '海外転勤が決まった', '離婚による財産分与', '高齢で管理が難しくなった'];
+
 export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands = null, opts = {}) {
   const g = GENRE[genreKey], a = AREA_ADJ[areaKey];
   const lr = (lo, hi) => lo + (hi - lo) * rng();
@@ -980,6 +1052,15 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
   }
   const builtAge = Math.round(lr(ageMin, ageMax));
   const unitCount = Math.round(lr(g.unitsMin, g.unitsMax));
+  // v27: 訳あり系統 → 管理品質 の順に先に決める。空室率・躯体・手入れがこれに依存するため、
+  // units を作る前に確定させておく必要がある（sellerUrgency は従来ここより後で決めていた）。
+  const junkFlags = g.wake ? pickJunk(genreKey, rng) : [];
+  const urgent = opts.forceUrgency || rng() < (g.wake ? 0.15 : 0.07);
+  const urgencyReason = urgent ? URGENCY_REASONS[Math.floor(rng() * URGENCY_REASONS.length)] : null;
+  const lineage = lineageOf(junkFlags, urgencyReason);
+  const quality = rollMgmtQuality(lineage, rng);
+  const qEffect = MGMT_QUALITY_EFFECT[quality];
+  const vacancyRate0 = Math.max(0.03, Math.min(0.95, qEffect.vacancy + a.vacancyAdd));
   // v3.10: 家賃先行。建物ごとに1つの間取りを選び（同じ建物は概ね同じ間取り）、各室に面積のばらつきを付ける。
   const normalKey = genreKey.startsWith('w_') ? genreKey.slice(2) : genreKey;
   const layoutPool = GENRE_LAYOUTS[normalKey] || GENRE_LAYOUTS.kubun;
@@ -988,7 +1069,7 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
   const units = Array.from({ length: unitCount }, () => {
     const sizeSqm = Math.round(lr(szLo, szHi));
     const rent = estimateRent(sizeSqm, areaKey, builtAge, genreKey, rng);
-    const occupied = g.wake ? rng() < 0.4 : rng() > Math.max(0.03, 0.10 + a.vacancyAdd);
+    const occupied = rng() >= vacancyRate0;
     // v4: 原状回復は部屋ごと。tenantMonths（在室月数）は退去時の原状回復費に効く。
     return { rent, occupied, vacantMonths: occupied ? 0 : Math.round(lr(1, 6)), layout, sizeSqm,
       needsRestore: false, tenantMonths: occupied ? Math.round(lr(1, 60)) : 0,
@@ -1031,10 +1112,11 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
     // オブジェクトが組み上がった後（下のsellerUrgency設定の直前）で計算して上書きする。
     propTaxA: 0,   // 下で propertyTaxAnnual(p) の結果に上書きする（暫定値）
     // v6: 🏚躯体（大規模修繕でのみ回復）と 🧹手入れ（日常メンテで100%まで回復）の2ゲージ
-    repairState: Math.round(g.wake ? lr(0, 40) : lr(40, 90)),
-    careState: Math.round(g.wake ? lr(20, 60) : lr(70, 100)),
+    repairState: initialRepairState(builtAge, g.structure, quality, rng),
+    careState: Math.round(lr(qEffect.care[0], qEffect.care[1])),
     autoManage: false,
-    junkFlags: g.wake ? pickJunk(genreKey, rng) : [],
+    junkFlags,
+    mgmtQuality: quality, lineage,
     resolvedJunk: [],   // v8.9: junkFlagsは生成時のまま消えないので、実際に手を入れた種類だけ別記録する
     assessedValue: assessedVal,
     assessedLand: assessedDetail.land, assessedBldg: assessedDetail.bldg,   // v8.21: 内訳（表示用）
@@ -1073,12 +1155,9 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
   p.sellerTaxable = p.sellerType === 'corp' ? rng() >= 0.25 : false;
   // v3.8: 売主事情。売り急ぎ（相続・資金繰り等）の売主は深い指値にも応じやすい（レアな掘り出し物・訳ありはやや高め）
   // v12: opts.forceUrgency は抽選をスキップして必ず売り急ぎにする（レアな掘り出し物用）
-  const urgent = opts.forceUrgency || rng() < (g.wake ? 0.15 : 0.07);
-  p.sellerUrgency = urgent ? { reason: URGENCY_REASONS[Math.floor(rng() * URGENCY_REASONS.length)] } : null;
+  p.sellerUrgency = urgencyReason ? { reason: urgencyReason } : null;
   return p;
 }
-
-const URGENCY_REASONS = ['相続で現金化を急いでいる', '資金繰りで今月中に売りたい', '海外転勤が決まった', '離婚による財産分与', '高齢で管理が難しくなった'];
 
 // === Task 5: 購入フロー（指値・銀行選択・buyProperty v2） ===
 
@@ -2425,13 +2504,18 @@ function setRepairGauge(property, kind, value) {
   else property.repairState = value;
 }
 
-// v5.1: 修繕費は「建物の規模（戸数・構造）」で決める。物件価格には依存させない。
+// v5.1: 修繕費は「建物の規模（戸数・構造・延べ床面積）」で決める。物件価格には依存させない。
 // 従来は price×係数だったため、40万円の訳あり戸建ての大規模修繕が5万円で直る／
 // RCマンションの清掃が630万円になる、といった非現実が出ていた。実際の工事費は
 // 足場・外壁面積・戸数といった物理量で決まり、市場価格とは無関係。
-const LARGE_SCAFFOLD    = { '木造': 300_000, 'S': 500_000, 'RC': 700_000 };  // 足場・共通仮設の基本額
+// v27: 外壁・屋根・防水の材工は施工面積で決まるので、延べ床面積を効かせる。
+// 戸数だけで決めていた頃は、同じ16戸でも1K(延床400㎡)とファミリー(延床1152㎡)が同額だった。
+// 戸数項を残しているのは、共用廊下・階段・EV・縦配管が戸数に比例するため。
+const LARGE_SCAFFOLD = { '木造': 280_000, 'S': 480_000, 'RC': 680_000 };
 const LARGE_SCAFFOLD_PU = 60_000;                                            // 戸数ぶんの足場加算
-const LARGE_PER_UNIT    = { '木造': 700_000, 'S': 900_000, 'RC': 1_150_000 };// 外壁・屋根・防水の1戸あたり材工
+const LARGE_PER_UNIT = { '木造': 280_000, 'S': 380_000, 'RC': 480_000 };
+const LARGE_PER_SQM  = { '木造':   4_000, 'S':   5_500, 'RC':   7_000 };
+const LARGE_FALLBACK_SQM = 40;   // 旧セーブ・テスト用の物件で sizeSqm が無い場合の既定値
 const MAINT_PER_UNIT    = 25_000;   // 日常メンテ（清掃・草刈り・部分クロス）の1戸あたり
 const MAINT_CAP         = 400_000;  // 小工事なので上限を低く（清掃が数百万円になる非現実を防ぐ）
 const MAINT_FLOOR       = 30_000;
@@ -2450,8 +2534,10 @@ export function repairCost(property, kind) {
     return kind === 'deepclean' ? base * DEEPCLEAN_COST_MULT : base;
   }
   if (kind === 'large') {
+    const totalSqm = property.units.reduce((s, u) => s + (u.sizeSqm ?? LARGE_FALLBACK_SQM), 0);
+    const avgSqm = units > 0 ? totalSqm / units : LARGE_FALLBACK_SQM;
     const scaffold = (LARGE_SCAFFOLD[st] ?? 400_000) + LARGE_SCAFFOLD_PU * units;
-    const material = (LARGE_PER_UNIT[st] ?? 800_000) * units * (gap / 100);
+    const material = ((LARGE_PER_UNIT[st] ?? 330_000) + (LARGE_PER_SQM[st] ?? 5_000) * avgSqm) * units * (gap / 100);
     const base = Math.round((scaffold + material) / 10000) * 10000;
     // v8: 使用不能まで落ちた建物の復旧は割増。傷む前に直した方が安い、を成立させる。
     return isCondemned(property) ? Math.round(base * CONDEMNED_COST_MULT) : base;
@@ -5805,8 +5891,8 @@ export const TERMS = {
     hint: '売れ残っている物件や相続で急いでいる売主ほどラインは広がる。焦って初月に指値しない。' },
   wakeari: { scope: 'real', reading: 'わけあり', group: '売買', label: '訳あり',
     def: '残置物・事故歴・再建築不可・管理崩壊など、なにか事情を抱えた物件。',
-    here: '安く買えるが、躯体が傷んでいて大規模修繕に数百万かかることが多い。融資に応じる金融機関も限られる。',
-    hint: '買値の安さだけで判断しない。「買値 ＋ 大規模修繕費」で採算が合うかを見る。木造6戸なら修繕に400万前後かかる。' },
+    here: '安く買えるが、躯体の傷み具合は事情によってまちまち。相続・転勤など売主都合の訳ありは管理が行き届いていることも多い一方、管理崩壊・残置物のある物件は本当に躯体が傷んでいる。融資に応じる金融機関も限られる。',
+    hint: '買値の安さだけで判断しない。「買値 ＋ 大規模修繕費」で採算が合うかを見る。木造6戸なら修繕に260万前後かかる。' },
 
   rentroll: { scope: 'real', group: '管理', label: 'レントロール',
     def: '部屋ごとの家賃・間取り・入居状況を一覧にした表。',
@@ -5834,9 +5920,9 @@ export const TERMS = {
     hint: '長く住んでいた部屋ほど高くつく。自分で手を動かせば材料費だけで収まるが、そのぶん時間を使う。' },
   repair_state: { scope: 'game', reading: 'くたい', group: '管理', label: '躯体',
     def: '外壁・屋根・防水・構造といった建物本体の状態。0〜100%。',
-    calc: '外壁塗装と屋上防水は10〜15年ごと、給排水管は20〜30年ごとが更新の目安。木造は鉄骨・RCより傷みが早く、築古になるほど劣化は加速する。',
+    calc: '木造は12年、鉄骨は14年、RCは16年ごとが大規模修繕の目安。給排水管は20〜30年ごとが更新の目安。木造は鉄骨・RCより傷みが早く、築古になるほど劣化は加速する。',
     here: '足場を組む大規模修繕でしか回復しない。清掃や草刈りでは戻らない。時価と銀行の評価に効く。',
-    hint: '「安く買えた」と思っても、10〜15年に一度の大規模修繕が必ず来る。買値だけでなく修繕の積立まで含めて採算を見る。' },
+    hint: '「安く買えた」と思っても、木造なら12年・鉄骨なら14年・RCなら16年に一度の大規模修繕が必ず来る。買値だけでなく修繕の積立まで含めて採算を見る。' },
   care_state: { scope: 'game', reading: 'ていれ', group: '管理', label: '手入れ',
     def: '清掃・草刈り・共用部の管理といった、日々の手入れの状態。0〜100%。',
     calc: '清掃・草刈り・共用部の点検を定期的に入れて維持する。築年数や構造には関係なく、放置すれば月を追うごとに落ちていく。',
@@ -6017,7 +6103,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, BANKS, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -9412,7 +9498,11 @@ function bsElapsedRow(theme = 'dark') {
 }
 
 function renderPanelLeft() {
-  const c = document.getElementById('panel-left'); c.innerHTML = '';
+  const c = document.getElementById('panel-left');
+  // v26.2: panel-left自体がoverflow-y-autoのスクロールコンテナ。バランスシート詳細の
+  // 開閉でinnerHTMLを作り直すたびに先頭へ戻っていたので、位置を保って書き戻す。
+  const prevScroll = c.scrollTop;
+  c.innerHTML = '';
   const g = state.goal;
   const goalNow = g.type === 'networth' ? L.netWorth(state) : L.monthlyCF(state);
   const pct = Math.max(0, Math.min(100, Math.round(goalNow / g.amount * 100)));
@@ -9456,6 +9546,7 @@ function renderPanelLeft() {
   c.querySelectorAll('.kpi-btn').forEach(b => b.addEventListener('click', () => openKpiModal(b.dataset.kpi)));
   c.querySelector('#btn-bs-toggle').addEventListener('click', () => { bsDetailOpen = !bsDetailOpen; renderPanelLeft(); });
   c.querySelector('#btn-money').addEventListener('click', () => openMoneyHub('month'));
+  c.scrollTop = prevScroll;
 }
 
 // v8.1: 法人化の損得を数字で出す。箇条書きの「こう変わります」だけでは、
@@ -9494,6 +9585,10 @@ const openPropAdviceIds = new Set();
 // （openDetail 内の redrawKeepScroll と同じ考え方を、モーダルを跨ぐ場合に広げたもの）
 let kpiPropsScrollTop = 0;
 let listingsScrollTop = 0;
+// v26.2: 通知一覧は各種トグル（表示設定・アドバイス・✕閉じる・全既読・通知モード変更）が
+// モーダルを丸ごと開き直すため、listingsScrollTopと同じやり方で位置を保つ。
+// #notifs-close（✕でモーダルを閉じる）のときだけ0に戻す。
+let notifsScrollTop = 0;
 
 // 左上の4KPIアイコン（💰🏠📈📊）をタップすると、それぞれの内訳・詳細を表示する。
 function openKpiModal(which, keepBulk = false) {
@@ -9809,15 +9904,20 @@ function openSoldRecordsModal(back) {
   };
 
   // 個別の成績カード詳細ビュー（同じモーダル内で本文だけ差し替える）
-  const drawDetail = (r) => {
+  // v26.2: keepScroll=trueのときだけスクロール位置を保つ。一覧(drawList)から詳細に入る
+  // ときは今まで通り先頭から（別物件の詳細が途中から表示されると不自然なため）、
+  // 中の3トグル（capgain/equity/summary）による再描画のときだけ保持する。
+  const drawDetail = (r, keepScroll = false) => {
+    const prevScroll = keepScroll ? body.scrollTop : 0;
     body.innerHTML = `<button id="sold-detail-back" class="text-[11px] text-navy underline font-bold mb-2">← 一覧へ戻る</button>
       <div class="font-bold text-sm mb-2">${r.name || r.label}</div>
       ${soldStateHtml(r)}
       ${scorecardHtml(r.card, { sold: true, ...soldDetailOpen })}`;
     body.querySelector('#sold-detail-back').addEventListener('click', drawList);
-    body.querySelector('.pl-toggle-capgain')?.addEventListener('click', () => { soldDetailOpen.capGainOpen = !soldDetailOpen.capGainOpen; drawDetail(r); });
-    body.querySelector('.pl-toggle-equity')?.addEventListener('click', () => { soldDetailOpen.equityOpen = !soldDetailOpen.equityOpen; drawDetail(r); });
-    body.querySelector('.pl-toggle-summary')?.addEventListener('click', () => { soldDetailOpen.summaryOpen = !soldDetailOpen.summaryOpen; drawDetail(r); });
+    body.querySelector('.pl-toggle-capgain')?.addEventListener('click', () => { soldDetailOpen.capGainOpen = !soldDetailOpen.capGainOpen; drawDetail(r, true); });
+    body.querySelector('.pl-toggle-equity')?.addEventListener('click', () => { soldDetailOpen.equityOpen = !soldDetailOpen.equityOpen; drawDetail(r, true); });
+    body.querySelector('.pl-toggle-summary')?.addEventListener('click', () => { soldDetailOpen.summaryOpen = !soldDetailOpen.summaryOpen; drawDetail(r, true); });
+    if (keepScroll) body.scrollTop = prevScroll;
   };
 
   drawList();
@@ -12055,15 +12155,17 @@ function purchaseCostBox(p, price, loanAmount, title, id, open) {
     : '価格の3%＋6万＋税';
   const row = (label, v) => v ? `<tr><td class="text-slate-600">${label}</td><td class="text-right">${L.yen(v)}</td></tr>` : '';
   // v17: 不動産取得税は決済時のtotalから外れ、登記ACQ_TAX_DELAY_MIN〜MAXヶ月後に別途納税
-  // 通知が届く（実務どおり）。開閉式の内訳の中に埋めると見落として現金を使い切る事故が
-  // 起きるため、開閉状態に関係なく必ず見える警告として出す。
+  // 通知が届く（実務どおり）。
+  // v26.2: 以前は開閉状態に関係なく常時表示していたが、画面が注意書きで埋まるとのユーザー
+  // 指示（2026-08-22）を受け、諸費用ボックスを開いたときだけ見える開閉div内へ移した。
   const acqWarning = c.acquisition
     ? `<div class="text-[10.5px] text-amber-800 bg-amber-50 rounded px-2 py-1 mt-1">⚠️ ${term('fudosan_shutokuzei', '不動産取得税')} ${L.yen(c.acquisition)} は約${L.ACQ_TAX_DELAY_MIN}〜${L.ACQ_TAX_DELAY_MAX}ヶ月後に納税通知が届きます（決済時の現金には含まれません）</div>`
     : '';
   return `<div class="rounded-lg bg-slate-50 p-1.5 text-xs">
     <button type="button" data-toggle="${id}" class="w-full flex justify-between font-bold ${open ? 'mb-1' : ''} text-left"><span>${open ? '▲' : '▶'} ${title}</span><span>${L.yen(c.total)}<span class="font-normal text-slate-500">（価格の${(c.total / price * 100).toFixed(1)}%）</span></span></button>
-    ${acqWarning}
     <div class="${open ? '' : 'hidden'}">
+    ${acqWarning}
+    ${cashRestoreNote(p, { compact: false })}
     <table class="w-full">
       ${row(`${term('chukai_tesuryo', '仲介手数料')}（${brokerLabel}）`, c.broker)}
       ${row(term('inshizei', '印紙税'), c.stamp)}
@@ -12234,12 +12336,16 @@ function reformRejectHint(p, price, downRatio, state, plan, maxDownPct, rs, owne
 
 // v15: 買った時点の空室は原状回復を終えるまで募集できない（v15の仕様変更）。
 // 融資なら一体で借りられるが、現金購入では別途この現金が要る。買う前に必ず見せる
-// （現金一括ブロックの内訳の下と、買付モーダルの「買い方を選ぶ」の上の両方で使う）。
-function cashRestoreNote(p) {
+// （買付モーダルの「買い方を選ぶ」の上と、諸費用ボックスの開閉内の両方で使う）。
+// v26.2: opts.compact（既定true）でopenPurchase用の1行省略表示、falseなら諸費用ボックス内用に
+// 折り返して全文が読めるようにする（横幅が狭くDIY金額まで書くと末尾が省略記号で切れるため）。
+function cashRestoreNote(p, opts = {}) {
+  const { compact = true } = opts;
   const restoreNeed = L.pendingRestoreCostOf(p);
   if (restoreNeed <= 0) return '';
   const vacantN = (p.units || []).filter(u => !u.occupied).length;
-  return `<div class="text-[10px] text-amber-800 bg-amber-50 rounded px-2 py-0.5 whitespace-nowrap overflow-hidden text-ellipsis">⚠️ 空室${vacantN}室は要原状回復・別途${L.yen(restoreNeed)}（DIY${L.yen(Math.round(restoreNeed * L.DIY_MATERIAL_RATE))}）</div>`;
+  const layoutCls = compact ? 'whitespace-nowrap overflow-hidden text-ellipsis' : 'mt-1';
+  return `<div class="text-[10px] text-amber-800 bg-amber-50 rounded px-2 py-0.5 ${layoutCls}">⚠️ 空室${vacantN}室は要原状回復・別途${L.yen(restoreNeed)}（DIY${L.yen(Math.round(restoreNeed * L.DIY_MATERIAL_RATE))}）</div>`;
 }
 
 function showPayment(propId, price, close) {
@@ -12251,12 +12357,19 @@ function showPayment(propId, price, close) {
   let buyOwner = 'personal';   // v3.5: 法人設立済みなら購入名義を選べる
   // v19: 公庫のときだけ選べる元金据置（なし/1年/2年）。既定はなし（0ヶ月）。
   let graceMonths = 0;
+  // v26.2: 公庫の「借りる」を押すとカード内に3択を開く（押すまでは出さない）。draw()は
+  // モーダルを作り直すので、開閉状態はクロージャ変数で持たないと消える。
+  let graceOpen = false;
   // v8.8: 諸費用・評価の内訳はプルダウン開閉式。押すと開き、もう一度押すと格納する。
   let openCash = false, openCredit = false, openLoan = false;
   // v15: リフォーム一体型融資の選択。見出し（合計額）は常に見せ、明細は押したときだけ開く。
   let openReform = false;
   let reformPlan = { large: false, restore: false, maint: false };
   const draw = () => {
+    // v26.2: 諸費用・評価・リフォームの開閉や頭金スライダーの確定等、すべてdraw()を呼ぶため
+    // 毎回m.innerHTML=''で本文のスクロール位置が0に戻っていた。今DOM上にあるスクロール
+    // コンテナの位置を控え、作り直した後に書き戻す（openDetailのredrawKeepScrollと同じ考え方）。
+    const prevScroll = m.querySelector('.overflow-y-auto')?.scrollTop || 0;
     m.innerHTML = '';
     // v3.6: 頭金は0%〜「手持ち現金で払える上限」まで1%刻みで自由に設定できる（3割上限を撤廃）
     // v8.5: 諸費用は借入額でも変わるので、頭金の上限判定はいったん現金購入ベースの額で見る
@@ -12285,7 +12398,6 @@ function showPayment(propId, price, close) {
         <div class="text-sm font-bold text-emerald-800">💰 現金で一括払い</div>
         <button id="pay-cash" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded py-1.5 text-sm font-bold ${state.cash < cashNeed ? 'opacity-40' : ''}" ${state.cash < cashNeed ? 'disabled' : ''}>現金一括（必要 ${L.yen(cashNeed)}）</button>
         ${purchaseCostBox(p, price, 0, `📋 ${term('closing_cost', '諸費用')}`, 'cash', openCash)}
-        ${cashRestoreNote(p)}
       </div>
       <div class="rounded-lg bg-slate-100 border border-slate-300 p-2 space-y-1.5">
         <div class="text-sm font-bold text-navy">🏦 融資（4行同時審査）</div>
@@ -12323,8 +12435,10 @@ function showPayment(propId, price, close) {
     const bankNameStyle = 'font-size:clamp(0.65rem,3.5vw,0.875rem)';
     // v19: 公庫の承認カードだけ「元金据置」の3択（既存のDIY/業者・満額/指値と同じ枠カード型）を出す。
     // 各カードに据置中・据置後の毎月返済を実額で併記し、既定は「なし」。公庫以外の銀行では出さない。
+    // v26.2: 以前は3択を常時表示して「借りる」を押すと即購入していた。ユーザー指示により、
+    // 初期状態では3択を出さず他行と同じ「借りる」だけにし、押すとカード内に3択が開く。
+    // ここでは即購入せず、3択で選んだ条件を確認してから「この条件で借りる」で初めて購入する。
     const graceCardHtml = (r) => {
-      if (r.bankKey !== 'kouko') return '';
       const cards = [0, 12, 24].map(g => {
         const loan = { principal: r.terms.loanAmount, rate: r.terms.rate, years: r.terms.years, graceMonths: g };
         const duringPay = L.loanPaymentOf(loan, 0);
@@ -12342,6 +12456,8 @@ function showPayment(propId, price, close) {
         <div class="text-[11px] font-bold">元金据置</div>
         <div class="grid grid-cols-3 gap-1 mt-1">${cards}</div>
         ${graceMonths > 0 ? `<div class="text-[10px] text-amber-200 mt-1">最初の${graceMonths / 12}年は利息のみ。元金が減らないぶん、据置後の返済は重くなります。</div>` : ''}
+        <button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">この条件で借りる</button>
+        <button class="grace-cancel w-full text-white/70 text-[11px] mt-1">選び直す</button>
       </div>`;
     };
     banksDiv.innerHTML = rs.map(r => r.approved
@@ -12352,8 +12468,10 @@ function showPayment(propId, price, close) {
           </div>
           <div class="text-[11px] text-white/80 mt-0.5">金利${(r.terms.rate * 100).toFixed(2)}%${guaranteeNote(r.bankKey)}・${r.terms.years}年</div>
           <div class="text-[11px] text-white/80">月返済${L.yen(r.terms.monthlyPay)}・要${term('own_cash', '自己資金')}${L.yen(r.terms.requiredCash)}</div>
-          ${graceCardHtml(r)}
-          <button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button></div>`
+          ${r.bankKey === 'kouko' && graceOpen ? graceCardHtml(r) : ''}
+          ${r.bankKey === 'kouko' && !graceOpen ? `<button class="grace-open w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button>` : ''}
+          ${r.bankKey !== 'kouko' ? `<button class="pay-bank w-full bg-white text-navy rounded py-1.5 text-sm font-bold mt-1.5" data-k="${r.bankKey}">借りる</button>` : ''}
+          </div>`
       : `<div class="bank-rejected border rounded p-1.5 mb-1 bg-slate-50 cursor-pointer" data-k="${r.bankKey}">
           <div class="flex items-center justify-between gap-1.5">
             <b class="min-w-0 text-slate-400" style="${bankNameStyle}">✕ ${r.label}</b>
@@ -12365,6 +12483,15 @@ function showPayment(propId, price, close) {
       const r = rs.find(x => x.bankKey === el.dataset.k);
       if (!r) return;
       alert(`${r.label}は現在の条件では借りられません。\n\n${r.reasons.map(x => x.msg).join('\n')}`);
+    }));
+    banksDiv.querySelectorAll('.grace-open').forEach(b => b.addEventListener('click', () => {
+      graceOpen = true;
+      draw();
+    }));
+    banksDiv.querySelectorAll('.grace-cancel').forEach(b => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      graceOpen = false;
+      draw();
     }));
     banksDiv.querySelectorAll('.grace-pick').forEach(b => b.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -12429,6 +12556,11 @@ function showPayment(propId, price, close) {
     }));
     box.querySelector('#pay-cancel').addEventListener('click', () => { pushLog('買付を取り下げた'); close(); });
     box.querySelector('#pay-x').addEventListener('click', () => { pushLog('買付を取り下げた'); close(); });
+    // v26.2: 復元は draw() の最後で行う。#pay-banks は appendChild の時点では空で、
+    // 4行ぶんの銀行カード（この画面で一番背の高いブロック）が後から innerHTML で入る。
+    // 空のうちに scrollTop を書くとスクロール可能量が足りずクランプされ、下のほうを
+    // 見ているときほど戻り幅が大きくなる＝直したつもりで直っていない状態になる。
+    box.querySelector('.overflow-y-auto').scrollTop = prevScroll;
   };
   draw();
 }
@@ -14150,29 +14282,38 @@ function openNotificationsModal() {
     ${notifSettingsOpen ? `<div class="border rounded p-2">${notifSettingsRows()}</div>` : ''}
     ${rows}</div></div>`);
   m.appendChild(box);
+  // v26.2: 開き直しでも本文のスクロール位置を保つ（listingsScrollTopと同じやり方）。
+  const body = box.querySelector('.overflow-y-auto');
+  body.scrollTop = notifsScrollTop;
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
-  box.querySelector('#notifs-close').addEventListener('click', dismiss(close));
+  box.querySelector('#notifs-close').addEventListener('click', () => { notifsScrollTop = 0; dismiss(close)(); });
   box.querySelector('#notifs-settings-toggle').addEventListener('click', () => {
-    notifSettingsOpen = !notifSettingsOpen; openNotificationsModal();
+    notifSettingsOpen = !notifSettingsOpen;
+    notifsScrollTop = body.scrollTop;
+    openNotificationsModal();
   });
   box.querySelector('#notifs-read-all')?.addEventListener('click', () => {
     state = L.markAllNotificationsRead(state).state;
+    notifsScrollTop = body.scrollTop;
     save(); renderPanelRight(); openNotificationsModal();
   });
   box.querySelectorAll('.notif-mode-btn').forEach(b => b.addEventListener('click', () => {
     state = L.setNotifMode(state, b.dataset.kind, b.dataset.mode).state;
+    notifsScrollTop = body.scrollTop;
     save(); openNotificationsModal();
   }));
   box.querySelectorAll('.notif-advice-toggle').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const id = Number(b.dataset.id);
     if (openAdviceIds.has(id)) openAdviceIds.delete(id); else openAdviceIds.add(id);
+    notifsScrollTop = body.scrollTop;
     openNotificationsModal();
   }));
   box.querySelectorAll('.notif-dismiss').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const id = Number(b.dataset.id);
     state = L.markNotificationRead(state, id).state;
+    notifsScrollTop = body.scrollTop;
     save(); renderPanelRight(); openNotificationsModal();
   }));
   box.querySelectorAll('.notif-row').forEach(rowEl => rowEl.addEventListener('click', () => {
