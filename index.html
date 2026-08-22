@@ -372,6 +372,34 @@
   html[data-theme="dark"] .border-white\/20   { border-color: rgba(226,232,240,0.20); }
   html[data-theme="dark"] .border-white\/25   { border-color: rgba(226,232,240,0.25); }
   html[data-theme="dark"] .border-white\/30   { border-color: rgba(226,232,240,0.30); }
+
+  /* ============================================================
+     v29: すべての range スライダーの両端に −／＋（微調整）ボタンを置く。
+     DOM側の組み立ては ui.mjs の enhanceRangeSteppers（MutationObserver）が行い、
+     ここは見た目だけを持つ。指で押せる44px角を確保し、スライダー本体は残りを埋める。
+     ※ input[type=range] には既存コードが軒並み .w-full（width:100%）を付けているので、
+       flex の中で正しく縮むよう width:auto を「クラス+要素」の詳細度(0-1-1)で上書きする。
+     ============================================================ */
+  .sld-row { display: flex; align-items: center; gap: 8px; }
+  .sld-row > input[type="range"] { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
+  .sld-btn {
+    flex: 0 0 auto; width: 44px; height: 44px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid #cbd5e1; border-radius: 10px;
+    background: #f1f5f9; color: #1e3a5f;
+    font-size: 22px; font-weight: 700; line-height: 1;
+    touch-action: manipulation; -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sld-btn:active            { background: #e2e8f0; }
+  .sld-btn:disabled          { opacity: 0.35; }
+  /* 地図上のHUD（?tune=1 の調整パネル）は幅240pxしかないので、そこだけ小さめにする */
+  .hud-panel .sld-btn {
+    width: 32px; height: 32px; font-size: 18px; border-radius: 8px;
+    border-color: #475569; background: rgba(51,65,85,0.55); color: #f1f5f9;
+  }
+  html[data-theme="dark"] .sld-btn        { border-color: #334155; background: #1e293b; color: #93c5fd; }
+  html[data-theme="dark"] .sld-btn:active { background: #334155; }
 </style>
 </head>
 <body class="bg-canvas text-ink overflow-hidden flex flex-col">
@@ -5266,10 +5294,19 @@ export const OVER_LOAN_LTV_MAX = 1.20;
 // という天井（§3-2）。既存の ltvMax（カバー率0.8未満の帯で使う銀行の基準値）とは役割が別なので
 // 両方を持つ。公庫は諸費用込み融資をしないため80%で据え置き、信金・地銀はフルローン(100%)まで、
 // ノンバンクだけオーバーローン可（天井なし＝Infinity）。
+// v28.3: 信金の areaLimit は 'local'（地方・郊外限定）から null（制限なし）に変更。
+// 信金法上の制約は「定款で定めた営業地区の内側だけ」であって、都市か地方かの別ではない
+// （城南信用金庫・西武信用金庫＝東京、大阪信用金庫、京都中央信用金庫など、地区が都心の
+// 信金は多数ある）。ゲームの areaKey は 'local'/'urban' の2値しかなく「地区」を表現できない
+// ため、都市/地方を信金の営業可否の代理指標にするのは実態と合わず誤り。
+// 棲み分け（信金らしさ）は areaLimit ではなく他の既存パラメータで保たれる。実測（都市部・
+// 訳あり2,000件）: areaLimit撤廃で信金の承認率は0%→12.3%になるが、地銀と重なるのは5.9%だけ。
+// 都市部物件の46.6%は価格8,000万超で信金の maxLoan に当たって落ち、逆に法定耐用年数切れの
+// 築古は地銀が lifeStrict:true で落として信金（lifeStrict:'soft'）だけが拾う。
 export const BANKS = {
   kouko:   { key:'kouko',   label:'日本政策金融公庫', baseRate:0.015, termMin:5, termMax:10, ltvMax:0.80, ltvCeiling:0.80,      maxLoan:48_000_000, minLoan:  300_000, minCredit:15, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'flat', guaranteeRate:0 },
   chigin:  { key:'chigin',  label:'地方銀行',         baseRate:0.018, termMin:10, termMax:30, ltvMax:0.80, ltvCeiling:1.00,      maxLoan:Infinity,   minLoan:3_000_000, minCredit:50, wakeOk:false, areaLimit:null,    lifeStrict:true,   minPrice:10_000_000, feeType:'rate', guaranteeRate:0.002 },
-  shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, ltvCeiling:1.00,      maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:'local', lifeStrict:'soft', minPrice:0, feeType:'rate', guaranteeRate:0.002 },
+  shinkin: { key:'shinkin', label:'信用金庫',         baseRate:0.023, termMin:10, termMax:25, ltvMax:0.80, ltvCeiling:1.00,      maxLoan:80_000_000, minLoan:  500_000, minCredit:35, wakeOk:false, areaLimit:null,    lifeStrict:'soft', minPrice:0, feeType:'rate', guaranteeRate:0.002 },
   nonbank: { key:'nonbank', label:'ノンバンク',       baseRate:0.040, termMin:10, termMax:25, ltvMax:0.90, ltvCeiling:OVER_LOAN_LTV_MAX, maxLoan:Infinity,   minLoan:  500_000, minCredit:25, wakeOk:true,  areaLimit:null,    lifeStrict:false,  minPrice:0, feeType:'rate', guaranteeRate:0 },
 };
 
@@ -5432,7 +5469,7 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
       + `${cr.down < DOWN_PAYMENT_BONUS_MAX ? '／頭金を厚くすると評価が上がります' : ''}`,
     plain: '総合評価が基準未満' });
   if (property.junkFlags.length > 0 && !b.wakeOk) reasons.push({ code: 'WAKEARI_NG', msg: '瑕疵・事故物件のため取扱不可' });
-  if (b.areaLimit && property.areaKey !== b.areaLimit) reasons.push({ code: 'AREA_NG', msg: `${b.label}の営業エリア外（地方・郊外のみ）` });
+  if (b.areaLimit && property.areaKey !== b.areaLimit) reasons.push({ code: 'AREA_NG', msg: `${b.label}の営業エリア外（${b.areaLimit === 'local' ? '地方・郊外のみ' : '都市部のみ'}）` });
   // v19: 公庫だけは maxLoan を「この物件の借入額」ではなく「名義ごとの既存公庫借入＋今回」で見る
   // （4,800万円は1事業者あたりの総枠のため）。他行は従来どおり単発の借入額で判定する。
   const koukoExisting = bankKey === 'kouko' ? koukoBalanceOf(state, owner) : 0;
@@ -5514,7 +5551,11 @@ export function reviewLoan(bankKey, property, price, downRatio, state, reformPla
   const requiredCash = financeClosingCost
     ? Math.round(price * downRatio)
     : Math.round(price * downRatio) + closingCostOf(property, price, loanAmount, state.month, bankKey);
-  if (state.cash < requiredCash) reasons.push({ code: 'NO_CASH', msg: `自己資金が足りない（必要 ${yen(requiredCash)} / 手元 ${yen(state.cash)}）` });
+  // v28.2: plain（表面に出す短い文）を追加。物件詳細の融資タブは「実額を出さない」方針
+  // （v26.3〜）なので、NO_CASHだけ plain が無いと、現金が足りないときにこの画面へ必要額が
+  // 復活してしまう。詳細（msg）側には実額を残すので、支払い方法画面の情報量は変わらない。
+  if (state.cash < requiredCash) reasons.push({ code: 'NO_CASH', msg: `自己資金が足りない（必要 ${yen(requiredCash)} / 手元 ${yen(state.cash)}）`,
+    plain: '自己資金が足りない' });
 
   const approved = reasons.length === 0;
   // v8.21: LTV・DSCRは否決理由に埋めるだけでなく、常に見える指標として単独でも返す
@@ -6294,6 +6335,10 @@ const activePtrs = new Map();
 let pinchDist = 0, pinching = false;
 let rafId = 0, lastFrame = 0;
 let pingItem = null;  // 一覧「地図を見る」からのピン（クリックまで維持）
+// 📍ピンの見た目の寸法。吹き出しをピンの真上へ置く pinAnchorPos() と共有するので、
+// 描画側だけ数値を変えると吹き出しがずれる。必ずここを直す。
+const PIN_LIFT = 26, PIN_FONT = 28, PIN_BOUNCE = 9;
+const PIN_HEAD_TOP = PIN_LIFT + PIN_FONT + PIN_BOUNCE;   // 跳ね上がった瞬間のピンの頭（pr.y からの高さ）
 let viewAnim = null;  // v5: 翌月ボタンでゆっくり初期位置へ戻す回転アニメ
 
 // v9-A: 世界は4つの陸地でできている（本土・開発区・民泊区・海外の島）。
@@ -7935,11 +7980,11 @@ function draw(ts) {
       ctx.beginPath(); ctx.arc(pr.x, pr.y - 8, 14 + t * 34, 0, TAU); ctx.stroke();
       ctx.strokeStyle = `rgba(250,204,21,${0.6 * (1 - ((t + 0.5) % 1))})`;
       ctx.beginPath(); ctx.arc(pr.x, pr.y - 8, 14 + ((t + 0.5) % 1) * 34, 0, TAU); ctx.stroke();
-      const bounce = Math.abs(Math.sin(now / 220)) * 9;
+      const bounce = Math.abs(Math.sin(now / 220)) * PIN_BOUNCE;
       ctx.fillStyle = '#ef4444';
-      ctx.font = `28px ${EMOJI_FONT}`;
+      ctx.font = `${PIN_FONT}px ${EMOJI_FONT}`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      ctx.fillText('📍', pr.x, pr.y - 26 - bounce);
+      ctx.fillText('📍', pr.x, pr.y - PIN_LIFT - bounce);
       ctx.restore();
     } else {
       pingItem.sx = null; pingItem.sy = null;   // 裏面に回ったらクリック不可
@@ -8020,6 +8065,16 @@ function resize() {
   canvas.height = canvas.clientHeight * dpr;
 }
 
+// 最初のフレームがまだ描かれていないと cx/cy/R は 0 のまま（バックグラウンド起動、
+// rAFが止まっているタブなど）。そのまま project() を使うと座標が全て左上に潰れるので、
+// 投影に依存する処理はこれを先に呼ぶ。式は draw() と同じ。
+function ensureProjection() {
+  if (R || !canvas || !canvas.clientWidth) return;
+  resize();
+  const w = canvas.width / dpr, h = canvas.height / dpr;
+  cx = w / 2; cy = h * 0.52; R = Math.min(w, h) * 0.44 * zoom;
+}
+
 function initCity(cv, callbacks) {
   canvas = cv; cbs = callbacks || {};
   ctx = canvas.getContext('2d');
@@ -8056,13 +8111,7 @@ function initCity(cv, callbacks) {
     canvas.style.cursor = 'grabbing';
   });
   canvas.addEventListener('pointermove', e => {
-    // バックグラウンド起動等で最初のフレームがまだ描かれていない場合の保険
-    // （R=0のままだと当たり判定が全て左上に潰れる）。draw()と同じ式で投影パラメータを確定させる。
-    if (!R && canvas.clientWidth) {
-      resize();
-      const w = canvas.width / dpr, h = canvas.height / dpr;
-      cx = w / 2; cy = h * 0.52; R = Math.min(w, h) * 0.44 * zoom;
-    }
+    ensureProjection();   // 最初のフレーム前でも当たり判定が効くように
     if (activePtrs.has(e.pointerId)) activePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
     // v3.4: ピンチ中は2点間距離の変化でズーム
     if (pinching && activePtrs.size >= 2) {
@@ -8176,6 +8225,17 @@ function focusOnMarket(propertyId) {
   pingItem = { lat: it.lat, lon: it.lon, id: propertyId, kind: 'market', sx: null, sy: null };
 }
 
+// 「📍地図を見る」の吹き出しをピンのすぐ上に置くための座標（ビューポート基準）。
+// x はピンの中心、y は跳ねる📍の頭のてっぺん。ピンが無い／地球の裏側に回っているときは null。
+function pinAnchorPos() {
+  if (!canvas || !pingItem) return null;
+  ensureProjection();   // 一度も描画されていない状態で押されると座標が画面左上に潰れる
+  const pr = project(pingItem.lat, pingItem.lon);
+  if (!(pr.z > 0.02)) return null;
+  const rect = canvas.getBoundingClientRect();
+  return { x: rect.left + pr.x, y: rect.top + pr.y - PIN_HEAD_TOP };
+}
+
 // v9-A: エリアピル／🔒タップから呼ぶ。その陸地が正面に来るようゆっくり回す。
 // 島（海外）は距離が遠いので少し長めに回す。
 function focusOnRegion(regionKey, dur) {
@@ -8222,10 +8282,74 @@ function cityBuildingScreenPositions() {
 
   // ==== inlined from src/ui.mjs（import行のみ除去）====
 // src/ui.mjs
+
 const SAVE_KEY = 'leverage_master_save_v2';
 let state = null;
 
 function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
+
+// ===== v29: すべての range スライダーの両端に −／＋（微調整）ボタンを付ける =====
+// スライダーは初期設定ウィザード・指値・頭金・売出価格など複数のモーダルで個別に組み立てられ、
+// しかも draw() でモーダルごと何度も作り直される。生成箇所を1つずつ書き換える方式は
+// 付け忘れ・再描画での消失が起きやすいので「DOMに現れた range を見つけたら包む」1か所に集約する。
+// ボタンは値を1ステップ動かしたあと input と change を両方 dispatch するので、
+// 既存のリスナー（頭金スライダーは change で draw() まで走る）は書き換えなしでそのまま効く。
+function rangeStepOf(input) {
+  const s = Number(input.step);            // step 未指定なら '' → 0、step="any" なら NaN
+  return Number.isFinite(s) && s > 0 ? s : 1;
+}
+
+function nudgeRange(input, dir) {
+  if (input.disabled) return;
+  const step = rangeStepOf(input);
+  const min = input.min === '' ? -Infinity : Number(input.min);
+  const max = input.max === '' ? Infinity : Number(input.max);
+  const base = Number.isFinite(min) ? min : 0;
+  const cur = Number(input.value);
+  // step は min を基準に刻まれる。プリセットボタン等で刻みから外れた値が入っていても、
+  // いったん最寄りの刻みへ揃えてから1段動かす。
+  let next = base + Math.round((cur - base) / step) * step + dir * step;
+  // 0.05 刻み等で出る浮動小数の誤差（0.35000000000000003）を step の小数桁で丸める
+  next = Number(next.toFixed((String(step).split('.')[1] || '').length));
+  if (next < min) next = min;
+  if (next > max) next = max;
+  if (next === cur) return;                // 端に達している。イベントも出さない
+  input.value = String(next);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function wrapRangeWithSteppers(input) {
+  if (input.dataset.stepper === '1' || !input.parentNode) return;
+  input.dataset.stepper = '1';             // ← 包む前に立てる（自分の DOM 操作で再入しないため）
+  const row = document.createElement('div');
+  row.className = 'sld-row';
+  input.parentNode.insertBefore(row, input);
+  const mkBtn = (dir, label, aria) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'sld-btn';
+    b.textContent = label;
+    b.setAttribute('aria-label', aria);
+    b.disabled = input.disabled;           // 指値モーダルは売主次第でスライダーごと無効になる
+    b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); nudgeRange(input, dir); });
+    return b;
+  };
+  row.appendChild(mkBtn(-1, '−', '少し減らす'));
+  row.appendChild(input);
+  row.appendChild(mkBtn(1, '+', '少し増やす'));
+}
+
+function enhanceRangeSteppers(root) {
+  if (!root || root.nodeType !== 1) return;
+  if (root.matches('input[type="range"]')) wrapRangeWithSteppers(root);
+  root.querySelectorAll('input[type="range"]').forEach(wrapRangeWithSteppers);
+}
+
+enhanceRangeSteppers(document.body);
+new MutationObserver(recs => recs.forEach(r => r.addedNodes.forEach(enhanceRangeSteppers)))
+  .observe(document.body, { childList: true, subtree: true });
+
 
 // ===== v15: モーダル遷移履歴（スワイプで戻る／進む） =====
 // このゲームは地図の上にモーダルを重ねて画面遷移する構成で、履歴は各モーダルが手渡しする
@@ -10720,7 +10844,7 @@ function openDetail(propId, from, back, opts = {}) {
       if (navStack.length > 1) navBack(); else { close(); back(); }
     });
     box.querySelectorAll('.dt-tab').forEach(b => b.addEventListener('click', () => { active = Number(b.dataset.i); draw(); }));
-    box.querySelector('.dt-map-jump')?.addEventListener('click', () => { close(); jumpToMapWithBubble(p, from); });
+    box.querySelector('.dt-map-jump')?.addEventListener('click', () => { close(); jumpToMapWithBubble(p.id, from); });
     const body = box.querySelector('#dt-body');
     // v8.9: 折りたたみの開閉はタブを跨がない再描画なので、スクロール位置を保って
     // 押した場所のまま展開させる（保存しないとdraw()の再構築で先頭に戻ってしまう）。
@@ -11146,15 +11270,6 @@ function purchaseSignalLine(p) {
   const cls = sig.level === 'green' ? 'bg-emerald-50 text-emerald-700'
     : sig.level === 'yellow' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700';
   return `<div class="flex items-center gap-1.5 text-xs p-2 rounded-lg ${cls}"><span>${sig.icon}</span><span class="font-bold">${sig.label}</span></div>`;
-}
-
-function minCashLine(p) {
-  const r = L.minRequiredCash(p, state);
-  const ok = state.cash >= r.cash;
-  return `<div class="flex items-center justify-between text-xs p-2 rounded-lg ${ok ? 'bg-emerald-50' : 'bg-slate-50'}">
-    <span>最低${term('own_cash', '自己資金')}<span class="text-slate-500">（${r.financed ? r.label : '融資不可・現金のみ'}）</span></span>
-    <b class="${ok ? 'text-emerald-700' : 'text-red-600'}">${L.yen(r.cash)}${ok ? '' : ' <span class="font-normal">…資金不足</span>'}</b>
-  </div>`;
 }
 
 // v8.1: 保有期間と譲渡税。ここが見えていないと「いつ売るか」が運任せになる。
@@ -11956,14 +12071,16 @@ function openLoanSchedule(propId, back) {
 // v8.9: 融資タブは所有物件では表示しなくなったため、市場物件（未購入・ローン無し）専用に単純化した。
 function financeTab(p) {
   const rs = L.reviewAllBanks(p, p.price, 0.2, state);
-  return minCashLine(p)
-    // v26.3: 見出しの「（LTV80%）」は「頭金2割」と同じことを専門用語で言い直しているだけなので外した
-    // （このタブから指標を消すというユーザー指示（2026-08-22）に揃える）。
-    + `<div class="text-xs text-slate-500 mt-2 mb-1">${term('own_cash', '頭金')}2割とした場合の事前審査見込み:</div>`
+  // v28.2: 最低自己資金の実額（minCashLine）はこのタブに出さない（ユーザー指示 2026-08-23）。
+  // 「このタブから数値を消す」というv26.3の方針の続きで、実額は支払い方法画面だけの役目にする。
+  // 市場一覧側は purchaseSignalLine（信号だけ）で足りているため、ここに実額の受け皿は要らない。
+  // v26.3: 見出しの「（LTV80%）」は「頭金2割」と同じことを専門用語で言い直しているだけなので外した
+  // （このタブから指標を消すというユーザー指示（2026-08-22）に揃える）。
+  return `<div class="text-xs text-slate-500 mt-2 mb-1">${term('own_cash', '頭金')}2割とした場合の事前審査見込み:</div>`
     + bankReviewList(rs)
     + `<div class="mt-2">
       ${collapseHeader('ft-toggle-tip', false, '💡 銀行の使い分け', '')}
-      <div id="ft-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">上から融資の通りやすい順に並んでいる。ノンバンクは金利が高い代わりに信用度・LTVとも間口が広く最も通りやすい。日本政策金融公庫は低金利で信用度15から借りられ、築年数も見ない代わりに、期間は最長20年・上限4,800万円と大きくは出ない（少額・築古に強い）。信用金庫は地方エリア限定・訳あり不可、地方銀行は必要な信用度が最も高く1,000万円未満は取扱不可と、下にいくほど条件が厳しくなる。<br>なお融資額には下限があり、「その銀行の下限額」と「物件価格＋リフォーム費の20%」の高い方を下回ると取り扱ってもらえない（頭金を入れすぎると借入が小さくなりすぎて逆に断られる）。</div>
+      <div id="ft-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">上から融資の通りやすい順に並んでいる。ノンバンクは金利が高い代わりに信用度・LTVとも間口が広く最も通りやすい。日本政策金融公庫は低金利で信用度15から借りられ、築年数も見ない代わりに、期間は最長10年・上限4,800万円と大きくは出ない（少額・築古に強い）。信用金庫は訳あり不可・上限8,000万円と大きくは出ない代わりに、法定耐用年数が切れた築古でも状態を見て期間を伸ばすことがある。地方銀行は必要な信用度が最も高く、1,000万円未満と法定耐用年数切れは取扱不可と、下にいくほど条件が厳しくなる。<br>なお融資額には下限があり、「その銀行の下限額」と「物件価格＋リフォーム費の20%」の高い方を下回ると取り扱ってもらえない（頭金を入れすぎると借入が小さくなりすぎて逆に断られる）。</div>
     </div>`;
 }
 
@@ -12373,10 +12490,19 @@ function purchaseCostBox(p, price, loanAmount, title, id, open) {
 // v8.6までは「属性・信用度が基準未満」としか出ず、現金を積んでも変わらないので
 // 打つ手が分からなかった。頭金を厚くすれば評価が上がることを、その場で見せる。
 // v8.8: こちらもプルダウン開閉式（タイトル行の点数は常に見える）。
+// v28.3: 「必要な評価」の行に出す銀行名は、L.BANKS の label（例:「日本政策金融公庫」）だと
+// 1行に収まらないため、この表示専用の短縮名を使う。BANKS.minCredit が変わっても
+// この対応表は key ベースなので値がズレる心配はない（値そのものはL.BANKSから毎回生成する）。
+const CREDIT_BOX_BANK_SHORT_LABEL = { kouko: '公庫', chigin: '地銀', shinkin: '信金', nonbank: 'ノンバンク' };
 function creditSummaryBox(downRatio, open) {
   const cr = L.creditForReview(state, downRatio);
   const need = Object.values(L.BANKS).map(b => b.minCredit).sort((a, b) => a - b);
   const passes = need.filter(n => cr.total >= n).length;
+  const needLabel = Object.values(L.BANKS)
+    .slice()
+    .sort((a, b) => a.minCredit - b.minCredit)
+    .map(b => `${CREDIT_BOX_BANK_SHORT_LABEL[b.key] || b.label}${b.minCredit}`)
+    .join('／');
   return `<div class="rounded-lg bg-slate-50 p-1.5 text-[11px]">
     <button type="button" data-toggle="credit" class="w-full flex justify-between font-bold text-left">
       <span>${open ? '▲' : '▶'} 🏦 銀行から見たあなたの評価</span>
@@ -12389,7 +12515,7 @@ function creditSummaryBox(downRatio, open) {
     ${cr.down < L.DOWN_PAYMENT_BONUS_MAX
       ? '<div class="text-navy mt-0.5">💡 頭金を厚くすると評価が上がり、通る銀行が増えます（80%で上限）</div>'
       : '<div class="text-emerald-700 mt-0.5">✅ 自己資金の評価は上限に達しています</div>'}
-    <div class="text-[10px] text-slate-500 mt-0.5">必要な評価: 公庫20／ノンバンク25／信金35／地銀50</div>
+    <div class="text-[10px] text-slate-500 mt-0.5">必要な評価: ${needLabel}</div>
     </div>
   </div>`;
 }
@@ -13304,15 +13430,23 @@ function renderBuildingSVG(p, sizeClass = 'w-16 h-16') {
 
 // v3.2: 概要の「地図で場所を見る」。詳細を閉じて地図の該当地点へ飛び、
 // 「タップすると詳細に戻れる」ことを吹き出しで数秒示す（市場物件はピンも立つ）。
-function jumpToMapWithBubble(p, from) {
-  if (from === 'owned') focusOnOwned(p.id, true); else focusOnMarket(p.id);
+// v28.1: 物件情報一覧の「📍 地図を見る」からも呼ぶ（従来は一覧側だけ吹き出しが出なかった）。
+//   ・一覧から来たときは詳細へ「戻る」のではなく「開く」ので、文言を出し分ける。
+//   ・吹き出しは画面の高さ30%固定をやめ、ピンの頭のすぐ上に出す（従来は100px以上離れていた）。
+function jumpToMapWithBubble(propId, from, backToDetail = true) {
+  if (from === 'owned') focusOnOwned(propId, true); else focusOnMarket(propId);
   const canvas = document.getElementById('city-canvas');
   const r = canvas ? canvas.getBoundingClientRect() : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
-  const bubble = el(`<div class="fixed z-[55] pointer-events-none" style="left:${Math.round(r.left + r.width / 2)}px; top:${Math.round(r.top + r.height * 0.30)}px; transform:translate(-50%,-100%); transition: opacity 0.5s;">
-    <div class="bg-white rounded-xl shadow-xl px-4 py-2 text-sm font-bold text-navy">📍 ここ！ ピンや建物をタップ（クリック）すると詳細に戻れます</div>
+  // ピンの座標が取れないとき（物件が見つからない・地球の裏側）だけ従来の位置へ逃がす。
+  const at = pinAnchorPos() || { x: r.left + r.width / 2, y: r.top + r.height * 0.30 };
+  const bubble = el(`<div class="fixed z-[55] pointer-events-none" style="left:${Math.round(at.x)}px; top:${Math.round(at.y)}px; transform:translate(-50%,-100%); transition: opacity 0.5s;">
+    <div class="bg-white rounded-xl shadow-xl px-4 py-2 text-sm font-bold text-navy">📍 ここ！ ピンや建物をタップ（クリック）すると詳細${backToDetail ? 'に戻れます' : 'を開けます'}</div>
     <div style="width:0;height:0;border-left:10px solid transparent;border-right:10px solid transparent;border-top:12px solid #fff;margin:0 auto;filter:drop-shadow(0 2px 2px rgba(0,0,0,0.15));"></div>
   </div>`);
   document.body.appendChild(bubble);
+  // ピンが画面の上のほうにあると吹き出しが画面外へはみ出すので、実測して押し下げる。
+  const bb = bubble.getBoundingClientRect();
+  if (bb.top < 8) bubble.style.top = Math.round(at.y + (8 - bb.top)) + 'px';
   setTimeout(() => { bubble.style.opacity = '0'; }, 3800);
   setTimeout(() => bubble.remove(), 4400);
 }
@@ -14405,7 +14539,8 @@ function openListingsModal() {
     close(); openDetail(parsePropId(b.dataset.id), 'market', () => openListingsModal());
   }));
   box.querySelectorAll('.listing-locate').forEach(b => b.addEventListener('click', () => {
-    focusOnMarket(parsePropId(b.dataset.id)); close();
+    listingsScrollTop = body.scrollTop;
+    close(); jumpToMapWithBubble(parsePropId(b.dataset.id), 'market', false);
   }));
   box.querySelectorAll('.listing-buy').forEach(b => b.addEventListener('click', () => {
     listingsScrollTop = body.scrollTop;
