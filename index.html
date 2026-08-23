@@ -8703,8 +8703,8 @@ function openBgmModal() {
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   const rows = Object.keys(BGM_MOODS).map(k =>
     `<button class="bgm-pick w-full border rounded py-2 text-sm ${bgmMood === k && !muted ? 'bg-navy text-white' : ''}" data-mood="${k}">${BGM_MOODS[k].label}</button>`).join('');
-  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-xs space-y-2">
-    <div class="flex justify-between items-center"><h2 class="font-bold">🎵 BGMの気分</h2><button id="bgm-close" class="text-slate-400 text-xl">✕</button></div>
+  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-xs space-y-2 max-h-[85vh] overflow-y-auto" style="max-height:85dvh">
+    <div class="flex justify-between items-center"><h2 class="font-bold">🎵 BGMの気分</h2><button id="bgm-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     ${rows}
     <button id="bgm-off" class="w-full border rounded py-2 text-sm ${muted ? 'bg-slate-200' : ''}">🔇 BGMを止める</button>
     <div class="text-[11px] text-slate-400">気分に合わせて選べます。いつでも変更できます。</div></div>`);
@@ -9061,12 +9061,12 @@ function openAchievementsModal() {
     </div>`;
   }).join('');
   const overlay = el(`<div id="lm-achievements-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header" style="align-items:safe center;">
-    <div class="bg-white rounded-xl w-full max-w-md max-h-[80vh] flex flex-col" style="max-height:80dvh">
-      <div class="p-5 border-b shrink-0 flex justify-between items-center">
-        <h2 class="font-bold text-lg">🏆 通算実績（${unlockedCount} / ${ids.length} 解除）</h2>
-        <button id="ach-close" class="text-slate-400 text-xl leading-none">✕</button>
+    <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center">
+        <h2 class="font-bold">🏆 通算実績（${unlockedCount} / ${ids.length} 解除）</h2>
+        <button id="ach-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
       </div>
-      <div class="p-5 overflow-y-auto min-h-0 flex-1">
+      <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
         <svg width="0" height="0" style="position:absolute"><defs>${grads}</defs></svg>
         <div class="grid grid-cols-3 gap-3">${cells}</div>
       </div>
@@ -9084,10 +9084,10 @@ function openSettingsModal() {
   const curTheme = window.RentopiaTheme?.get() ?? 'auto';
   const themeBtn = (theme, label) => `<button class="theme-pick border rounded py-2 text-xs font-bold${curTheme === theme ? ' bg-navy text-white' : ''}" data-theme="${theme}">${label}</button>`;
   const overlay = el(`<div id="lm-settings-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header">
-    <div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col" style="max-height:85dvh">
+    <div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
       <div class="p-4 pb-2 border-b shrink-0">
         <div class="flex justify-between items-center gap-2">
-          <h2 class="font-bold text-lg">⚙️ 設定</h2>
+          <h2 class="font-bold">⚙️ 設定</h2>
           <button id="ttlset-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
         </div>
       </div>
@@ -10164,8 +10164,8 @@ function openKpiModal(which, keepBulk = false) {
       <div class="text-[11px] text-slate-500 mb-1">信用度が高いほど審査に通りやすく、取引実績（完済）が増えると金利優遇を受けやすくなります。実際の審査では、これに資産背景の加点と危険物件の減点を加味した実効値（上記）が使われます（物件融資・リフォームローン共通）。</div>
       <table class="w-full text-sm">${bankRows}</table>`;
   }
-  const boxEl = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col modal-card" style="max-height:75dvh">
-    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">${title}</h2><button id="kpi-close" class="text-slate-400 text-xl">✕</button></div>
+  const boxEl = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">${title}</h2><button id="kpi-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">${body}</div></div>`);
   m.appendChild(boxEl);
   // v15: 一覧を作り直しても本文のスクロール位置を保つ（詳細画面から戻ったとき等）。
@@ -10252,15 +10252,15 @@ function openSoldRecordsModal(back) {
   navGo({ key: 'sold', open: () => openSoldRecordsModal(back) });   // v15: 履歴に登録
   const recs = state.soldRecords || [];
   const overlay = el(`<div id="lm-sold-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header" style="align-items:safe center;">
-    <div class="bg-white rounded-xl w-full max-w-md max-h-[80vh] flex flex-col modal-card" style="max-height:80dvh">
-      <div class="p-4 border-b shrink-0 flex justify-between items-center gap-2">
+    <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center gap-2">
         <div class="flex items-center gap-2 min-w-0">
           <button id="sold-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
           <h2 class="font-bold text-base truncate">📜 売却した物件の記録（${recs.length}件）</h2>
         </div>
         <button id="sold-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
       </div>
-      <div id="sold-body" class="p-4 overflow-y-auto min-h-0 flex-1"></div>
+      <div id="sold-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2"></div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
@@ -10751,7 +10751,7 @@ function openMoneyHub(initialTab = 'month') {
   navGo({ key: 'money', open: () => openMoneyHub(activeTab) });   // v18: 履歴に登録
   const overlay = el(`<div id="lm-money-modal" class="fixed inset-0 bg-black/60 z-[35] flex items-center justify-center p-4 modal-below-header" style="align-items:safe center;">
     <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-      <div class="p-3 border-b shrink-0">
+      <div class="p-4 pb-2 border-b shrink-0">
         <div class="flex justify-between items-center gap-2">
           <div class="flex items-center gap-2 min-w-0">
             <button id="money-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
@@ -10761,7 +10761,7 @@ function openMoneyHub(initialTab = 'month') {
         </div>
       </div>
       <div id="money-tabs" class="flex gap-1 px-3 pt-2 bg-slate-100 text-xs shrink-0 overflow-x-auto"></div>
-      <div id="money-body" class="p-4 overflow-y-auto min-h-0 flex-1"></div>
+      <div id="money-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2"></div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
@@ -10975,12 +10975,12 @@ function openDetail(propId, from, back, opts = {}) {
     // その下にもう1行、保有期間（所有）／📍地図を見る を横並びで足す。
     const held = from === 'owned' ? L.heldMonthsOf(state, p) : null;
     const box = el(`<div class="bg-white rounded-xl w-full max-w-lg max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-      <div class="p-2.5 border-b shrink-0">
+      <div class="p-4 pb-2 border-b shrink-0">
         <div class="flex justify-between items-center mb-0.5">
           ${back ? '<button id="dt-back" class="text-xs text-navy">← 戻る</button>' : '<span></span>'}
           <div class="flex items-center gap-3">
             ${from === 'market' ? `<button id="dt-fav" class="text-2xl leading-none text-amber-500" title="お気に入り">${(state.favorites || []).some(f => f.propertyId === p.id) ? '★' : '☆'}</button>` : ''}
-            <button id="dt-close" class="text-slate-400 text-xl leading-none">✕</button>
+            <button id="dt-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
           </div></div>
         <div class="flex items-center gap-2.5">${renderBuildingSVG(p, 'w-16 h-16')}
           <div class="min-w-0 flex-1"><div class="font-bold truncate">${p.name || p.label} ${from === 'owned' ? `<span class="text-[11px] align-middle ${p.owner === 'corp' ? 'bg-navy text-white' : 'bg-slate-200 text-slate-700'} rounded px-1.5 py-0.5">${p.owner === 'corp' ? '🏢法人' : '👤個人'}</span>` : ''}${from === 'owned' && L.isUnderwater(p) ? '<span class="text-[11px] align-middle bg-red-500 text-white rounded px-1.5 py-0.5 ml-1">担保割れ</span>' : ''}</div><div class="text-[11px] text-slate-500">${p.label}${readOnly ? '<span class="ml-1.5 text-amber-700 font-bold">・売却の検討中｜閲覧のみ</span>' : ''}</div></div></div>
@@ -11229,16 +11229,16 @@ function openGlossaryModal() {
     return `<div class="mb-3"><h3 class="font-bold text-xs text-navy bg-slate-100 rounded px-2 py-1 mb-1">${g}</h3>${rows}</div>`;
   };
   const box = el(`<div class="bg-white rounded-xl w-full max-w-lg max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-    <div class="p-3 border-b shrink-0 flex justify-between items-center">
+    <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center">
       <h2 class="font-bold">📖 用語集（${Object.keys(L.TERMS).length}語）</h2>
-      <button id="gl-close" class="text-slate-400 text-xl leading-none">✕</button></div>
+      <button id="gl-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div id="gl-terms-row" class="px-3 pt-2 shrink-0"></div>
     <div class="px-3 pt-2 shrink-0">
       <div class="flex justify-between text-[11px] font-bold text-navy"><span>📚 習得の進み</span><span>${learned.size} / ${Object.keys(L.TERMS).length}</span></div>
       <div class="w-full bg-slate-200 rounded-full h-2 mt-1 overflow-hidden"><div class="bg-navy h-2" style="width:${Math.round(learned.size / Object.keys(L.TERMS).length * 100)}%"></div></div>
       <div class="text-[10px] text-slate-500 mt-1">勉強会・大家の会の📚用語クイズで正解すると習得済みになります。</div>
     </div>
-    <div class="p-3 overflow-y-auto min-h-0 flex-1">
+    <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">
       <div class="text-[11px] text-slate-500 mb-2">ゲーム中は、点線の下線が引かれた用語を押すと同じ説明が吹き出しで出ます。</div>
       ${L.TERM_GROUPS.map(section).join('')}</div></div>`);
   m.appendChild(box);
@@ -11305,7 +11305,7 @@ function wakeAriRowHtml(p) {
       return `<span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-emerald-50 border border-emerald-200">
         <span class="text-emerald-600 font-bold text-xs leading-none">✓</span>
         <span class="text-[11px] font-semibold text-slate-500 line-through decoration-slate-400">${f}</span>
-        <span class="text-[10px] font-bold text-red-700 border border-red-600 rounded px-1.5 py-0.5 leading-none">改善済み</span>
+        <span class="text-[10px] font-bold text-red-600 border border-red-600 rounded px-1.5 py-0.5 leading-none">改善済み</span>
       </span>`;
     }
     return `<span class="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-red-50 text-red-700">⚠ ${f}</span>`;
@@ -11914,7 +11914,7 @@ function rentRollTab(p, from, readOnly = false) {
 const FILL_TIERS = [
   { min: 0.68, stars: 5, label: 'すぐ決まりそう',     cls: 'text-emerald-600' },
   { min: 0.50, stars: 4, label: 'かなり決まりやすい', cls: 'text-emerald-600' },
-  { min: 0.34, stars: 3, label: '決まりやすい',       cls: 'text-emerald-700' },
+  { min: 0.34, stars: 3, label: '決まりやすい',       cls: 'text-emerald-600' },
   { min: 0.20, stars: 2, label: 'ふつう',             cls: 'text-amber-600' },
   { min: 0,    stars: 1, label: '決まりにくい',       cls: 'text-red-600' },
 ];
@@ -11963,7 +11963,7 @@ function appealBox(p, u) {
       <div class="font-bold text-slate-700">💡 ADを買う代わりに、こうも上げられます</div>
       ${advice.map(a => `<div class="text-slate-600">${a.text}</div>`).join('')}
       <div class="text-[10px] text-slate-500">ADは払ったら消えますが、修繕・${term('value_up', '価値UP')}は家賃と資産価値になって残ります。</div>
-    </div>` : '<div class="pt-1 mt-1 border-t border-slate-200 text-emerald-700 font-bold">✨ 直せるところは直し切っています。ADに頼らなくても決まるはずです。</div>'}
+    </div>` : '<div class="pt-1 mt-1 border-t border-slate-200 text-emerald-600 font-bold">✨ 直せるところは直し切っています。ADに頼らなくても決まるはずです。</div>'}
   </div>`;
 }
 
@@ -12000,9 +12000,9 @@ function openRecruitPicker(p, unitIndex, onAd, onSelf) {
   }).join('');
 
   const box = el(`<div class="bg-white rounded-xl w-full max-w-sm max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-    <div class="p-4 border-b shrink-0 flex justify-between items-center">
+    <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center">
       <h2 class="font-bold">📣 ${unitIndex + 1}号室の入居者を募集</h2>
-      <button id="rc-x" class="text-slate-400 text-xl leading-none">✕</button></div>
+      <button id="rc-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
     <div class="text-xs text-slate-600">家賃 ${L.yen(u.rent)}・空室${u.vacantMonths}ヶ月。
       いまの決まりやすさは ${fillTierText(base)} です。${u.ad ? `<span class="text-emerald-700 font-bold">（${term('ad', 'AD')}${u.ad.months}ヶ月分 掲出中）</span>` : ''}</div>
@@ -12187,7 +12187,7 @@ function openLoanSchedule(propId, back) {
   let active = 0;
   const overlay = el(`<div id="lm-loansched-modal" class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" style="align-items:safe center;">
     <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-      <div class="p-3 border-b shrink-0">
+      <div class="p-4 pb-2 border-b shrink-0">
         <div class="flex justify-between items-center gap-2">
           <div class="flex items-center gap-2 min-w-0">
             <button id="ls-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
@@ -12198,7 +12198,7 @@ function openLoanSchedule(propId, back) {
         <div class="text-[11px] text-slate-500 truncate mt-0.5">${p.name || p.label}</div>
       </div>
       <div id="ls-tabs" class="flex gap-1 px-3 pt-2 bg-slate-100 text-xs shrink-0 overflow-x-auto"></div>
-      <div id="ls-body" class="p-3 overflow-y-auto min-h-0 flex-1"></div>
+      <div id="ls-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2"></div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
@@ -12336,7 +12336,7 @@ function openPurchase(propId, back) {
   // 同じ形のバーをカードの内側に置く。中身は div なので入れ子のボタンにはならず、押すと外側の
   // #of-full のクリックがそのまま走る＝ハンドラもチュートリアルの対象(selector: #of-full)も変更不要。
   const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-    <div class="p-3 border-b shrink-0">
+    <div class="p-4 pb-2 border-b shrink-0">
       <div class="flex justify-between items-center mb-1">
         ${back ? '<button id="of-back" class="text-xs text-navy font-bold">← 戻る</button>' : '<span></span>'}
         <button id="of-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
@@ -12482,7 +12482,7 @@ function showCounterProposal(cp) {
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
   const close = () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; };
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
       <div class="flex justify-between items-center gap-2"><h2 class="font-bold">🙋 不動産会社からの逆提案</h2><button id="cp-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     </div>
@@ -12890,8 +12890,18 @@ function showPayment(propId, price, close) {
     // 画面内に残す。高さもmax-h-[85vh]→94vhに広げ、そもそものスクロール量自体を減らす。
     // さらに「4行同時審査」の一覧が初見で全部見えることを優先し、各行・各ボックスの余白を
     // 詰めて375×667のような低い画面高でも4行が最初のスクロール位置で収まるようにしている。
-    const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[94vh] flex flex-col" style="max-height:94dvh">
-      <div class="p-4 pb-1.5 shrink-0 flex justify-between items-center gap-2"><h2 class="font-bold" style="font-size:clamp(0.7rem,4vw,0.9rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto">支払い方法（成約価格 ${L.yen(price)}）</h2><button id="pay-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
+    // v30.3: 他のモーダルを 85vh・p-4・space-y-2 へ統一したときも、この画面だけは
+    // 94vh・px-4・space-y-1.5 を残す（意図的な例外）。実測で 375×667 のとき、85vh＋p-4＋
+    // space-y-2 にすると本文の見える高さが 536→454px に減り、銀行1行目の上端(510px)が
+    // 初期表示から外れる。ヘッダーだけは他と揃えて border-b を足し、インラインの
+    // font-size:clamp() をやめて 16px の見出し＋小さいグレーの補足（成約価格）にした。
+    // ヘッダーを2段にすると 22px 食って法人名義（名義の行が1つ増える）で銀行が初期表示から
+    // 外れるため、ここは1段のまま。
+    const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[94vh] flex flex-col modal-card" style="max-height:94dvh">
+      <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center gap-2">
+        <h2 class="font-bold truncate min-w-0 flex-1">支払い方法 <span class="text-[11px] font-normal text-slate-500">成約価格 ${L.yen(price)}</span></h2>
+        <button id="pay-x" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
+      </div>
       <div class="px-4 pb-1.5 space-y-1.5 overflow-y-auto flex-1 min-h-0">
       <div class="flex justify-center">${sellerTypeBadge(p)}</div>
       ${state.isIncorporated ? `<div class="flex gap-2 text-sm items-center"><span class="font-bold shrink-0">名義:</span>
@@ -12906,8 +12916,8 @@ function showPayment(propId, price, close) {
         <div class="text-sm font-bold text-navy">🏦 融資（4行同時審査）</div>
         <div id="pay-credit">${creditSummaryBox(downRatio, openCredit)}</div>
         ${sekisanCoverNote(p, price)}
-        <div class="rounded-lg bg-white border-2 border-navy p-2 text-center">
-          <div class="text-base font-bold">${term('own_cash', '頭金')} <span id="pay-down-pct">${Math.round(downRatio * 100)}%</span>＝<span id="pay-down-amt">${L.yen(Math.round(price * downRatio))}</span></div>
+        <div class="rounded-lg bg-white border-2 border-navy p-1.5 text-center">
+          <div><span class="text-xs font-normal text-slate-500 align-middle">${term('own_cash', '頭金')} <span id="pay-down-pct">${Math.round(downRatio * 100)}%</span>＝</span> <span id="pay-down-amt" class="text-2xl font-black text-navy">${L.yen(Math.round(price * downRatio))}</span></div>
           <div class="text-[11px] text-slate-600 mt-0.5"><span id="pay-down-need-label">${financeClosingCost ? `必要現金（${term('closing_cost', '諸費用')}は借入に含む）` : `${term('closing_cost', '諸費用')}込み必要現金`}</span> <span id="pay-down-need" class="font-bold">${L.yen(financeClosingCost ? Math.round(price * downRatio) : Math.round(price * downRatio) + closing)}</span></div>
         </div>
         <input id="pay-down-range" type="range" min="0" max="${maxDownPct}" step="1" value="${Math.round(downRatio * 100)}" class="w-full">
@@ -13254,11 +13264,11 @@ function openSell(propId) {
     ${sellStatusCard(p, { detailBtn: true })}
     ${la ? `
     <div class="text-sm">不動産会社の査定額: <b>${L.yen(la.amount)}</b> <span class="text-slate-500">（${state.month - la.month === 0 ? '今月' : `${state.month - la.month}ヶ月前`}）</span></div>
-    <button id="sl-use-appraisal" class="w-full bg-navy text-white rounded py-2">この査定額で価格を決める ›</button>
+    <button id="sl-use-appraisal" class="w-full bg-navy text-white rounded py-2 text-sm font-bold">この査定額で価格を決める ›</button>
     <button id="sl-appraise" class="w-full border rounded py-2 text-sm">もう一度査定を依頼する（行動力-5）</button>
     ` : `
     <div class="text-sm">まず不動産屋に査定を依頼しよう（行動力-5）</div>
-    <button id="sl-appraise" class="w-full bg-navy text-white rounded py-2">査定を依頼する</button>
+    <button id="sl-appraise" class="w-full bg-navy text-white rounded py-2 text-sm font-bold">査定を依頼する</button>
     `}
     <button id="sl-cancel" class="w-full text-slate-500 text-sm">やめる</button>
     </div>
@@ -13389,7 +13399,7 @@ function drawPricing(m, p, appraisal, close, back, afterList = back, opts = {}) 
       ${collapseHeader('sl-toggle-tip', false, '💡 価格設定のコツ', '')}
       <div id="sl-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">安くすれば早く売れ、高いほど時間がかかる。訳あり物件を高利回りで仕入れ、通常の利回り水準の価格で売り抜く戦略も。</div>
     </div>
-    <button id="sl-list" class="w-full bg-emerald text-white rounded py-2">${mode === 'edit' ? 'この価格に変更する（行動力-5）' : 'この価格で売りに出す'}</button>
+    <button id="sl-list" class="w-full bg-emerald text-white rounded py-2 text-sm font-bold">${mode === 'edit' ? 'この価格に変更する（行動力-5）' : 'この価格で売りに出す'}</button>
     <button id="sl-cancel2" class="w-full text-slate-500 text-sm">やめる</button>
     </div>
   </div>`);
@@ -13520,7 +13530,7 @@ function showOfferModal(listing) {
   const lv = L.skillLevel(state.skills.negotiation.exp);
   const counterPrice = Math.round((o.price + listing.askingPrice) / 2 / 10000) * 10000;
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
       <h2 class="font-bold truncate">💌 ${p.name || p.label}</h2><div class="text-[11px] text-slate-500">買付が入った！</div>
     </div>
@@ -14077,11 +14087,11 @@ function openDiySession(propId, sel, category, back) {
 
   // order モード: 初心者は番号を出しっぱなし。中上級は開始2秒だけ見せて消す。
   const showNums = mode === 'order';
-  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-sm space-y-2">
+  const box = el(`<div class="bg-white rounded-xl p-4 w-full max-w-sm space-y-2 max-h-[85vh] overflow-y-auto" style="max-height:85dvh">
     <div class="flex justify-between items-center gap-2">
       <button id="diy-back" class="text-xs text-navy font-bold shrink-0">← 戻る</button>
       <h2 class="font-bold truncate flex-1 text-center">🔨 ${sel.label}</h2>
-      <button id="diy-close" class="text-slate-400 text-xl shrink-0">✕</button></div>
+      <button id="diy-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div class="text-xs text-slate-500">材料費 ${L.yen(Math.round(sel.cost * L.DIY_MATERIAL_RATE))}${before > 0 ? '（支払い済み）' : ''}・行動力-${sel.diyAp}。${DIY_MODE_LEAD[mode]}</div>
     ${mode === 'order' ? `<div class="text-[11px] bg-sky-50 text-sky-800 rounded px-2 py-1">📐 ${kit.orderHint}</div>` : ''}
     <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden"><div class="bg-emerald-500 h-2 transition-all" style="width:${before}%"></div></div>
@@ -14680,8 +14690,8 @@ function openLogModal() {
   navGo({ key: 'log', open: () => openLogModal() });   // v15: 履歴に登録
   const m = document.getElementById('log-modal');
   m.classList.remove('hidden'); m.classList.add('flex'); m.innerHTML = '';
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[70vh] flex flex-col modal-card" style="max-height:70dvh">
-    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">📜 ログ</h2><button id="log-close" class="text-slate-400 text-xl">✕</button></div>
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">📜 ログ</h2><button id="log-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 text-xs space-y-0.5">${(state.log || []).map(l => `<div>・${l}</div>`).join('') || '<div class="text-slate-500">まだログはありません</div>'}</div></div>`);
   m.appendChild(box);
   box.querySelector('#log-close').addEventListener('click', () => { m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; });
@@ -14716,8 +14726,8 @@ function openListingsModal() {
       </div>
     </div>`;
   }).join('') : '<div class="text-slate-500 text-sm">まだ見つかった物件はありません。営業してみましょう。</div>';
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col modal-card" style="max-height:75dvh">
-    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">🗂️ 物件情報（${state.market.length}件）</h2><button id="listings-close" class="text-slate-400 text-xl">✕</button></div>
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">🗂️ 物件情報（${state.market.length}件）</h2><button id="listings-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">${rows}</div></div>`);
   m.appendChild(box);
   // v15: 一覧を作り直しても本文のスクロール位置を保つ（詳細画面から戻ったとき等）。
@@ -14776,10 +14786,10 @@ function openSoldSnapshot(p) {
   const occ = p.units?.length ? Math.round(p.units.filter(u => u.occupied).length / p.units.length * 100) : 100;
   const rows = (p.units || []).map((u, i) => `<tr class="border-t"><td>${i + 1}号室</td><td class="text-right">${L.yen(u.rent)}</td><td class="text-right">${u.occupied ? '入居中' : '空室'}</td></tr>`).join('');
   const box = el(`<div class="bg-white rounded-xl w-full max-w-lg max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
-    <div class="p-3 border-b shrink-0">
+    <div class="p-4 pb-2 border-b shrink-0">
       <div class="flex justify-between items-center mb-1">
         <span class="text-[11px] bg-slate-500 text-white rounded px-2 py-0.5">🚫 他決済み（閲覧のみ）</span>
-        <button id="ss-close" class="text-slate-400 text-xl leading-none">✕</button></div>
+        <button id="ss-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
       <div class="flex items-center gap-2">${renderBuildingSVG(p, 'w-14 h-14')}
         <div class="min-w-0"><div class="font-bold truncate">${p.name || p.label}</div><div class="text-[11px] text-slate-500">${p.label}</div></div></div>
     </div>
@@ -14842,8 +14852,8 @@ function openNotificationsModal() {
       </div>
     </div>`;
   }).join('') : '<div class="text-slate-500 text-sm">通知はまだありません</div>';
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col modal-card" style="max-height:75dvh">
-    <div class="p-4 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">🔔 通知</h2><button id="notifs-close" class="text-slate-400 text-xl">✕</button></div>
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+    <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center"><h2 class="font-bold">🔔 通知</h2><button id="notifs-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button></div>
     <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-2">
     <div class="flex items-center justify-between gap-2">
       <button id="notifs-settings-toggle" class="text-[11px] font-bold text-navy underline text-left">${notifSettingsOpen ? '▲ 通知の表示設定を閉じる' : '▶ 通知の表示設定'}</button>
@@ -15428,7 +15438,7 @@ function showEvent(pending) {
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openPurchaseと同じ構造）。選択肢が
   // 後からappendChildで足される作りなので、追加先は本文側の#ev-body（スクロールする方）に固定する。
   // このモーダルはXボタンを持たない（選択肢を選ぶまで閉じられない仕様。元からその設計）。
-  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col" style="max-height:85dvh">
+  const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-4 pb-2 border-b shrink-0">
       <h2 class="font-bold">${title}</h2>${where ? `<div class="mt-1.5">${where}</div>` : ''}
     </div>
@@ -15608,7 +15618,7 @@ function openQuiz(venueKey, done) {
              style="border:8px solid ${RANK_COLOR[r.rank]};animation: qzStamp 0.55s cubic-bezier(.2,1.4,.4,1) forwards;">
           <span class="text-5xl font-black" style="color:${RANK_COLOR[r.rank]}">${r.rank}</span></div>
         <div class="text-2xl font-black">${correct} / ${qs.length} 正解</div>
-        ${comboBest >= 2 ? `<div class="text-sm font-bold text-red-500">🔥 最高${comboBest}コンボ（EXP ×${r.mult.toFixed(1)}）</div>` : ''}
+        ${comboBest >= 2 ? `<div class="text-sm font-bold text-red-600">🔥 最高${comboBest}コンボ（EXP ×${r.mult.toFixed(1)}）</div>` : ''}
         <div class="text-sm space-y-0.5 pt-1">
           <div>🎓 目利き <b class="text-emerald-600">+${Math.round(5 * correct * r.mult)} EXP</b>
                ／ 交渉 <b class="text-emerald-600">+${3 * correct} EXP</b></div>
@@ -16021,5 +16031,8 @@ if (btnTerms) {
   btnTerms.addEventListener('click', () => { if (!held) setTermsOff(!termsOff); });
 }
   </script>
+<!-- tw-warmup:start -->
+<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-l border-navy border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-4 h-40 h-44 h-5 h-52 h-6 h-7 h-full hidden hover:bg-amber-600 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null of-act opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-4 w-40 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
+<!-- tw-warmup:end -->
 </body>
 </html>
