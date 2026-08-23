@@ -961,6 +961,14 @@ export function creditForReview(state, downRatio = 0) {
   return { base, asset, down, total: base + asset + down, penalty: creditPenalty(state) };
 }
 
+// v30: リフォームローンの審査は物件融資（creditForReview）と同じく資産背景まで見る。
+// v8.7 で物件融資に入れた「現金1億の自営業が全行否決される」問題の修正が、
+// リフォームローン側だけ適用されないまま残っていた。頭金加点（③）は
+// リフォームローンに頭金スライダーが無いので入れない（①＋②のみ）。
+export function reformCreditFor(state) {
+  return Math.min(100, effectiveCredit(state) + assetBackingBonus(state));
+}
+
 // 躯体0＝使用不能。全戸退去のうえ募集を止め、大規模修繕を終えるまで家賃がゼロになる。
 export function isCondemned(property) { return structBandOf(property) === 'dead'; }
 // 使用不能からの復旧は割高・長期。傷む前に直した方が安い、を成立させるための係数。
@@ -1659,7 +1667,10 @@ export function loanSummary(state, loan) {
   const totalInterest = Math.round(g * graceInterest + (monthlyPayAfterGrace * (n - g) - loan.principal));
   return {
     bankKey: loan.bankKey ?? null,
-    bankLabel: loan.bankKey ? BANKS[loan.bankKey]?.label ?? '金融機関' : 'リフォームローン',
+    // v30: リフォームローンは lenderKey が付くようになったので、あればレンダー名を出す
+    // （無い旧データは従来どおり「リフォームローン」に一本化）。
+    bankLabel: loan.bankKey ? BANKS[loan.bankKey]?.label ?? '金融機関'
+      : loan.lenderKey ? REFORM_LENDERS[loan.lenderKey]?.label ?? 'リフォームローン' : 'リフォームローン',
     principal: loan.principal, rate: loan.rate, years: loan.years,
     monthlyPay: pay, monthsPaid, monthsTotal: n,
     balance, startMonth, payoffMonth: startMonth + n,
@@ -2456,18 +2467,20 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
   // v19: lenderKey を明示した呼び出しだけレンダー別の判定・金利・期間を使う。省略時（既存の
   // 呼び出し）は従来どおり CONFIG.minCreditToFinance / reformLoanRateFor / CONFIG.reformLoanYears。
   const lenderKey = opts.lenderKey;
-  const canFinanceThis = lenderKey ? canUseReformLoan(cost, s.creditScore, lenderKey) : canUseReformLoan(cost, s.creditScore);
+  const canFinanceThis = canUseReformLoanFor(p, s, cost, lenderKey);
   if (opts.financed && !canFinanceThis) return { state, started: false, reason: 'reformLoanBlocked' };
   s.actionPower -= 5;
   let loanAmount = 0;
   // v19: 有担保リフォームローンだけ抵当権設定費用がかかる。「無料の上位互換」にしないための対価。
   // 現金が足りなければ着工させない（他の費用は従来どおり残高を割り込ませても着工できる仕様のまま）。
   if (opts.financed && lenderKey === 'secured') {
-    const provisional = reformLoanAmount(cost, s.creditScore);
+    const provisional = reformLoanAmountFor(p, s, cost, lenderKey);
     if (s.cash < securedReformFees(provisional)) return { state, started: false, reason: 'cash' };
   }
+  const lender = lenderKey ? REFORM_LENDERS[lenderKey] : null;
+  const restoreMonths = 1 + (opts.financed ? (lender?.slowMonths ?? 0) : 0);
   if (opts.financed) {
-    loanAmount = reformLoanAmount(cost, s.creditScore);
+    loanAmount = reformLoanAmountFor(p, s, cost, lenderKey);
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     // 合計は従来の自己負担分（cost-loanAmount）と同じ現金の減りになる。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
@@ -2478,7 +2491,8 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount,
       rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
-      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0,
+      lenderKey: lenderKey ?? null, graceMonths: lender?.autoGrace ? Math.min(24, restoreMonths) : 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の原状回復`, p.id);
     addSpend(p, 'repairSpend', cost);
@@ -2486,8 +2500,6 @@ export function startRestore(state, propertyId, unitIndex, opts = {}) {
   // v16: 原状回復費は借入があっても工事費の全額（cost）を発生月の経費として計上する
   // （融資は資金調達の方法にすぎず、税務上の経費は発生主義で見るため）。
   bookOf(s, p.owner).expense += cost;
-  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす（保留の仕組みは作らず工期+1で表現）。
-  const restoreMonths = (opts.financed && lenderKey === 'secured') ? 2 : 1;
   u.restoreJob = { monthsTotal: restoreMonths, monthsLeft: restoreMonths };
   return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, months: restoreMonths };
 }
@@ -2755,17 +2767,19 @@ export function startRepair(state, propertyId, kind, opts = {}) {
   // v19: lenderKey を明示した呼び出しだけレンダー別の判定・金利・期間を使う。省略時（既存の
   // 呼び出し）は従来どおり CONFIG.minCreditToFinance / reformLoanRateFor / CONFIG.reformLoanYears。
   const lenderKey = opts.lenderKey;
-  const canFinanceThis = lenderKey ? canUseReformLoan(cost, s.creditScore, lenderKey) : canUseReformLoan(cost, s.creditScore);
+  const canFinanceThis = canUseReformLoanFor(p, s, cost, lenderKey);
   if (opts.financed && !canFinanceThis) return { state, started: false, reason: 'reformLoanBlocked' };
   // v19: 有担保リフォームローンの抵当権設定費用（対価）。現金が足りなければ着工させない。
   if (opts.financed && lenderKey === 'secured') {
-    const provisional = reformLoanAmount(cost, s.creditScore);
+    const provisional = reformLoanAmountFor(p, s, cost, lenderKey);
     if (s.cash < securedReformFees(provisional)) return { state, started: false, reason: 'cash' };
   }
   s.actionPower -= 5;
   let loanAmount = 0;
+  const lender = lenderKey ? REFORM_LENDERS[lenderKey] : null;
+  const monthsTotal = repairJobMonths(p, kind) + ((opts.financed) ? (lender?.slowMonths ?? 0) : 0);
   if (opts.financed) {
-    loanAmount = reformLoanAmount(cost, s.creditScore);
+    loanAmount = reformLoanAmountFor(p, s, cost, lenderKey);
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}`, p.id);
@@ -2775,7 +2789,8 @@ export function startRepair(state, propertyId, kind, opts = {}) {
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount,
       rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
-      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0,
+      lenderKey: lenderKey ?? null, graceMonths: lender?.autoGrace ? Math.min(24, monthsTotal) : 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の${REPAIR_KINDS[kind].label}`, p.id);
     addSpend(p, 'repairSpend', cost);
@@ -2785,8 +2800,6 @@ export function startRepair(state, propertyId, kind, opts = {}) {
   // 日常メンテ・特別清掃（業者発注）は資産計上せず、発生月の経費として計上する。
   if (kind === 'large') { p.jobCost = p.jobCost || {}; p.jobCost.large = cost; }
   else bookOf(s, p.owner).expense += cost;
-  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす。
-  const monthsTotal = repairJobMonths(p, kind) + ((opts.financed && lenderKey === 'secured') ? 1 : 0);
   // v15: 単数のp.repairJobをやめ、配列へpush（同じゲージの他の工事とは排他だが別ゲージとは同時進行できる）
   ensureRepairJobs(p).push({ kind, monthsTotal, monthsLeft: monthsTotal, startState: repairGaugeValue(p, kind) });
   return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, monthsTotal };
@@ -2866,10 +2879,13 @@ export const REFORM_LOAN_MIN_COST = 300_000;
 // v19: 実態調査により、金融機関を選べるようにする（銀行の無担保／信販の提携／有担保）。
 // それぞれ上限額・期間・必要信用度が違う。bank は工事金額帯で金利が変わる（REFORM_LOAN_RATE_BANDS）
 // ので rate を持たない。
+// v30: 公庫（設備資金）を追加し、必要信用度の階段を「担保があるほどゆるい」向きに直す。
+// 新しい階段: 公庫10 ＜ 信販12 ＜ 有担保20 ＜ 銀行無担保25。
 export const REFORM_LENDERS = {
+  kouko:   { key: 'kouko',   label: '🏛 日本政策金融公庫（設備資金）',       maxAmount: 48_000_000, years: 10, rate: 0.020, minCredit: 10, secured: false, koukoQuota: true, slowMonths: 1, autoGrace: true },
+  shinpan: { key: 'shinpan', label: '🏪 信販の提携ローン',                     maxAmount:  5_000_000, years: 10, rate: 0.045, minCredit: 12, secured: false },
+  secured: { key: 'secured', label: '🏦 銀行の追加融資（物件を担保に）',       maxAmount: 30_000_000, years: 15, rate: 0.018, minCredit: 20, secured: true, slowMonths: 1 },
   bank:    { key: 'bank',    label: '🏦 銀行のリフォームローン（無担保）',       maxAmount: 10_000_000, years: 10, minCredit: 25, secured: false },
-  shinpan: { key: 'shinpan', label: '🏪 信販の提携ローン',                     maxAmount:  5_000_000, years: 10, rate: 0.045, minCredit: 15, secured: false },
-  secured: { key: 'secured', label: '🏛 有担保リフォームローン（物件を担保に）', maxAmount: 30_000_000, years: 15, rate: 0.018, minCredit: 40, secured: true },
 };
 
 // v19: lenderKey を明示した呼び出しは、レンダーごとの必要信用度・上限額で判定する。
@@ -2910,6 +2926,42 @@ export function securedReformFees(loanAmount) {
   return Math.round(loanAmount * 0.004) + 50_000;
 }
 
+// v30: 銀行が担保として評価するのは時価の8割まで（担保掛目）。
+export const COLLATERAL_LTV = 0.80;
+
+// v30: この物件で新たに担保に入れられる余力。時価×掛目から、
+// 既に抵当権が付いている借入（物件融資＋有担保リフォームローン）の残債を引く。
+// 無担保のリフォームローンは抵当権を取らないので引かない。
+export function collateralHeadroom(property) {
+  const secured = (property.reformLoans || [])
+    .filter(l => REFORM_LENDERS[l.lenderKey]?.secured)
+    .reduce((t, l) => t + loanRemaining(l), 0);
+  const mortgage = property.loan ? loanRemaining(property.loan) : 0;
+  return Math.max(0, Math.round(timeValueOf(property) * COLLATERAL_LTV - mortgage - secured));
+}
+
+// v30: 有担保・公庫は借入上限額をレンダー上限だけでなく担保余力／公庫の名義別残枠でもクランプする。
+export function reformLoanHeadroom(property, state, lenderKey) {
+  if (lenderKey === 'secured') return collateralHeadroom(property);
+  if (lenderKey === 'kouko') return REFORM_LENDERS.kouko.maxAmount - koukoBalanceOf(state, property.owner);
+  return Infinity;
+}
+
+// v30: 担保余力／公庫枠まで含めた実際の審査可否（信用度は reformCreditFor で見る）。
+export function canUseReformLoanFor(property, state, cost, lenderKey) {
+  const credit = reformCreditFor(state);
+  if (!canUseReformLoan(cost, credit, lenderKey)) return false;
+  if (lenderKey === undefined) return true;
+  return reformLoanHeadroom(property, state, lenderKey) >= REFORM_LOAN_MIN_COST;
+}
+
+// v30: 借入希望額（reformLoanAmountの結果）を担保余力／公庫枠でクランプする。
+export function reformLoanAmountFor(property, state, cost, lenderKey) {
+  const base = reformLoanAmount(cost, reformCreditFor(state));
+  if (lenderKey === undefined) return base;
+  return Math.max(0, Math.min(base, reformLoanHeadroom(property, state, lenderKey)));
+}
+
 // v15: 「いま一体で借りる」と「後からリフォームローンで借りる」の比較をUIに出すための材料。
 // 一体型は物件融資と同じ金利で借りられるので、単独のリフォームローン（2.5〜4.0%）より安い。
 export function reformFinanceCompare(cost, bankKey, state) {
@@ -2917,7 +2969,7 @@ export function reformFinanceCompare(cost, bankKey, state) {
   return {
     bundledRate: bankRate(bankKey, state),
     standaloneRate: reformLoanRateFor(cost),
-    standaloneAvailable: canUseReformLoan(cost, state.creditScore),
+    standaloneAvailable: canUseReformLoan(cost, reformCreditFor(state)),
   };
 }
 
@@ -2937,17 +2989,19 @@ export function startProfessionalRepair(state, propertyId, financed = false, len
   const cost = professionalRepairCost(p);
   // v4: 工事ごとに借りられるよう複数本を許可（配列化で残債・返済を本数ぶん正しく処理する）
   const canFinance = !!financed;
-  const canFinanceThis = lenderKey ? canUseReformLoan(cost, s.creditScore, lenderKey) : canUseReformLoan(cost, s.creditScore);
+  const canFinanceThis = canUseReformLoanFor(p, s, cost, lenderKey);
   if (canFinance && !canFinanceThis) return { state, started: false, cost: 0, loanAmount: 0, financed: false, reason: 'reformLoanBlocked' };
   // v19: 有担保リフォームローンの抵当権設定費用（対価）。現金が足りなければ着工させない。
   if (canFinance && lenderKey === 'secured') {
-    const provisional = reformLoanAmount(cost, s.creditScore);
+    const provisional = reformLoanAmountFor(p, s, cost, lenderKey);
     if (s.cash < securedReformFees(provisional)) return { state, started: false, cost: 0, loanAmount: 0, financed: false, reason: 'cash' };
   }
   s.actionPower -= 5;
   let loanAmount = 0;
+  const lender = lenderKey ? REFORM_LENDERS[lenderKey] : null;
+  const monthsTotal = largeRepairMonths(p) + (canFinance ? (lender?.slowMonths ?? 0) : 0);
   if (canFinance) {
-    loanAmount = reformLoanAmount(cost, s.creditScore);
+    loanAmount = reformLoanAmountFor(p, s, cost, lenderKey);
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の大規模修繕`, p.id);
@@ -2957,13 +3011,12 @@ export function startProfessionalRepair(state, propertyId, financed = false, len
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount,
       rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
-      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0,
+      lenderKey: lenderKey ?? null, graceMonths: lender?.autoGrace ? Math.min(24, monthsTotal) : 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の大規模修繕`, p.id);
     addSpend(p, 'repairSpend', cost);
   }
-  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす。
-  const monthsTotal = largeRepairMonths(p) + ((canFinance && lenderKey === 'secured') ? 1 : 0);
   // v15: kindを明示する（未指定のままだと配列化後にrepairJobsOf側の暗黙large扱いに頼ることになり危険なため）
   ensureRepairJobs(p).push({ kind: 'large', monthsTotal, monthsLeft: monthsTotal, startState: p.repairState });
   // v16: 大規模修繕は資産計上して償却する（ここでは経費計上しない）。見積額は物件側の
@@ -3031,19 +3084,21 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
   if (!opts.financed && state.cash < cost) return { state, started: false, reason: 'cash' };
   // v19: lenderKey を明示した呼び出しだけレンダー別の判定・金利・期間を使う。省略時は従来どおり。
   const lenderKey = opts.lenderKey;
-  const canFinanceThis = lenderKey ? canUseReformLoan(cost, state.creditScore, lenderKey) : canUseReformLoan(cost, state.creditScore);
+  const canFinanceThis = canUseReformLoanFor(p0, state, cost, lenderKey);
   if (opts.financed && !canFinanceThis) return { state, started: false, reason: 'reformLoanBlocked' };
   // v19: 有担保リフォームローンの抵当権設定費用（対価）。現金が足りなければ着工させない。
   if (opts.financed && lenderKey === 'secured') {
-    const provisional = reformLoanAmount(cost, state.creditScore);
+    const provisional = reformLoanAmountFor(p0, state, cost, lenderKey);
     if (state.cash < securedReformFees(provisional)) return { state, started: false, reason: 'cash' };
   }
   const s = structuredClone(state);
   const p = s.properties.find(x => x.id === propertyId);
   s.actionPower -= 5;
   let loanAmount = 0;
+  const lender = lenderKey ? REFORM_LENDERS[lenderKey] : null;
+  const months = plan.months + (opts.financed ? (lender?.slowMonths ?? 0) : 0);
   if (opts.financed) {
-    loanAmount = reformLoanAmount(cost, s.creditScore);
+    loanAmount = reformLoanAmountFor(p, s, cost, lenderKey);
     // v18.2: 借入の実行（+loanAmount）と工事費の全額支払い（-cost）を2本で記録する。
     moveCash(s, loanAmount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
     moveCash(s, -cost, 'repair', `${p.label} の${plan.label}`, p.id);
@@ -3053,15 +3108,14 @@ export function startValueUp(state, propertyId, planKey, opts = {}) {
     p.reformLoans = p.reformLoans || [];
     p.reformLoans.push({ principal: loanAmount,
       rate: lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost),
-      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0 });
+      years: lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears, monthsPaid: 0,
+      lenderKey: lenderKey ?? null, graceMonths: lender?.autoGrace ? Math.min(24, months) : 0 });
   } else {
     moveCash(s, -cost, 'repair', `${p.label} の${plan.label}`, p.id);
     addSpend(p, 'valueUpSpend', cost);
   }
   // v16: 業者発注も資産計上して償却する（ここでは経費計上しない）。見積額を運ぶ。
   p.jobCost = p.jobCost || {}; p.jobCost.valueup = cost;
-  // v19: 有担保は担保設定と実行に1ヶ月かかるぶん工期を1ヶ月延ばす。
-  const months = plan.months + ((opts.financed && lenderKey === 'secured') ? 1 : 0);
   p.valueUpJob = { monthsTotal: months, monthsLeft: months, rentMult: plan.rentMult, label: plan.label };
   return { state: s, started: true, diy: false, cost, loanAmount, financed: !!opts.financed, months };
 }
@@ -3843,9 +3897,10 @@ export const EVENT_LOAN_MIN_COST = 300_000;
 // v19: lenderKey（省略可）を渡すとレンダー別の判定・金利・期間で組める。省略時は従来どおり。
 export function eventLoanQuote(state, cost, lenderKey = undefined) {
   if (!(cost >= EVENT_LOAN_MIN_COST)) return null;
-  const canFinance = lenderKey ? canUseReformLoan(cost, state.creditScore, lenderKey) : canUseReformLoan(cost, state.creditScore);
+  const credit = reformCreditFor(state);
+  const canFinance = lenderKey ? canUseReformLoan(cost, credit, lenderKey) : canUseReformLoan(cost, credit);
   if (!canFinance) return null;
-  const amount = reformLoanAmount(cost, state.creditScore);
+  const amount = reformLoanAmount(cost, credit);
   if (amount <= 0) return null;
   const rate = lenderKey ? reformLenderRate(lenderKey, cost) : reformLoanRateFor(cost);
   const years = lenderKey ? REFORM_LENDERS[lenderKey].years : CONFIG.reformLoanYears;
@@ -3879,7 +3934,8 @@ export function applyEventChoice(state, event, choiceIndex, targetId, unitIndex 
       moveCash(s, q.amount, 'loan_draw', `${p.label} のリフォームローン実行`, p.id);
       moveCash(s, -cost, 'event', `${p.label} イベント対応`, p.id);
       p.reformLoans = p.reformLoans || [];
-      p.reformLoans.push({ principal: q.amount, rate: q.rate, years: q.years, monthsPaid: 0 });
+      p.reformLoans.push({ principal: q.amount, rate: q.rate, years: q.years, monthsPaid: 0,
+        lenderKey: lenderKey ?? null, graceMonths: 0 });
       addSpend(p, 'troubleSpend', q.selfPay);
       addSpend(p, 'reformBorrowed', q.amount);
     } else {
@@ -5448,10 +5504,14 @@ export function bankRate(bankKey, state) {
 
 // v19: 公庫の4,800万円は1物件ごとの枠ではなく、1事業者（個人／法人）あたりの総枠。
 // state.properties のうち、その名義でかつ公庫から借りている物件融資の残債合計を返す。
+// v30: リフォームローンの公庫（設備資金）もこの総枠から借りるので、残債を合算する。
+// 修繕に公庫を使うほど、次の物件を公庫で買う枠が減る（意図的）。
 export function koukoBalanceOf(state, owner) {
   return Math.round((state.properties || []).reduce((t, p) => {
-    if (p.owner !== owner || p.loan?.bankKey !== 'kouko') return t;
-    return t + loanRemaining(p.loan);
+    if (p.owner !== owner) return t;
+    let sum = p.loan?.bankKey === 'kouko' ? loanRemaining(p.loan) : 0;
+    for (const l of p.reformLoans || []) if (l.lenderKey === 'kouko') sum += loanRemaining(l);
+    return t + sum;
   }, 0));
 }
 
@@ -5997,7 +6057,7 @@ export const TERMS = {
   credit_score: { scope: 'game', group: '融資', label: '信用度',
     def: '銀行から見た借り手の返済能力・信頼度。実務で「属性」と呼ばれる評価を0〜100の一つの数値にまとめたもの。',
     calc: '実務では年収・勤務先・勤続年数・保有資産・既存の借入状況・その銀行との取引実績を総合して判断される。',
-    here: '高いほど多くの銀行が使え、金利も下がる。低いと審査の入口で弾かれる。',
+    here: '高いほど多くの銀行が使え、金利も下がる。低いと審査の入口で弾かれる。実際の審査ではここに純資産の規模に応じた資産背景の加点が乗る（低い信用度でも資産があれば通ることがある）。物件融資だけでなくリフォームローンの審査も同じ実効値を見る。',
     hint: '公務員や上場企業の会社員は評価が高く、自営業は事業の実績年数が重く見られる。返済を続けて実績を作るほど次の条件は良くなる。' },
 
   depreciation: { scope: 'real', reading: 'げんかしょうきゃく', group: '税・会計', label: '減価償却',
@@ -6205,6 +6265,11 @@ export const TERMS = {
     calc: '担保評価には積算価格（土地＋建物の積み上げ）が使われるのが実務。「積算が出る／出ない」で融資額が左右される。',
     here: '融資審査ではLTV・DSCR・信用度と並んで、この担保評価が借りられる額を左右する。',
     hint: '積算価格が出にくい物件（築古で建物が0円に近い等）ほど、実務では融資が付きにくくなる。' },
+  tanpo_yoryoku: { scope: 'real', reading: 'たんぽよりょく', group: '融資', label: '担保余力',
+    def: 'その物件をあと担保にどれだけ差し出せるかという枠。有担保リフォームローンだけが見る。',
+    calc: '担保余力 ＝ 時価 × 担保掛目（80%） − 既に付いている抵当権の残債（物件融資＋有担保リフォームローン）。無担保のリフォームローンは抵当権を取らないので引かない。',
+    here: '有担保リフォームローンの借入上限をこの余力でクランプする。余力が30万円未満だと有担保は選べない。',
+    hint: 'フルローンで買った直後は残債＝時価に近く、担保余力はほぼ0。頭金を入れた物件・返済が進んだ物件ほど余力が増え、有担保の安い金利にアクセスできる。' },
   drop_cushion: { scope: 'game', group: '融資', label: '耐えられる下落率',
     def: '買った直後の時価から何%下がると、売っても手取りがマイナス（借金が残る）になるかという割合。',
     calc: '耐えられる下落率 ＝（時価 − 手取りが0になる売価）÷ 時価。売価は税・諸費用・残債をすべて差し引いて手取り0になる境界を探して求める。',
@@ -6213,7 +6278,7 @@ export const TERMS = {
   motokin_suechi: { scope: 'real', reading: 'がんきんすえおき', group: '融資', label: '元金据置',
     def: '返済期間の最初の一定期間、元金を減らさず利息だけを払う契約。',
     calc: '据置期間中は利息だけを払い、元金は1円も減らない。日本政策金融公庫の一般貸付では据置は2年以内が上限。',
-    here: '融資タブの公庫の借入条件で選べる。据置中は月々の返済額が下がる代わりに、元金の減りが遅れる。',
+    here: '融資タブの公庫の借入条件で選べる。据置中は月々の返済額が下がる代わりに、元金の減りが遅れる。公庫のリフォームローンでは工事期間ぶんが自動で付く（スライダー等の設定は不要）。',
     hint: '開業直後で手元資金を厚くしたいときに使う。据置が終わった瞬間に返済額が上がる点は忘れずに。' },
   ganri_kinto: { scope: 'real', reading: 'がんりきんとうへんさい', group: '融資', label: '元利均等返済',
     def: '毎月の返済額（元金＋利息）を一定に保つ返済方式。ほとんどの住宅ローン・アパートローンがこの方式。',
@@ -6312,7 +6377,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -10065,8 +10130,18 @@ function openKpiModal(which, keepBulk = false) {
       const r = rel[k] || { loans: 0, paidOff: 0 };
       return `<tr class="border-t"><td>${L.BANKS[k].label}</td><td class="text-right">融資${r.loans}件・完済${r.paidOff}件</td></tr>`;
     }).join('');
+    // v30: 生の信用度だけでなく、審査で実際に使われる実効値（資産背景加点・危険物件の減点込み）を表示する。
+    const creditPenalty = L.creditPenalty(state);
+    const assetBonus = L.assetBackingBonus(state);
+    const nw = L.netWorth(state);
+    const effectiveTotal = L.reformCreditFor(state);
     body = `<div class="text-sm mb-2">現在の信用度: <b>${state.creditScore}</b></div>
-      <div class="text-[11px] text-slate-500 mb-1">信用度が高いほど審査に通りやすく、取引実績（完済）が増えると金利優遇を受けやすくなります。</div>
+      <div class="text-xs text-slate-600 mb-2 space-y-0.5">
+        ${assetBonus > 0 ? `<div>　+ 資産背景 +${assetBonus}（純資産 ${L.yen(nw)}）</div>` : ''}
+        ${creditPenalty > 0 ? `<div class="text-red-600">　− 危険物件の減点 -${creditPenalty}</div>` : ''}
+        <div class="font-bold">　＝ 審査での実効値 ${effectiveTotal}</div>
+      </div>
+      <div class="text-[11px] text-slate-500 mb-1">信用度が高いほど審査に通りやすく、取引実績（完済）が増えると金利優遇を受けやすくなります。実際の審査では、これに資産背景の加点と危険物件の減点を加味した実効値（上記）が使われます（物件融資・リフォームローン共通）。</div>
       <table class="w-full text-sm">${bankRows}</table>`;
   }
   const boxEl = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[75vh] flex flex-col modal-card" style="max-height:75dvh">
@@ -12236,6 +12311,10 @@ function openPurchase(propId, back) {
   // v14: ヘッダー固定＋本文スクロールの標準型に統一（openDetail / openWorkMenu と同じ構造）。
   // 満額＝緑枠カード／指値＝紺枠カードの二択にして、工事メニューのDIY/業者と同じ見せ方に揃える。
   const priceBadges = `${p.origPrice && p.price < p.origPrice ? '<span class="text-[11px] bg-red-500 text-white rounded px-1.5 py-0.5 font-bold">値下げ中</span>' : ''}${p.staleFlag ? '<span class="text-[11px] bg-amber-500 text-white rounded px-1.5 py-0.5 font-bold">売れ残り中</span>' : ''}${p.sellerUrgency ? `<span class="text-[11px] bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 font-bold">🏃 売り急ぎ・${p.sellerUrgency.reason}そうだ</span>` : ''}`;
+  // v29.3: 満額カード(#of-full)は元から <button> でカード全体が押せるが、中にベタ塗りのCTAが無く
+  // 手がかりが hover だけだった（＝指で操作する端末では押せるものに見えない）。指値側の #of-submit と
+  // 同じ形のバーをカードの内側に置く。中身は div なので入れ子のボタンにはならず、押すと外側の
+  // #of-full のクリックがそのまま走る＝ハンドラもチュートリアルの対象(selector: #of-full)も変更不要。
   const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
     <div class="p-3 border-b shrink-0">
       <div class="flex justify-between items-center mb-1">
@@ -12271,6 +12350,7 @@ function openPurchase(propId, back) {
         </div>
         <div class="text-2xl font-black ${blocked ? 'text-slate-500' : 'text-emerald-700'} mt-0.5">${L.yen(p.price)}</div>
         <div class="text-xs text-slate-600 mt-0.5">${blocked ? '売主が態度を固めているため、満額を出しても断られる。' : '交渉なしで即決。値切らないぶん確実に手に入る。'}</div>
+        <div class="w-full ${blocked ? 'bg-slate-400' : 'bg-emerald-600'} text-white rounded-lg py-2.5 mt-2 text-sm font-bold text-center">この価格で申し込む</div>
       </button>
       ${(!blocked && L.sashineBuffBonus(state) > 0) ? `<div class="text-[11px] bg-amber-100 text-amber-800 rounded px-2 py-1 font-bold">✨ 耳より情報：この指値だけ成功率 +${Math.round(L.sashineBuffBonus(state) * 100)}pt（使うと消えます）</div>` : ''}
       <div class="w-full border-2 ${blocked ? 'border-slate-300 opacity-50' : 'border-navy'} rounded-lg p-3 space-y-2">
@@ -13593,7 +13673,7 @@ function workOptions(p, category) {
 }
 
 // v8: qualityMult はDIYミニゲームの出来ばえ（業者発注では常に1で無関係）。
-// v19: lenderKey（省略可）を渡すと選んだレンダー（bank/shinpan/secured）別の判定・金利・期間で組む。
+// v19: lenderKey（省略可）を渡すと選んだレンダー（kouko/bank/shinpan/secured）別の判定・金利・期間で組む。
 function runWork(propId, sel, diy, financed, qualityMult = 1, lenderKey = undefined) {
   const opts = { diy, financed, qualityMult, lenderKey };
   if (sel.type === 'restore') return L.startRestore(state, propId, sel.unitIndex, opts);
@@ -13659,7 +13739,7 @@ function openWorkMenu(propId, category, back, initialSel = null) {
       const months = sel.type === 'restore' ? 1
         : sel.type === 'valueup' ? L.VALUE_UP_PLANS[sel.planKey].months
         : L.repairJobMonths(p, sel.type);
-      const loanOk = L.canUseReformLoan(sel.cost, state.creditScore);
+      const loanOk = L.canUseReformLoan(sel.cost, L.reformCreditFor(state));
       headHtml = `${head(true)}<h2 class="font-bold">${sel.label}</h2>`;
       body = `<div class="text-xs text-slate-500">${sel.effect}</div>
         <button id="wk-diy" class="w-full border-2 rounded-lg p-3 text-left ${sel.diyable ? 'hover:bg-slate-50 border-emerald-500' : 'opacity-50'}" ${sel.diyable ? '' : 'disabled'}>
@@ -13673,26 +13753,44 @@ function openWorkMenu(propId, category, back, initialSel = null) {
           <div class="text-xs text-navy">${loanOk ? '高いが手が空く。リフォームローンも使える' : '高いが手が空く'}</div></button>`;
     } else {
       const openLoans = (p.reformLoans || []).length;
+      const credit = L.reformCreditFor(state);
+      const baseMonths = sel.type === 'restore' ? 1
+        : sel.type === 'valueup' ? L.VALUE_UP_PLANS[sel.planKey].months
+        : L.repairJobMonths(p, sel.type);
       // v19: リフォームローンを銀行（無担保）／信販／有担保の3択にする。既存のDIY＝緑枠／
-      // 業者＝紺枠と同じ「枠カード型」で、現金＋3レンダーの計4択に揃える。
-      const lenderCards = ['bank', 'shinpan', 'secured'].map(key => {
+      // 業者＝紺枠と同じ「枠カード型」で、現金＋レンダーの計n択に揃える。
+      // v30: 公庫（設備資金）を追加。判定値は資産背景まで見る reformCreditFor に、
+      // 並び順は minCredit 昇順（＝通りやすい順）に揃える。
+      const lenderCards = ['kouko', 'shinpan', 'secured', 'bank'].map(key => {
         const lender = L.REFORM_LENDERS[key];
-        const usable = L.canUseReformLoan(sel.cost, state.creditScore, key);
-        const loanAmount = Math.min(L.reformLoanAmount(sel.cost, state.creditScore), lender.maxAmount);
+        const usable = L.canUseReformLoanFor(p, state, sel.cost, key);
+        const loanAmount = Math.min(L.reformLoanAmountFor(p, state, sel.cost, key), lender.maxAmount);
         const down = sel.cost - loanAmount;
         const rate = L.reformLenderRate(key, sel.cost);
         const cashShort = usable && state.cash < down;
+        const actualMonths = baseMonths + (lender.slowMonths ?? 0);
         let reason = '';
         if (!usable) {
           if (sel.cost < L.REFORM_LOAN_MIN_COST) reason = `工事費が${L.yen(L.REFORM_LOAN_MIN_COST)}未満のため、少額工事は現金のみです`;
-          else if (state.creditScore < lender.minCredit) reason = `信用度${lender.minCredit}以上で使えます（現在${state.creditScore}）`;
+          else if (credit < lender.minCredit) reason = `信用度${lender.minCredit}以上で使えます（現在${credit}）`;
           else if (sel.cost > lender.maxAmount) reason = `この工事費（${L.yen(sel.cost)}）は上限${L.yen(lender.maxAmount)}を超えています`;
+          else if (key === 'secured') {
+            const mortgageRemain = p.loan ? L.loanRemaining(p.loan) : 0;
+            const securedRemain = (p.reformLoans || []).filter(l => L.REFORM_LENDERS[l.lenderKey]?.secured).reduce((t, l) => t + L.loanRemaining(l), 0);
+            const collatMax = Math.round(L.timeValueOf(p) * L.COLLATERAL_LTV);
+            reason = `担保余力がありません（時価の80% ${L.yen(collatMax)} − 既存の借入 ${L.yen(mortgageRemain + securedRemain)}）`;
+          } else if (key === 'kouko') {
+            const koukoExisting = L.koukoBalanceOf(state, p.owner);
+            reason = `公庫の枠は1事業者あたり${L.yen(lender.maxAmount)}です（既存の公庫借入 ${L.yen(koukoExisting)}／残枠 ${L.yen(Math.max(0, lender.maxAmount - koukoExisting))}）`;
+          }
         }
         const off = !usable || cashShort;
         return `<button class="wk-lender w-full border-2 rounded-lg p-3 text-left ${off ? 'opacity-40 border-slate-300' : 'border-navy hover:bg-slate-50'}" data-k="${key}" ${off ? 'disabled' : ''}>
           <div class="font-bold text-sm">${lender.label}</div>
           ${usable ? `<div class="text-xs text-slate-600 mt-0.5">借入 <b>${L.yen(loanAmount)}</b>・${down > 0 ? `頭金 <b>${L.yen(down)}</b>` : '<b>頭金なし（全額借入）</b>'}・金利${(rate * 100).toFixed(2)}%・${lender.years}年</div>
-            ${lender.secured ? `<div class="text-xs text-amber-700 mt-0.5">抵当権設定費用 ${L.yen(L.securedReformFees(loanAmount))}が別途かかります・工期が1ヶ月延びます</div>` : ''}
+            ${lender.secured || key === 'kouko' ? `<div class="text-xs text-amber-700 mt-0.5">実行まで1ヶ月かかるため工期が1ヶ月延びます</div>` : ''}
+            ${lender.secured ? `<div class="text-xs text-amber-700 mt-0.5">抵当権設定費用 ${L.yen(L.securedReformFees(loanAmount))}が別途かかります</div>` : ''}
+            ${lender.autoGrace ? `<div class="text-xs text-emerald-700 mt-0.5">工事中の${Math.min(24, actualMonths)}ヶ月は利息だけ（元金据置）</div>` : ''}
             ${cashShort ? `<div class="text-xs text-red-600 mt-0.5">🚫 頭金${L.yen(down)}の現金が足りません</div>` : ''}`
             : `<div class="text-xs text-red-600 mt-0.5">🚫 ${reason}</div>`}
         </button>`;
@@ -13703,7 +13801,7 @@ function openWorkMenu(propId, category, back, initialSel = null) {
         <div class="space-y-1.5">${lenderCards}</div>
         ${openLoans ? `<div class="text-xs text-slate-500">この物件には返済中のリフォームローンが${openLoans}本ありますが、重ねて借りられます。</div>` : ''}
         <div>${collapseHeader('wk-toggle-tip', false, '💡 現金かローンか', '')}
-          <div id="wk-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">急がないなら現金のほうが総支払いは少ない（利息がかからないぶん）。手元の現金を他の投資や備えに残しておきたいなら、ローンで頭金を抑えるのも有効。信用度が高いほど頭金なしで全額借りられる。</div></div>`;
+          <div id="wk-tip-body" class="hidden mt-1 text-xs text-slate-500 px-0.5">急がないなら現金のほうが総支払いは少ない（利息がかからないぶん）。手元の現金を他の投資や備えに残しておきたいなら、ローンで頭金を抑えるのも有効。信用度が高いほど頭金なしで全額借りられる（資産背景も効く）。担保があるほど審査はゆるくなる。</div></div>`;
     }
 
     const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
