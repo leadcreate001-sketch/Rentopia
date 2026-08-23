@@ -642,8 +642,8 @@ function ensureBooks(s) {
     s.books = {
       // v17: prepaidIncomeTax/prepaidCorpTaxは予定納税・中間納付で前払いした額を積んでおき、
       // 次の確定申告／決算で「税額−前払い額」を納付予定にするための積算値。
-      personal: { year: calYearOf(s.month), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0 },
-      corp: { year: calYearOf(s.month), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
+      personal: { year: calYearOf(s.month), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0, depr: 0, officerPayYTD: 0, socialInsurance: 0 },
+      corp: { year: calYearOf(s.month), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0, depr: 0, bonusBooked: 0 },
     };
   }
   return s.books;
@@ -722,6 +722,7 @@ export function incorporate(state) {
   // v16: 決算月は設立月の前月（＝設立からちょうど1年で最初の決算が来る）。1月設立だけは
   // 前月が無いので12月に固定する。
   s.corpFiscalMonth = calMonthOf(s.month) === 1 ? 12 : calMonthOf(s.month) - 1;
+  s.corpFoundedMonth = s.month;   // v31: 役員退職金の勤続年数の起点
   return { state: s };
 }
 
@@ -1190,6 +1191,9 @@ export function generateProperty(genreKey, areaKey, rng = Math.random, ageBands 
     assessedLand: assessedDetail.land, assessedBldg: assessedDetail.bldg,   // v8.21: 内訳（表示用）
     bldgRatio: g.structure === '木造' ? 0.5 : 0.45,
     deprRemaining: deprMonthsFor(g.structure, builtAge),
+    // v30.4: 償却期間は購入時に固定する（毎月その時点の築年で再計算すると分母が年々縮み、
+    // 累計償却が建物価格を超えて膨らむバグの修正）。deprTotalOf() が読む。
+    deprTotal: deprMonthsFor(g.structure, builtAge),
     listedMonths: 0, staleFlag: false, refusedOffer: false,
     loan: null, reformLoans: [], boughtPrice: null, boughtMonth: null, selfManaged: false,
     history: [],
@@ -1515,12 +1519,17 @@ export function propertyMonthlyPL(p) {
   //               別途引かれる）ので、月割は引かない
   // 同じ値を使い回すと、cf に新しい控除を足したときに現金まで狂う。過去に固都税で実際に
   // その事故が起きたので、役割ごとにフィールドを分けてある。
+  // v30.4: 月次明細に「償却」列を出すための表示用の値。現金が出ていかない経費なので、
+  // cf/cashDeltaには絶対に足さない（CFは実務のBTCFで、償却を含まないのが正しい）。
+  const depr = p.deprRemaining > 0
+    ? Math.round(monthlyDepreciation(p.boughtPrice ?? p.price, p.bldgRatio, deprTotalOf(p)))
+    : 0;
   return { rentIn, vacancyLoss, opex, interest, principal: principalPay, tax, propTaxM,
-    cf, cashDelta: cf + propTaxM };
+    cf, cashDelta: cf + propTaxM, depr };
 }
 
 export function bookValueV2(p) {
-  const deprTotalM = deprMonthsFor(p.structure, p.builtAge);
+  const deprTotalM = deprTotalOf(p);
   const done = deprTotalM - p.deprRemaining;
   const bldg = (p.boughtPrice ?? p.price) * p.bldgRatio;
   const land = (p.boughtPrice ?? p.price) * (1 - p.bldgRatio);
@@ -4082,12 +4091,26 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
     favorites: [], notifications: [], nextNotifId: 1, notifSettings: defaultNotifSettings(),
     isIncorporated: false,
     corpFiscalMonth: null,   // v16: 法人化するまでは決算月が無い（incorporateで設立月の前月を立てる）
+    corpFoundedMonth: null,  // v31: 法人設立の通し月（勤続年数の起点。incorporateで立てる）
+    // v31: 役員報酬・賞与・退職金（法人の給与経費化）。本体は現金を動かさない。
+    officerPay: {
+      monthly: 0,              // 定期同額給与の月額（円／月）
+      bonus: 0,                // 事前確定届出給与の年額（円・年1回払い）
+      bonusMonth: null,        // 賞与の支給月（暦月 1〜12）。bonus > 0 のとき必須
+      bonusPaidYear: null,     // 賞与を処理した事業年度（books.corp.year）。二重支給の防止
+      monthsAccrued: 0,        // 月額報酬を計上した月数（退職金の器の平均月額に使う）
+      totalMonthlyAccrued: 0,  // 同・計上した月額報酬の累計額
+      retired: false,          // 役員退職金を支給済み（以後 monthly / bonus は 0 固定）
+      decidedForYear: null,    // v31.1: 役員報酬を確定した事業年度（books.corp.year）。期首月ロックの判定に使う
+    },
+    retirementRecord: null,    // v31: 退職金の記録
     // v16: 名義ごとの帳簿（所得税・法人税の課税計算に使う）。決まった月にまとめて納付するので、
     // 予定は taxSchedule に積む。
     books: {
       // v17: landInterestは土地取得の借入金利子（損益通算できない部分）を年間で別枠集計する。
-      personal: { year: calYearOf(0), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0 },
-      corp: { year: calYearOf(0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
+      // v31: officerPayYTD/socialInsurance（personal）、bonusBooked（corp）を追加。
+      personal: { year: calYearOf(0), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0, depr: 0, officerPayYTD: 0, socialInsurance: 0 },
+      corp: { year: calYearOf(0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0, depr: 0, bonusBooked: 0 },
     },
     taxSchedule: [],
     cashLog: [],   // v18: 現金の動きの明細（moveCash参照）。直近CASH_LOG_RETENTION_MONTHSヶ月ぶんだけ保持する
@@ -4158,6 +4181,7 @@ export function transferToCorp(state, propertyId) {
   p.boughtPrice = price;
   p.boughtMonth = s.month;
   p.deprRemaining = deprMonthsFor(p.structure, p.builtAge);   // 償却再スタート（中古簡便法）
+  p.deprTotal = p.deprRemaining;   // 償却期間も再スタートに合わせて固定し直す
   return { state: s, done: true, price, capTax, acqCost };
 }
 
@@ -4210,6 +4234,15 @@ export const NOTIF_KIND_INFO = {
   repair_done:        { label: '🔨 修繕完了', defaultMode: 'temp' },
   valueup_done:       { label: '✨ バリューアップ完了', defaultMode: 'temp' },
   region_unlocked:    { label: '🌏 新エリア解放', defaultMode: 'temp' },
+  // v31: 役員報酬・賞与
+  officer_bonus_failed: { label: '💸 役員賞与が不支給になった', defaultMode: 'persist' },
+  officer_bonus_due:    { label: '📅 役員賞与の支給予定', defaultMode: 'temp' },
+  // v31.1: 通知の深刻度。未指定は従来どおり amber（既存10種は付けないので見た目が変わらない）。
+  // 'danger' = 期限や不可逆の損失、'warn' = 予告・注意。
+  // v31 で入れたが temp では消えてしまうので、期限として persist + danger に変える
+  officer_pay_window:   { label: '⏳ 役員報酬の改定期限', defaultMode: 'persist', severity: 'danger' },
+  // v31.1 新規
+  officer_pay_upcoming: { label: '📊 来月は役員報酬を決める月', defaultMode: 'persist', severity: 'warn' },
 };
 export function defaultNotifSettings() {
   const o = {};
@@ -4648,8 +4681,10 @@ export function salaryDeduction(income) {
   if (income <= 8_500_000) return Math.round(income * 0.10) + 1_100_000;
   return 1_950_000;
 }
-export function salaryIncomeOf(state) {
-  const annual = state.salaryAnnual ?? 0;
+// v31: 給与所得控除は「本業給与＋役員報酬」を合算した給与収入の総額に対して1回だけ効く
+// （複数の勤め先から給与をもらっても控除が二重には効かない実務どおり）。
+export function salaryIncomeOf(state, officerPay = 0) {
+  const annual = (state.salaryAnnual ?? 0) + officerPay;
   return Math.max(0, annual - salaryDeduction(annual));
 }
 // v17: 基礎控除。社会保険料控除・扶養控除等の他の所得控除は簡略化して省略する
@@ -4680,6 +4715,143 @@ export const CORP_CARRY_LOSS_YEARS = 10;     // 法人の繰越損失は10年（
 // v17: 前事業年度の法人税額（均等割込み）がこれを超えると、決算月の8ヶ月後に前期実績の
 // 1/2を中間納付する（事業年度開始から6ヶ月経過後2ヶ月以内の実務ルールをそのまま反映）。
 export const CORP_INTERIM_THRESHOLD = 200_000;
+
+// === v31: 役員報酬・賞与・役員退職金（法人の給与経費化） ===
+
+// v31: 役員報酬にかかる社会保険料（健康保険＋厚生年金）。労使折半。
+// 標準報酬月額には上限があり、賞与は月額とは別枠の上限がかかる（実務どおり）。
+// 介護保険料（40歳以上）は健康保険料率に含めた中庸値で簡略化している。
+export const PENSION_RATE = 0.183;              // 厚生年金
+export const PENSION_CAP_MONTHLY = 650_000;     // 標準報酬月額の上限
+export const PENSION_CAP_BONUS = 1_500_000;     // 標準賞与額の上限（1回あたり）
+export const HEALTH_RATE = 0.10;                // 健康保険（介護込みの中庸値）
+export const HEALTH_CAP_MONTHLY = 1_390_000;    // 標準報酬月額の上限
+export const HEALTH_CAP_BONUS_YEAR = 5_730_000; // 標準賞与額の上限（年度累計）
+
+// 月額報酬1ヶ月分の社会保険料（労使合計）
+export function socialInsuranceMonthly(monthlyPay) {
+  if (monthlyPay <= 0) return 0;
+  return Math.round(Math.min(monthlyPay, PENSION_CAP_MONTHLY) * PENSION_RATE
+                  + Math.min(monthlyPay, HEALTH_CAP_MONTHLY) * HEALTH_RATE);
+}
+
+// 賞与1回分の社会保険料（労使合計）
+export function socialInsuranceBonus(bonus) {
+  if (bonus <= 0) return 0;
+  return Math.round(Math.min(bonus, PENSION_CAP_BONUS) * PENSION_RATE
+                  + Math.min(bonus, HEALTH_CAP_BONUS_YEAR) * HEALTH_RATE);
+}
+
+// 労使折半（端数は会社負担側へ寄せ、合計が総額と必ず一致するようにする）
+export function splitSocialInsurance(total) {
+  const corp = Math.round(total / 2);
+  return { total, corp, self: total - corp };
+}
+
+// v31: 定期同額給与を改定できるのは期首月（決算月の翌月）だけ。
+// 戻り値: { open, fiscalStartCal, nextOpenMonth, reason }
+export function officerPayWindow(state) {
+  if (!state.isIncorporated) return { open: false, fiscalStartCal: null, nextOpenMonth: null, reason: 'not_incorporated' };
+  if (state.officerPay?.retired) return { open: false, fiscalStartCal: null, nextOpenMonth: null, reason: 'retired' };
+  const fiscalStartCal = (state.corpFiscalMonth % 12) + 1;
+  const curCal = calMonthOf(state.month);
+  const open = curCal === fiscalStartCal;
+  // monthsUntilCalMonthは今月が期首なら0を返す。次回の改定月は必ず未来にしたいので、
+  // 今まさに開いているときは12ヶ月先にする。
+  const nextOpenMonth = open ? state.month + 12 : state.month + monthsUntilCalMonth(state.month, fiscalStartCal);
+  return { open, fiscalStartCal, nextOpenMonth, reason: open ? null : 'window_closed' };
+}
+
+export const BONUS_MONTHS_CAP = 12;   // 賞与は月額報酬の12ヶ月分（＝年俸の半分）まで
+export function bonusCapOf(monthly) { return monthly * BONUS_MONTHS_CAP; }
+
+// v31: 月額報酬と賞与をまとめて確定する。改定ウィンドウ外・上限超過は拒否する。
+export function setOfficerPay(state, { monthly, bonus, bonusMonth }) {
+  const s = structuredClone(state);
+  if (!s.isIncorporated) return { state, done: false, reason: 'not_incorporated' };
+  if (s.officerPay?.retired) return { state, done: false, reason: 'retired' };
+  const win = officerPayWindow(s);
+  if (!win.open) return { state, done: false, reason: 'window_closed' };
+  if (monthly < 0 || bonus < 0) return { state, done: false, reason: 'negative' };
+  if (monthly === 0 && bonus > 0) return { state, done: false, reason: 'bonus_without_monthly' };
+  if (bonus > bonusCapOf(monthly)) return { state, done: false, reason: 'bonus_over_cap' };
+  if (bonus > 0 && !(Number.isInteger(bonusMonth) && bonusMonth >= 1 && bonusMonth <= 12)) {
+    return { state, done: false, reason: 'bonus_month_invalid' };
+  }
+  s.officerPay.monthly = monthly;
+  s.officerPay.bonus = bonus;
+  s.officerPay.bonusMonth = bonus > 0 ? bonusMonth : null;
+  // v31.1: ウィンドウ内でしか成功しないので、これで「期首月に確定した＝当期分の確定」になる。
+  s.officerPay.decidedForYear = bookOf(s, 'corp').year;
+  return { state: s, done: true, reason: null };
+}
+
+// v31.1: 期首月に翌期の役員報酬を確定していないと、翌月へ進めない。
+// 役員報酬は年に1度しか決められないので、見逃すとその事業年度まるごと機会を失う。
+// 据え置き（同額のまま確定）でも解除されるので、詰まることはない。
+export function officerPayPending(state) {
+  if (!state.isIncorporated || state.officerPay?.retired) return { pending: false };
+  if (!officerPayWindow(state).open) return { pending: false };
+  const fiscalYear = state.books?.corp?.year ?? null;
+  if (state.officerPay?.decidedForYear === fiscalYear) return { pending: false };
+  return { pending: true, fiscalYear };
+}
+
+export const RETIREMENT_MULTIPLIER = 3.0;    // 功績倍率（代表取締役の実務目安）
+export const SPECIFIC_OFFICER_YEARS = 5;     // 勤続5年以下は1/2課税なし（特定役員退職手当等）
+
+// 勤続年数（法人設立からの経過年数・切り捨て・最低1年）
+export function officerServiceYears(state) {
+  if (!state.isIncorporated || state.corpFoundedMonth == null) return 0;
+  return Math.max(1, Math.floor((state.month - state.corpFoundedMonth) / 12));
+}
+
+// 損金算入の上限（功績倍率法）＝ 在任中の平均月額報酬 × 勤続年数 × 功績倍率
+// 平均を使うのは、退職直前だけ月額を吊り上げて器を作る抜け道を塞ぐため
+// （実務でも最終報酬月額が不相当なら平均額法を使う）。
+export function retirementAllowance(state) {
+  const op = state.officerPay;
+  if (!op || op.monthsAccrued === 0) return 0;
+  const avgMonthly = op.totalMonthlyAccrued / op.monthsAccrued;
+  return Math.round(avgMonthly * officerServiceYears(state) * RETIREMENT_MULTIPLIER);
+}
+
+// 退職所得控除
+export function retirementDeduction(years) {
+  return years <= 20 ? Math.max(800_000, 400_000 * years)
+                     : 8_000_000 + 700_000 * (years - 20);
+}
+
+// v31: 役員退職金を支給して退任する。取り消せない。
+export function payRetirement(state, amount) {
+  const s = structuredClone(state);
+  if (!s.isIncorporated) return { state, done: false, reason: 'not_incorporated' };
+  if (s.officerPay?.retired) return { state, done: false, reason: 'already_retired' };
+  if (retirementAllowance(s) === 0) return { state, done: false, reason: 'no_allowance' };
+  if (amount <= 0) return { state, done: false, reason: 'invalid_amount' };
+  if (s.cash < amount) return { state, done: false, reason: 'insufficient_cash' };
+
+  const years = officerServiceYears(s);
+  const allowed = Math.min(amount, retirementAllowance(s));   // 損金算入できる額
+  const disallowed = amount - allowed;                        // 不相当に高額な部分
+  bookOf(s, 'corp').expense += allowed;                       // 法人は allowed だけ損金
+
+  // 個人は分離課税。勤続5年以下は1/2課税が使えない（特定役員退職手当等）。
+  const deduction = retirementDeduction(years);
+  const halved = years > SPECIFIC_OFFICER_YEARS;
+  const base = Math.max(0, amount - deduction);
+  const taxable = Math.round(halved ? base / 2 : base);
+  const tax = incomeTaxOf(taxable) + Math.round(taxable * RESIDENT_TAX_RATE);
+  moveCash(s, -tax, 'tax', '退職所得の源泉徴収', null, 'personal');
+
+  s.officerPay.retired = true;
+  s.officerPay.monthly = 0;
+  s.officerPay.bonus = 0;
+  s.officerPay.bonusMonth = null;
+  const record = { month: s.month, amount, allowed, disallowed, years, deduction, taxable, tax, halved };
+  s.retirementRecord = record;
+  return { state: s, done: true, reason: null, record };
+}
 
 // 繰越損失を古い順に充当し、使い切った分は配列から外す。戻り値は充当後の課税所得。
 function applyCarryLoss(carryLoss, taxableIncome) {
@@ -4731,14 +4903,21 @@ function closePersonalBooks(s) {
 
   // v17: 5. 総所得＝給与所得＋通算後の不動産所得（マイナスもありうる＝ここが損益通算）。
   // 6. 課税所得＝総所得−基礎控除（マイナスにはしない）。
-  const salaryIncome = salaryIncomeOf(s);
+  // v31: 役員報酬（officerPayYTD）は給与所得控除に合算し、社会保険料控除（socialIns）も引く。
+  const officerPay = book.officerPayYTD ?? 0;
+  const socialIns = book.socialInsurance ?? 0;
+  const salaryIncome = salaryIncomeOf(s, officerPay);
   const totalIncome = salaryIncome + combined;
-  const taxableIncome = Math.max(0, totalIncome - BASIC_DEDUCTION);
-  // 7. 確定申告の所得税。8. 源泉徴収済み＝給与所得だけで計算した所得税（年末調整済みとみなす）。
+  const taxableIncome = Math.max(0, totalIncome - socialIns - BASIC_DEDUCTION);
+  // 7. 確定申告の所得税。8. 源泉徴収済み＝本業給与だけで計算した所得税（年末調整済みとみなす）。
+  // v31: 役員報酬ぶんの所得税・住民税は確定申告で精算する＝現金として出ていく
+  // （withheldTax/withheldResidentの基準を本業給与だけに固定するのがこの実装の要）。
   const incomeTax = incomeTaxOf(taxableIncome);
-  const withheldTax = incomeTaxOf(Math.max(0, salaryIncome - BASIC_DEDUCTION));
+  const baseSalaryIncome = salaryIncomeOf(s);      // 役員報酬を含めない
+  const baseTaxable = Math.max(0, baseSalaryIncome - BASIC_DEDUCTION);
+  const withheldTax = incomeTaxOf(baseTaxable);
   const residentTax = Math.round(taxableIncome * RESIDENT_TAX_RATE);
-  const withheldResident = Math.round(Math.max(0, salaryIncome - BASIC_DEDUCTION) * RESIDENT_TAX_RATE);
+  const withheldResident = Math.round(baseTaxable * RESIDENT_TAX_RATE);
   const nextYear = year + 1;
   const diff = difficultyOf(s);   // v17: 初心者向けは予定納税・個人事業税を積まない
 
@@ -4797,7 +4976,8 @@ function closePersonalBooks(s) {
     }
   }
 
-  book.income = 0; book.expense = 0; book.capGainTax = 0; book.landInterest = 0; book.year = nextYear;
+  book.income = 0; book.expense = 0; book.capGainTax = 0; book.landInterest = 0; book.depr = 0; book.year = nextYear;
+  book.officerPayYTD = 0; book.socialInsurance = 0;   // v31: 暦年の役員報酬・社会保険料の集計をリセット
   s.blueReturnDeduction = 0;
 }
 
@@ -4835,7 +5015,8 @@ function closeCorpBooks(s) {
       amount: Math.round(tax / 2), label: '法人税の中間納付', owner: 'corp' });
   }
 
-  book.income = 0; book.expense = 0; book.year = year + 1;
+  book.income = 0; book.expense = 0; book.depr = 0; book.year = year + 1;
+  book.bonusBooked = 0;   // v31: 事業年度の役員賞与（+会社負担社保）の累計をリセット
 }
 
 // v18: 「今年ここまでの帳簿」を年換算し、見込みの年間税負担を出す。closePersonalBooks /
@@ -4849,24 +5030,49 @@ function estimateAnnualTax(s) {
   const corpBook = s.books?.corp ?? { income: 0, expense: 0 };
   const annualize = (v) => Math.round(v * 12 / monthsElapsed);
 
-  // 個人: 給与所得と合算（損益通算）した課税所得に累進課税＋住民税。事業的規模なら個人事業税も。
+  // v31(a): 役員報酬は年額が確定しているので年換算しない。退任済みならその年の実績が年額になる。
+  const op = s.officerPay ?? { monthly: 0, bonus: 0, retired: false };
+  const pb = s.books?.personal ?? {};
+  const officerPayAnnual = op.retired ? (pb.officerPayYTD ?? 0) : (op.monthly * 12 + op.bonus);
+  const officerSISelf = op.retired
+    ? (pb.socialInsurance ?? 0)
+    : splitSocialInsurance(socialInsuranceMonthly(op.monthly)).self * 12
+      + splitSocialInsurance(socialInsuranceBonus(op.bonus)).self;
+  const officerSICorp = op.retired
+    ? 0
+    : splitSocialInsurance(socialInsuranceMonthly(op.monthly)).corp * 12
+      + splitSocialInsurance(socialInsuranceBonus(op.bonus)).corp;
+
+  // 個人: 給与所得（本業＋役員報酬）と合算（損益通算）した課税所得に累進課税＋住民税。
+  // 事業的規模なら個人事業税も。源泉済み基準は本業給与のみ（v31: §5-3と同じ考え方）。
   const netPersonal = annualize(personalBook.income - personalBook.expense);
-  const salaryIncome = salaryIncomeOf(s);
-  const taxableIncome = Math.max(0, salaryIncome + netPersonal - BASIC_DEDUCTION);
+  const salaryIncome = salaryIncomeOf(s, officerPayAnnual);
+  const taxableIncome = Math.max(0, salaryIncome + netPersonal - officerSISelf - BASIC_DEDUCTION);
   const incomeTax = incomeTaxOf(taxableIncome);
-  const withheldTax = incomeTaxOf(Math.max(0, salaryIncome - BASIC_DEDUCTION));
+  const baseSalaryIncome = salaryIncomeOf(s);   // 役員報酬を含めない
+  const baseTaxable = Math.max(0, baseSalaryIncome - BASIC_DEDUCTION);
+  const withheldTax = incomeTaxOf(baseTaxable);
   const residentTax = Math.round(taxableIncome * RESIDENT_TAX_RATE);
-  const withheldResident = Math.round(Math.max(0, salaryIncome - BASIC_DEDUCTION) * RESIDENT_TAX_RATE);
+  const withheldResident = Math.round(baseTaxable * RESIDENT_TAX_RATE);
   let personalTax = (incomeTax - withheldTax) + (residentTax - withheldResident);
   if (isBusinessScale(s)) {
     personalTax += Math.round(Math.max(0, netPersonal - BUSINESS_TAX_DEDUCTION) * BUSINESS_TAX_RATE);
   }
 
-  // 法人: 課税所得に法人税率＋均等割（法人化していなければ0）。
-  const netCorp = annualize(corpBook.income - corpBook.expense);
+  // v31(b): 法人は年換算するが、賞与（＋会社負担社保）は年1回の一時金なので年換算の対象から外す。
+  // bonusBookedを年換算の前に足し戻し、年換算の後に実額で引く。月額報酬・会社負担社保は
+  // 既に毎月ほぼ同額でcb.expenseに載っているので年換算がそのまま効く（officerPayAnnualを
+  // 追加で引くと二重控除になるのでやらない）。
+  const cb = s.books?.corp ?? { income: 0, expense: 0, bonusBooked: 0 };
+  const bonusBooked = cb.bonusBooked ?? 0;
+  const netCorp = annualize((cb.income - cb.expense) + bonusBooked) - bonusBooked;
   const corpTax = s.isIncorporated ? corporateTaxOf(Math.max(0, netCorp)) + CORP_PER_CAPITA_TAX : 0;
 
-  return personalTax + corpTax;
+  // v31(c): 社会保険料（会社負担・本人負担の合計）を年間の税負担へ足す。会社負担分は法人の
+  // 損金として既に効いているが、現金としては別途出ていくため。
+  const officerSIAnnual = officerSISelf + officerSICorp;
+
+  return personalTax + corpTax + officerSIAnnual;
 }
 
 // v18: ポートフォリオ全体で1つの税引後CF（月換算・年の途中は見込み）を返す。
@@ -4877,6 +5083,82 @@ export function afterTaxCF(state) {
   const annualTax = estimateAnnualTax(state);
   const afterTax = beforeTax - annualTax / 12;
   return { beforeTax, afterTax, annualTax, estimated: true };
+}
+
+// v31: シミュレーター用。現在の法人・個人の帳簿を前提に、指定した役員報酬での年間負担を返す。
+// §5-4のestimateAnnualTaxと同じ考え方（賞与は年換算しない・法人側で役員報酬を二重に引かない・
+// 源泉済み基準は本業給与のみ）で組む。ただし本関数はあくまで「今この報酬額を選んだら」という
+// 仮定の見込みなので、state自体は変更しない（純粋関数）。
+export function officerPayEstimate(state, { monthly, bonus }) {
+  const s = state;
+  const annualPay = monthly * 12 + bonus;
+  const siM = splitSocialInsurance(socialInsuranceMonthly(monthly));
+  const siB = splitSocialInsurance(socialInsuranceBonus(bonus));
+  const siCorp = siM.corp * 12 + siB.corp;
+  const siSelf = siM.self * 12 + siB.self;
+  const siTotal = siCorp + siSelf;
+  const corpDeductible = annualPay + siCorp;   // 法人の損金＝報酬＋会社負担社保
+
+  const monthsElapsed = calMonthOf(s.month);
+  const annualize = (v) => Math.round(v * 12 / monthsElapsed);
+
+  // 法人: 今期の法人所得（賞与ぶんの帳簿は年換算から除外）から、この役員報酬の損金ぶんを
+  // 引いた場合の法人税等を見積もる。corpTaxZeroは比較用の「役員報酬なし」の法人税等。
+  const cb = s.books?.corp ?? { income: 0, expense: 0, bonusBooked: 0 };
+  const bonusBooked = cb.bonusBooked ?? 0;
+  const netCorpBase = annualize((cb.income - cb.expense) + bonusBooked) - bonusBooked;
+  const corpTaxOf = (netCorp) => s.isIncorporated ? corporateTaxOf(Math.max(0, netCorp)) + CORP_PER_CAPITA_TAX : 0;
+  const corpTax = corpTaxOf(netCorpBase - corpDeductible);
+  const corpTaxZero = corpTaxOf(netCorpBase);
+
+  // 個人: 本業給与＋不動産所得と合算した課税所得に累進課税＋住民税＋（該当なら）個人事業税。
+  // 源泉済み基準は本業給与のみ（§5-3・§5-4と同じ）。personalTaxDeltaは「役員報酬なし」との差。
+  const pb = s.books?.personal ?? { income: 0, expense: 0 };
+  const netPersonal = annualize(pb.income - pb.expense);
+  const personalTaxOf = (officerPayAnnual, siSelfAnnual) => {
+    const salaryIncome = salaryIncomeOf(s, officerPayAnnual);
+    const taxableIncome = Math.max(0, salaryIncome + netPersonal - siSelfAnnual - BASIC_DEDUCTION);
+    const incomeTax = incomeTaxOf(taxableIncome);
+    const baseSalaryIncome = salaryIncomeOf(s);   // 役員報酬を含めない（本業給与のみ）
+    const baseTaxable = Math.max(0, baseSalaryIncome - BASIC_DEDUCTION);
+    const withheldTax = incomeTaxOf(baseTaxable);
+    const residentTax = Math.round(taxableIncome * RESIDENT_TAX_RATE);
+    const withheldResident = Math.round(baseTaxable * RESIDENT_TAX_RATE);
+    let personalTax = (incomeTax - withheldTax) + (residentTax - withheldResident);
+    if (isBusinessScale(s)) {
+      personalTax += Math.round(Math.max(0, netPersonal - BUSINESS_TAX_DEDUCTION) * BUSINESS_TAX_RATE);
+    }
+    return personalTax;
+  };
+  const personalTaxDelta = personalTaxOf(annualPay, siSelf) - personalTaxOf(0, 0);
+
+  // 年間トータル流出＝法人税等＋社会保険料（労使計）＋個人税の増分。役員報酬なし（totalOutflowZero）
+  // との差が deltaVsZero（マイナスなら得）。
+  const totalOutflow = corpTax + siTotal + personalTaxDelta;
+  const totalOutflowZero = corpTaxZero;
+  const deltaVsZero = totalOutflow - totalOutflowZero;
+
+  // 退職金の器（見込み）: この月額を「目標の期限まで」続けたと仮定した額。
+  // 現在の勤続年数で出すと、設立直後は器がほぼ0に見えて「月額報酬を出す意味がない」と
+  // 誤読されてしまう（月額報酬の価値は、長く続けて器を育てることそのものにあるため）。
+  // 実際のretirementAllowanceは在任中の実績平均月額を使うので、途中で額を変えると一致しない。
+  const goalEndMonth = Math.max(s.month, (s.goal?.years ?? 0) * 12);
+  const projectedYears = s.corpFoundedMonth == null
+    ? officerServiceYears(s)
+    : Math.max(1, Math.floor((goalEndMonth - s.corpFoundedMonth) / 12));
+  const retirementRoom = monthly > 0 ? Math.round(monthly * projectedYears * RETIREMENT_MULTIPLIER) : 0;
+
+  // 賞与支給月に必要な残高（§4-2のneedと同じ式）。
+  const bonusCashNeeded = bonus > 0 ? bonus + siB.corp : 0;
+
+  return {
+    annualPay, corpDeductible, corpTax, personalTaxDelta,
+    siCorp, siSelf, siTotal, totalOutflow, deltaVsZero,
+    retirementRoom, projectedYears, bonusCashNeeded,
+    // 試算の前提。年換算した法人の年間所得で、改定できるのは期首月＝実績1ヶ月ぶんを12倍した
+    // 数字なので、売却益のような一時的な収入が混ざると大きくぶれる。画面に出して検算できるようにする。
+    assumedCorpIncome: netCorpBase,
+  };
 }
 
 export function advanceMonth(state, rng = Math.random) {
@@ -4936,8 +5218,10 @@ export function advanceMonth(state, rng = Math.random) {
       book.landInterest = (book.landInterest ?? 0) + Math.round(pl.interest * (1 - (p.bldgRatio ?? 0.5)));
     }
     if (p.deprRemaining > 0) {
-      book.expense += Math.round(monthlyDepreciation(p.boughtPrice ?? p.price, p.bldgRatio,
-        deprMonthsFor(p.structure, p.builtAge)));
+      const deprM = Math.round(monthlyDepreciation(p.boughtPrice ?? p.price, p.bldgRatio,
+        deprTotalOf(p)));
+      book.expense += deprM;
+      book.depr = (book.depr ?? 0) + deprM;
     }
     if (p.loan) {
       p.loan.monthsPaid += 1;
@@ -5087,12 +5371,78 @@ export function advanceMonth(state, rng = Math.random) {
   }
   s.taxSchedule = s.taxSchedule.filter(t => t.month !== s.month);
 
+  // === v31: 定期同額給与（月額役員報酬）の月次計上 ===
+  // 法人の決算判定（下のcorpFiscalMonthを見ているブロック）より前に置く。
+  // 報酬本体では現金を動かさない。moveCashを呼ぶのは社会保険料だけ。
+  if (s.isIncorporated && !s.officerPay.retired && s.officerPay.monthly > 0) {
+    const pay = s.officerPay.monthly;
+    const si = splitSocialInsurance(socialInsuranceMonthly(pay));
+    bookOf(s, 'corp').expense += pay + si.corp;                    // 損金＝報酬本体＋会社負担社保
+    moveCash(s, -si.corp, 'tax', '社会保険料（会社負担）', null, 'corp');
+    moveCash(s, -si.self, 'tax', '社会保険料（本人負担）', null, 'personal');
+    const pb = bookOf(s, 'personal');
+    pb.officerPayYTD = (pb.officerPayYTD ?? 0) + pay;              // 個人の給与収入（暦年）
+    pb.socialInsurance = (pb.socialInsurance ?? 0) + si.self;      // 社会保険料控除（暦年）
+    s.officerPay.monthsAccrued += 1;
+    s.officerPay.totalMonthlyAccrued += pay;
+  }
+
+  // === v31: 事前確定届出給与（賞与）の支給月の処理 ===
+  {
+    const cb = bookOf(s, 'corp');
+    if (s.isIncorporated && !s.officerPay.retired && s.officerPay.bonus > 0
+        && calMonthOf(s.month) === s.officerPay.bonusMonth
+        && s.officerPay.bonusPaidYear !== cb.year) {
+      const bonus = s.officerPay.bonus;
+      const si = splitSocialInsurance(socialInsuranceBonus(bonus));
+      const need = bonus + si.corp;              // 支給に必要な残高
+      if (s.cash >= need) {
+        cb.expense += bonus + si.corp;
+        cb.bonusBooked = (cb.bonusBooked ?? 0) + bonus + si.corp;   // §5-4(b) の年換算補正に使う
+        moveCash(s, -si.corp, 'tax', '社会保険料（賞与・会社負担）', null, 'corp');
+        moveCash(s, -si.self, 'tax', '社会保険料（賞与・本人負担）', null, 'personal');
+        const pb = bookOf(s, 'personal');
+        pb.officerPayYTD = (pb.officerPayYTD ?? 0) + bonus;
+        pb.socialInsurance = (pb.socialInsurance ?? 0) + si.self;
+        logs.push(`役員賞与 ${yen(bonus)} を支給した（社会保険料 ${yen(si.total)}）`);
+      } else {
+        // 届出どおりに支給できなかった＝全額損金不算入。損金も社保も一切立たない。
+        logs.push(`⚠ 現金不足で役員賞与 ${yen(bonus)} を支給できなかった（必要残高 ${yen(need)}）。事前確定届出給与は届出どおりに支給できないと全額損金不算入になる`);
+        pushNotification(s, 'officer_bonus_failed', null, '役員賞与の不支給',
+          `現金不足で役員賞与 ${yen(bonus)} を支給できませんでした。全額損金不算入となり、今期の節税は発生しません。`, null,
+          '事前確定届出給与は、届け出た金額・支給日どおりに支給しないと全額が損金にできません。支給月に必要な残高を空けておくか、賞与の額を下げてください。');
+      }
+      s.officerPay.bonusPaidYear = cb.year;   // 成否にかかわらず、その事業年度は処理済み
+    }
+    // 支給月の前月に予告通知を出す（残高を空ける猶予を与えるため）。
+    if (s.isIncorporated && !s.officerPay.retired && s.officerPay.bonus > 0
+        && s.officerPay.bonusMonth != null
+        && monthsUntilCalMonth(s.month, s.officerPay.bonusMonth) === 1) {
+      const bonus = s.officerPay.bonus;
+      const need = bonus + splitSocialInsurance(socialInsuranceBonus(bonus)).corp;
+      pushNotification(s, 'officer_bonus_due', null, '役員賞与の支給予定',
+        `来月、役員賞与 ${yen(bonus)} の支給月です。支給には残高 ${yen(need)} が必要です。`);
+    }
+    // 期首月には改定できることを知らせる（期限として扱う）。
+    if (s.isIncorporated && !s.officerPay.retired && s.corpFiscalMonth != null
+        && calMonthOf(s.month) === ((s.corpFiscalMonth % 12) + 1)) {
+      pushNotification(s, 'officer_pay_window', null, '役員報酬の改定月',
+        '⏳ 今月中に翌期の役員報酬を決めてください。決めるまで翌月へ進めません（据え置きでもかまいません）。');
+    }
+  }
+
   // === v16: 個人の所得税・住民税の年次締め（暦年12月） ===
   if (calMonthOf(s.month) === 12) closePersonalBooks(s);
 
   // === v16: 法人の決算（決算月＝設立からちょうど1年で最初に到来） ===
   if (s.isIncorporated && s.corpFiscalMonth != null && calMonthOf(s.month) === s.corpFiscalMonth) {
     closeCorpBooks(s);
+    // v31.1: 決算月に予告。決算結果を見た直後に「来月（期首月）に決める」ことを知らせる。
+    if (!s.officerPay.retired) {
+      pushNotification(s, 'officer_pay_upcoming', null, '来月は役員報酬を決める月',
+        '決算が確定しました。来月（期首月）に翌期の役員報酬と賞与を決めます。決めるまで翌々月へは進めません。', null,
+        '実務でも、決算を締めてから定時株主総会で翌期の役員報酬を決議します。前事業年度中（決算月）の決議は定期同額給与の通常改定として認められないため、このゲームでも決算月には確定できません（試算だけできます）。');
+    }
   }
 
   // v3.7: 生涯実績用に最大月CFを記録（リザルト画面で表示）
@@ -5182,14 +5532,46 @@ export function migrateSave(state) {
   // v16: 名義ごとの帳簿・納付予定・法人の決算月。旧セーブには無いので既定値で補う。
   if (!s.books) {
     s.books = {
-      personal: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0 },
-      corp: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0 },
+      personal: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, capGainTax: 0, carryLoss: [], prepaidIncomeTax: 0, landInterest: 0, depr: 0 },
+      corp: { year: calYearOf(s.month ?? 0), income: 0, expense: 0, carryLoss: [], prepaidCorpTax: 0, depr: 0 },
     };
   }
   // v17: v16までのセーブにはprepaidIncomeTax/prepaidCorpTaxが無いので既定値で補う。
   if (typeof s.books.personal.prepaidIncomeTax !== 'number') s.books.personal.prepaidIncomeTax = 0;
   if (typeof s.books.corp.prepaidCorpTax !== 'number') s.books.corp.prepaidCorpTax = 0;
   if (typeof s.books.personal.landInterest !== 'number') s.books.personal.landInterest = 0;
+  // v30.4: v30.3までのセーブにはbook.deprが無いので既定値で補う。
+  if (typeof s.books.personal.depr !== 'number') s.books.personal.depr = 0;
+  if (typeof s.books.corp.depr !== 'number') s.books.corp.depr = 0;
+  // v31: 役員報酬・賞与・役員退職金。旧セーブには無いので既定値で補う。
+  if (!s.officerPay) {
+    s.officerPay = { monthly: 0, bonus: 0, bonusMonth: null, bonusPaidYear: null,
+                     monthsAccrued: 0, totalMonthlyAccrued: 0, retired: false };
+  }
+  // v31.1: 進行中のセーブがロード直後にいきなりロックされないよう、確定済みとして移行する。
+  if (s.isIncorporated && s.officerPay && s.officerPay.decidedForYear === undefined) {
+    s.officerPay.decidedForYear = s.books?.corp?.year ?? null;
+  }
+  // v31.1: officer_pay_window は temp では期限が見逃されるので、旧セーブの設定が残っていたら既定（persist）に戻す。
+  if (s.notifSettings && s.notifSettings.officer_pay_window === 'temp') {
+    delete s.notifSettings.officer_pay_window;
+  }
+  s.notifSettings = { ...defaultNotifSettings(), ...(s.notifSettings || {}) };
+  if (s.retirementRecord === undefined) s.retirementRecord = null;
+  // 設立月が記録されていない旧セーブは、移行した時点を起点にする（勤続年数を過大に見積もらない安全側）。
+  if (s.isIncorporated && s.corpFoundedMonth == null) s.corpFoundedMonth = s.month;
+  if (s.corpFoundedMonth === undefined) s.corpFoundedMonth = null;
+  {
+    const pbMig = s.books?.personal;
+    if (pbMig) { pbMig.officerPayYTD = pbMig.officerPayYTD ?? 0; pbMig.socialInsurance = pbMig.socialInsurance ?? 0; }
+    const cbMig = s.books?.corp;
+    if (cbMig) { cbMig.bonusBooked = cbMig.bonusBooked ?? 0; }
+  }
+  // v30.4: deprTotal（購入時に固定した償却期間）が無い旧セーブは deprTotalOf() で復元して埋める。
+  // ここで一度埋めてしまえば、以後は固定値で動く。
+  (s.properties || []).forEach(p => {
+    if (typeof p.deprTotal !== 'number') p.deprTotal = deprTotalOf(p, s.month);
+  });
   // v17: 給与所得との損益通算に使う年収。旧セーブには無いのでattrから同じ規則で補う。
   if (typeof s.salaryAnnual !== 'number') s.salaryAnnual = s.attr === 'employee' ? CONFIG.salaryEmployee : CONFIG.salarySelf;
   if (!Array.isArray(s.taxSchedule)) s.taxSchedule = [];
@@ -5507,6 +5889,25 @@ export function usefulLifeRemaining(structure, builtAge) {
 }
 export function deprMonthsFor(structure, builtAge) {
   return usefulLifeRemaining(structure, builtAge) * 12;
+}
+
+// v30.4: 購入時に確定した償却期間（月）。usefulLifeRemaining/deprMonthsFor は「その時点の
+// 残存耐用年数」を返す関数なので、建物本体の償却の分母にそのまま使うと築年が進むたびに
+// 分母が縮み、累計償却が建物価格を超えて膨らむ（分母は購入時点で固定すべき）。
+// 旧セーブは deprTotal を持たないので、「残存 + 保有月数」で復元する（deprRemaining は
+// 購入時に設定され毎月1ずつ減るだけ、法人移転時は boughtMonth も一緒に更新されるので、
+// この式が厳密に一致する）。
+export function deprTotalOf(p, monthNow) {
+  if (typeof p.deprTotal === 'number') return Math.max(1, p.deprTotal);
+  if (typeof monthNow !== 'number') return Math.max(1, p.deprRemaining);
+  return Math.max(1, p.deprRemaining + Math.max(0, monthNow - (p.boughtMonth ?? monthNow)));
+}
+
+// v30.4: 名義ごとの今月の減価償却費の合計。💰お金＞税金タブの経費内訳で使う。
+export function totalMonthlyDepr(s, owner) {
+  return s.properties
+    .filter(p => (p.owner === 'corp' ? 'corp' : 'personal') === owner && p.deprRemaining > 0)
+    .reduce((t, p) => t + Math.round(monthlyDepreciation(p.boughtPrice ?? p.price, p.bldgRatio, deprTotalOf(p))), 0);
 }
 
 // ===== Task 4: 銀行審査エンジン =====
@@ -6083,7 +6484,7 @@ export const TERMS = {
   depreciation: { scope: 'real', reading: 'げんかしょうきゃく', group: '税・会計', label: '減価償却',
     def: '建物の価値の目減りを、毎年の経費として計上する仕組み。',
     calc: '月の償却額 ＝ 建物価格 ÷ 償却期間（月数）。土地は償却できないので、売買契約書の内訳や固定資産税評価額の比率で建物ぶんを切り分ける。',
-    here: '現金が出ていかないのに経費にできるので、課税所得を圧縮できる。',
+    here: '現金が出ていかないのに経費にできるので、課税所得を圧縮できる。物件の収支タブと、💰お金の税金タブに金額が出ている。',
     hint: '法定耐用年数は木造22年・鉄骨34年・RC47年。耐用年数を過ぎた築古は「法定年数×20%」の短期間で一気に落とせる。' },
   depr_remaining: { scope: 'real', reading: 'ざんぞんしょうきゃく', group: '税・会計', label: '残存償却',
     def: 'あと何ヶ月ぶん減価償却を計上できるか。',
@@ -6092,7 +6493,7 @@ export const TERMS = {
     hint: '残り12ヶ月を切ったら、売却か買い増しを考えはじめる合図。' },
   dead_cross: { scope: 'real', group: '税・会計', label: 'デッドクロス',
     def: '減価償却が終わり、経費に落とせるものが無いのにローン返済だけが残る状態。',
-    calc: '経費になる減価償却費は年々減るのに、経費にならない元金返済の割合は年々増える。この2本の線が交差した後は、帳簿上の利益が実際の手残りを上回り続ける。',
+    calc: '減価償却費は毎月一定だが、償却期間が終わると一気に0になる。一方で元利均等返済のうち経費にならない元金の割合は年々増えていく。償却が切れた後は、帳簿上の利益が実際の手残りを上回り続ける。',
     here: '帳簿では黒字なのに手元の現金は減る、という一番きつい局面。',
     hint: '償却が切れる前に法人化して税率を抑えるか、売却して次の物件へ乗り換えるのが定石。' },
   capital_gains_tax: { scope: 'real', reading: 'じょうとぜい', group: '税・会計', label: '譲渡税',
@@ -6345,6 +6746,48 @@ export const TERMS = {
     calc: '税抜価格800万円以下の物件は、仲介手数料の上限が33万円（税込）の定額になる（速算式より現地調査等の実費が上回りやすいための特例）。',
     here: '訳あり物件など安価な物件の購入諸費用の仲介手数料に自動で適用される。',
     hint: '安い物件ほど、この定額33万円が価格に対する割合として重くなる。「価格が安いから諸費用も安い」とは限らない。' },
+
+  // v31: 役員報酬・賞与・役員退職金
+  officer_pay: { scope: 'real', reading: 'やくいんほうしゅう', group: '税・会計', label: '役員報酬',
+    def: '法人から役員（社長）へ支払う給与。法人の損金にできるが、社会保険料と個人の所得税・住民税がかかる。',
+    calc: '月額（定期同額給与）と賞与（事前確定届出給与）の2種類がある。合計から社会保険料の会社負担分を引いた額が法人の損金になる。',
+    here: '💰お金→税金タブの「🏢 役員報酬」カードから設定・シミュレーションができる。',
+    hint: '本業の給与がある間は出さないほうが得なことが多い。社会保険料（労使計約28%）が法人税の節税ぶんを食い潰しやすいため。' },
+  fixed_monthly_pay: { scope: 'real', reading: 'ていきどうがくきゅうよ', group: '税・会計', label: '定期同額給与',
+    def: '毎月同じ額を払う役員報酬。税務上、期の途中で自由に変えると損金にできなくなるための実務上の縛り。',
+    calc: '事業年度をまたいで金額を維持する必要がある。ゲームでは実務の「期首から3ヶ月以内」を簡略化し、期首月の1ヶ月だけ改定できることにしている。',
+    here: '💰お金→税金タブの役員報酬カードで、期首月だけ「今月だけ変更できます」と表示される。',
+    hint: '改定を逃すと前年と同じ額のまま次の期首まで固定される。0円に戻ったりはしない。' },
+  predetermined_bonus: { scope: 'real', reading: 'じぜんかくていとどけでぎゅうよ', group: '税・会計', label: '事前確定届出給与',
+    def: 'あらかじめ税務署に届け出た金額・支給日どおりに払う役員賞与。届出どおりに支給できないと全額が損金不算入になる。',
+    calc: '年1回、指定した支給月にまとめて支払う。ゲームでは「不相当に高額」の判定を簡略化し、上限を月額報酬の12ヶ月分に制限している。',
+    here: '支給月に現金が足りないと不支給になり、損金も社会保険料もゼロになる（支給前月に予告通知が出る）。',
+    hint: '月額を0円にすると賞与も出せない。月額をある程度出しておくことが賞与を使う前提になる。' },
+  social_insurance: { scope: 'real', reading: 'しゃかいほけんりょう', group: '税・会計', label: '社会保険料',
+    def: '役員報酬にかかる健康保険料・厚生年金保険料。会社と本人で半分ずつ負担する。',
+    calc: '月額・賞与それぞれに標準報酬（賞与）月額の上限があり、上限を超えた部分には保険料がかからない。年齢による変動（40歳以上の介護保険料上乗せ、70歳・75歳での資格喪失）は簡略化して入れていない。',
+    here: '役員報酬シミュレーターに会社負担・本人負担の内訳が出る。会社負担は法人の損金、本人負担は個人の社会保険料控除になる。',
+    hint: '労使合計でおよそ28%。役員報酬を経費化する最大の代償がこれ。' },
+  standard_monthly_pay: { scope: 'real', reading: 'ひょうじゅんほうしゅうげつがく', group: '税・会計', label: '標準報酬月額',
+    def: '社会保険料を計算するときの基準になる月額報酬の区分。実際の月額報酬とは上限で頭打ちになる。',
+    calc: 'ゲームでは簡略化し、月額報酬をそのまま（上限あり）保険料率にかける方式にしている（実務の等級表は使わない）。',
+    here: '月額報酬が上限（厚生年金65万円・健康保険139万円）を超えても、それ以上は保険料が増えない。',
+    hint: '高額の月額報酬ほど社会保険料の実効負担率は下がっていく。' },
+  retirement_allowance: { scope: 'real', reading: 'やくいんたいしょくいろうきん', group: '税・会計', label: '役員退職慰労金',
+    def: '役員が退任するときに法人から支払う退職金。生涯に1回だけ支給でき、損金にできる上限（器）がある。',
+    calc: '損金算入の上限 ＝ 在任中の平均月額報酬 × 勤続年数 × 功績倍率（3.0）。器を超えた分は損金不算入になる。',
+    here: '役員退職金モーダルで器の上限・支給額・損金算入額を確認できる。賞与は器に入らない（月額報酬だけが積み上がる）。',
+    hint: '退職直前に月額を吊り上げても、平均額で計算するので器は大きくならない。' },
+  retirement_deduction: { scope: 'real', reading: 'たいしょくしょとくこうじょ', group: '税・会計', label: '退職所得控除',
+    def: '退職金の個人課税を大きく軽くする控除。勤続年数が長いほど控除額が増える。',
+    calc: '勤続20年以下は40万円×勤続年数（最低80万円）、20年超は800万円＋70万円×（勤続年数−20）。控除後の額はさらに、勤続5年超なら1/2にしてから課税される（勤続5年以下は1/2課税が使えない）。',
+    here: '役員退職金モーダルに控除額・課税退職所得・1/2課税の可否が出る。',
+    hint: '勤続年数を延ばすほど控除も1/2課税も両方効くようになる。退職金は長期の役員報酬とセットで考える。' },
+  merit_multiplier: { scope: 'real', reading: 'こうせきばいりつ', group: '税・会計', label: '功績倍率',
+    def: '役員退職金の損金算入上限を決める倍率。会社への貢献度を反映するという建て付けで、代表取締役はおおむね3.0倍が実務の目安とされる。',
+    calc: '損金算入上限 ＝ 平均月額報酬 × 勤続年数 × 功績倍率。ゲームでは代表取締役の目安である3.0倍で固定している。',
+    here: '役員退職金モーダルの「器の上限」の計算に使われている。',
+    hint: '倍率そのものは変えられない。器を大きくしたいなら月額報酬か勤続年数を積み上げるしかない。' },
 };
 
 // === v6: 最低自己資金 ===
@@ -6397,7 +6840,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, afterTaxCF, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, PENSION_RATE, PENSION_CAP_MONTHLY, PENSION_CAP_BONUS, HEALTH_RATE, HEALTH_CAP_MONTHLY, HEALTH_CAP_BONUS_YEAR, socialInsuranceMonthly, socialInsuranceBonus, splitSocialInsurance, officerPayWindow, BONUS_MONTHS_CAP, bonusCapOf, setOfficerPay, officerPayPending, RETIREMENT_MULTIPLIER, SPECIFIC_OFFICER_YEARS, officerServiceYears, retirementAllowance, retirementDeduction, payRetirement, afterTaxCF, officerPayEstimate, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, deprTotalOf, totalMonthlyDepr, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -9721,11 +10164,18 @@ function renderMobileBars() {
   statusEl.querySelector('#ms-props').addEventListener('click', () => openKpiModal('props'));
 
   const unread = (state.notifications || []).filter(n => !n.read).length;
+  // v31.1: 期首月に役員報酬が未確定なら、翌月へ進めない旨を理由付きで示す。
+  const opPending = L.officerPayPending(state).pending;
   actEl.innerHTML = `
-    <button id="m-search" class="flex-1 bg-navy text-white rounded-xl py-3 text-xs font-bold shadow-lg">🏘️探す</button>
-    <button id="m-work" class="flex-1 bg-amber-500 text-white rounded-xl py-3 text-xs font-bold shadow-lg select-none touch-none">💼働く</button>
-    <button id="m-next" class="flex-1 bg-amber-600 text-white rounded-xl py-3 text-xs font-bold shadow-lg">📅翌月</button>
-    <button id="m-menu" class="w-12 bg-white text-navy rounded-xl py-3 text-lg font-bold shadow-lg relative">≡${unread ? `<span class="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] rounded-full px-1">${unread}</span>` : ''}</button>`;
+    <div class="w-full flex flex-col gap-1">
+      ${opPending ? `<div class="text-center text-[10px] font-bold text-red-600">⏳ 今月中に役員報酬を決めてください</div>` : ''}
+      <div class="flex gap-2">
+        <button id="m-search" class="flex-1 bg-navy text-white rounded-xl py-3 text-xs font-bold shadow-lg">🏘️探す</button>
+        <button id="m-work" class="flex-1 bg-amber-500 text-white rounded-xl py-3 text-xs font-bold shadow-lg select-none touch-none">💼働く</button>
+        <button id="m-next" class="flex-1 bg-amber-600 text-white rounded-xl py-3 text-xs font-bold shadow-lg ${opPending ? 'opacity-40' : ''}">📅翌月</button>
+        <button id="m-menu" class="w-12 bg-white text-navy rounded-xl py-3 text-lg font-bold shadow-lg relative">≡${unread ? `<span class="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] rounded-full px-1">${unread}</span>` : ''}</button>
+      </div>
+    </div>`;
   actEl.querySelector('#m-search').addEventListener('click', openSearchModal);
   wireWorkButton(actEl.querySelector('#m-work'));
   actEl.querySelector('#m-next').addEventListener('click', onNextMonth);
@@ -9991,7 +10441,7 @@ function incorporationPitch() {
         ? '物件を買ってからでよいでしょう。'
         : `NOIへの課税は${term('dead_cross', 'デッドクロス')}（${term('depreciation', '減価償却')}切れ）後にしか発生しません。`
           + `いちばん早い物件で<b>あと${soonest}ヶ月</b>です。`}
-      <div class="mt-1">売却時の${term('capital_gains_tax', '譲渡税')}を短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}→${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}にしたい場合は、早めの設立にも意味があります。</div>
+      <div class="mt-1">売却益にかかる税を、個人の短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}から法人税率（800万円以下${L.fmtTaxRate(L.CORP_LOW_RATE)}・超過${L.fmtTaxRate(L.CORP_HIGH_RATE)}）に変えたい場合は、早めの設立にも意味があります。</div>
     </div>`;
   }
   const years = payback == null ? null : Math.round(payback * 10) / 10;
@@ -10573,7 +11023,9 @@ function taxTabHtml(state, uiState) {
     <div>運営費（管理費・修繕積立・管理会社への手数料）</div>
     <div>固定資産税</div>
     <div>支払利息</div>
-    <div>減価償却費</div>
+    <div>減価償却費 今年 ${L.yen((state.books?.personal?.depr ?? 0) + (state.books?.corp?.depr ?? 0))}（今月 ${L.yen(L.totalMonthlyDepr(state, 'personal') + L.totalMonthlyDepr(state, 'corp'))}）
+      ${showCorpExpense ? `<div class="text-[10.5px] text-slate-400 mt-0.5">👤 ${L.yen(state.books?.personal?.depr ?? 0)} ／ 🏢 ${L.yen(state.books?.corp?.depr ?? 0)}</div>` : ''}
+    </div>
     <div>原状回復・日常メンテ・広告費・突発修繕</div>
     <div>資本的支出の償却</div>
     <div class="font-bold text-red-600 pt-1.5 mt-1 border-t">※ 元金返済は経費になりません（利益が出ているのに現金が減っていく「デッドクロス」の正体はこれです）</div>
@@ -10607,6 +11059,7 @@ function taxTabHtml(state, uiState) {
   return `
     ${personalCard}
     ${corpCard}
+    ${state.isIncorporated ? officerPayCardHtml(state) : ''}
     ${carryLossHtml}
     ${consumptionTaxLine}
     <div class="border rounded-lg p-3 mb-3">
@@ -10616,6 +11069,36 @@ function taxTabHtml(state, uiState) {
     <div>${collapseHeader('books-toggle-expense', uiState.expenseOpen, '💰 今年の経費の内訳', '')}</div>
     ${uiState.expenseOpen ? `<div class="mt-1">${expenseDetailHtml}</div>` : ''}
   `;
+}
+
+// v31: 「💰 お金」ハブ・税金タブの「🏢 役員報酬」カード。法人化済み（state.isIncorporated）の
+// ときだけ呼ばれる。法人の損益カードの直後に置く。
+function officerPayCardHtml(state) {
+  const op = state.officerPay;
+  if (op.retired) {
+    const r = state.retirementRecord;
+    return `<div class="border rounded-lg p-3 mb-3">
+      <div class="font-bold text-sm mb-2">🏢 ${term('officer_pay', '役員報酬')}</div>
+      <div class="text-sm">退職金支給済み（${L.yen(r.amount)}・${L.fmtYM(r.month)}）</div>
+      <div class="text-[11px] text-slate-500 mt-1">以後、役員報酬・賞与は発生しません。</div>
+    </div>`;
+  }
+  const win = L.officerPayWindow(state);
+  const windowHtml = win.open
+    ? `<div class="text-xs font-bold text-emerald-700 mt-2">📝 今月だけ変更できます</div>`
+    : `<div class="text-[11px] text-slate-500 mt-2">次の改定は ${L.fmtYM(win.nextOpenMonth)}</div>`;
+  const hasPay = op.monthly > 0;
+  const showRetireBtn = L.retirementAllowance(state) > 0;
+  return `<div class="border rounded-lg p-3 mb-3">
+    <div class="font-bold text-sm mb-2">🏢 ${term('officer_pay', '役員報酬')}</div>
+    ${hasPay ? `<table class="w-full text-sm">
+      <tr><td>月額</td><td class="text-right font-bold">${L.yen(op.monthly)}</td></tr>
+      <tr><td>賞与</td><td class="text-right">${op.bonus > 0 ? `${L.yen(op.bonus)}（${op.bonusMonth}月支給）` : 'なし'}</td></tr>
+    </table>` : `<div class="text-[11px] text-slate-500">役員報酬を出すと法人の損金になりますが、社会保険料がかかります。</div>`}
+    ${windowHtml}
+    <button id="mh-officer-pay" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-2">役員報酬を決める</button>
+    ${showRetireBtn ? `<button id="mh-officer-retire" class="w-full border rounded-lg py-2 text-xs font-bold text-red-600 hover:bg-red-50 mt-2">🏁 役員退職金</button>` : ''}
+  </div>`;
 }
 
 // v18: 「💰 お金」ハブの資産タブ。旧 openKpiModal('cash')（資産スナップショット）の中身をそのまま移設。
@@ -10676,7 +11159,7 @@ function assetsTabHtml(state) {
   ${soldBlock}
   ${!state.isIncorporated ? `<div class="mt-4 pt-4 border-t">
     <h3 class="font-bold text-sm mb-1">🏢 法人化</h3>
-    <p class="text-[11px] text-slate-500 mb-2">設立費用 ${L.yen(L.CONFIG.corporateSetupCost)}。以降、NOIへの課税が法人税率（${L.CONFIG.corporateTaxRate * 100}%）に固定されます。</p>
+    <p class="text-[11px] text-slate-500 mb-2">設立費用 ${L.yen(L.CONFIG.corporateSetupCost)}。以降、NOIへの課税は法人税率（800万円以下23%・超過33%＋均等割7万円。赤字でも均等割はかかります）になります。</p>
     ${incorporationPitch()}
     <button id="btn-incorporate" class="w-full bg-navy text-white rounded py-2 text-sm ${state.cash < L.CONFIG.corporateSetupCost ? 'opacity-40' : ''}" ${state.cash < L.CONFIG.corporateSetupCost ? 'disabled' : ''}>法人を設立する</button>
   </div>` : '<div class="mt-4 pt-4 border-t text-sm font-bold text-navy">🏢 法人化済み</div>'}`;
@@ -10820,6 +11303,8 @@ function openMoneyHub(initialTab = 'month') {
     } else if (activeTab === 'tax') {
       body.innerHTML = taxTabHtml(state, taxState);
       body.querySelector('.books-toggle-expense')?.addEventListener('click', () => { taxState.expenseOpen = !taxState.expenseOpen; draw(); });
+      body.querySelector('#mh-officer-pay')?.addEventListener('click', () => { close(); openOfficerPaySimulator(() => openMoneyHub('tax')); });
+      body.querySelector('#mh-officer-retire')?.addEventListener('click', () => { close(); openOfficerRetirementModal(() => openMoneyHub('tax')); });
     } else if (activeTab === 'loans') {
       body.innerHTML = loansTabHtml(state);
       body.querySelectorAll('.mh-loan-row').forEach(b => b.addEventListener('click', () => {
@@ -10842,6 +11327,201 @@ function openMoneyHub(initialTab = 'month') {
     if (navStack.length > 1) navBack(); else close();
   });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
+}
+
+// v31: 役員報酬シミュレーター。月額・賞与のスライダーを動かすたびに年間負担を再計算する。
+function openOfficerPaySimulator(back) {
+  navGo({ key: 'officer-pay', open: () => openOfficerPaySimulator(back) });
+  const op = state.officerPay;
+  let monthly = op.monthly;
+  let bonus = op.bonus;
+  let bonusMonth = op.bonusMonth || ((state.month % 12) + 1);   // 未設定なら適当な既定値
+  const win = L.officerPayWindow(state);
+  const overlay = el(`<div id="lm-officerpay-modal" class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" style="align-items:safe center;">
+    <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0">
+        <div class="flex justify-between items-center gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <button id="op-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
+            <h2 class="font-bold text-base truncate">🏢 役員報酬シミュレーター</h2>
+          </div>
+          <button id="op-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
+        </div>
+      </div>
+      <div id="op-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3"></div>
+    </div>
+  </div>`);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const body = overlay.querySelector('#op-body');
+
+  const draw = () => {
+    const cap = L.bonusCapOf(monthly);
+    if (bonus > cap) bonus = cap;   // 月額を下げて賞与が上限を超えたら自動でクランプする
+    const est = L.officerPayEstimate(state, { monthly, bonus });
+    // v31.1: ウィンドウ外でもスライダーは動かせる（試算だけできる）。無効化するのは確定ボタンだけ。
+    const confirmDisabled = !win.open;
+    const bonusDisabled = monthly === 0;
+    const isSettlementMonth = state.corpFiscalMonth != null && L.calMonthOf(state.month) === state.corpFiscalMonth;
+    const windowNote = win.open
+      ? `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800 font-bold">⏳ 今月中に確定してください。確定するまで翌月へ進めません</div>`
+      : isSettlementMonth
+      ? `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800">📊 決算が確定しました。確定できるのは来月（期首月）です。ここでは試算だけできます</div>`
+      : `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800">⚠️ 今は改定できません（${
+          win.reason === 'retired' ? '退任済み' : win.reason === 'not_incorporated' ? '未法人化' : `次の改定は ${L.fmtYM(win.nextOpenMonth)}`
+        }）。ここでは試算だけできます</div>`;
+    body.innerHTML = `
+      ${windowNote}
+      <div>
+        <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">${term('fixed_monthly_pay', '月額報酬')}</span><span class="font-bold text-lg">${L.yen(monthly)}</span></div>
+        <input id="op-monthly" type="range" min="0" max="1500000" step="50000" value="${monthly}" class="w-full">
+      </div>
+      <div>
+        <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">${term('predetermined_bonus', '賞与')}</span><span class="font-bold text-lg">${L.yen(bonus)}</span></div>
+        <input id="op-bonus" type="range" min="0" max="${cap}" step="250000" value="${bonus}" class="w-full" ${bonusDisabled ? 'disabled' : ''}>
+        ${monthly === 0 ? `<div class="text-[10.5px] text-slate-400 mt-0.5">月額が0円のあいだは賞与を出せません</div>` : `<div class="text-[10.5px] text-slate-400 mt-0.5">上限 ${L.yen(cap)}（月額の12ヶ月分）</div>`}
+      </div>
+      <div class="${bonus > 0 ? '' : 'opacity-40'}">
+        <label class="text-sm font-bold">賞与の支給月</label>
+        <select id="op-bonus-month" class="w-full border rounded p-2 text-sm mt-1" ${bonusDisabled || bonus === 0 ? 'disabled' : ''}>
+          ${Array.from({ length: 12 }, (_, i) => i + 1).map(m => `<option value="${m}" ${m === bonusMonth ? 'selected' : ''}>${m}月</option>`).join('')}
+        </select>
+      </div>
+      <div class="border rounded-lg p-3 bg-slate-50">
+        <div class="text-[10.5px] text-slate-400 mb-1">この試算は法人の年間所得を <b>${L.yen(est.assumedCorpIncome)}</b> と見込んでいます（今期の実績を年換算した額）</div>
+        <div class="text-xs text-slate-500">年間トータル流出</div>
+        <div class="text-2xl font-black tabular-nums">${L.yen(est.totalOutflow)}</div>
+        <div class="text-sm mt-1">役員報酬なしとの差
+          <b class="${est.deltaVsZero < 0 ? 'text-emerald-700' : est.deltaVsZero > 0 ? 'text-red-600' : ''}">${
+            est.deltaVsZero < 0 ? `${L.yen(-est.deltaVsZero)} 得` : est.deltaVsZero > 0 ? `${L.yen(est.deltaVsZero)} 損` : L.yen(0)
+          }</b>
+        </div>
+        <div class="text-xs text-slate-600 mt-2 space-y-0.5">
+          <div class="flex justify-between"><span>法人税等（見込み）</span><span>${L.yen(est.corpTax)}</span></div>
+          <div class="flex justify-between"><span>個人の所得税・住民税の増分</span><span>${signedYen(est.personalTaxDelta)}</span></div>
+          <div class="flex justify-between"><span>${term('social_insurance', '社会保険料')}（労使計）</span><span>${L.yen(est.siTotal)}</span></div>
+          <div class="text-[10.5px] text-slate-400 pl-2">↳ 会社負担 ${L.yen(est.siCorp)} ／ 本人負担 ${L.yen(est.siSelf)}</div>
+        </div>
+      </div>
+      <div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
+        <div class="flex justify-between"><span>${term('retirement_allowance', '退職金の器')}（この月額を目標期限まで続けた場合・勤続${est.projectedYears}年）</span><span class="font-bold">${L.yen(est.retirementRoom)}</span></div>
+        ${bonus > 0 ? `<div class="flex justify-between"><span>賞与支給月に必要な残高</span><span class="font-bold">${L.yen(est.bonusCashNeeded)}</span></div>` : ''}
+      </div>
+      <button id="op-confirm" class="w-full bg-navy text-white rounded py-2 text-sm font-bold ${confirmDisabled ? 'opacity-40' : ''}" ${confirmDisabled ? 'disabled' : ''}>この内容で確定する（据え置きでもOK・今期は変更できません）</button>
+    `;
+    body.querySelector('#op-monthly')?.addEventListener('input', (e) => { monthly = Number(e.target.value); draw(); });
+    body.querySelector('#op-bonus')?.addEventListener('input', (e) => { bonus = Number(e.target.value); draw(); });
+    body.querySelector('#op-bonus-month')?.addEventListener('change', (e) => { bonusMonth = Number(e.target.value); draw(); });
+    body.querySelector('#op-confirm')?.addEventListener('click', () => {
+      const r = L.setOfficerPay(state, { monthly, bonus, bonusMonth: bonus > 0 ? bonusMonth : null });
+      if (!r.done) return;
+      state = r.state;
+      // v31.1: 確定したら期限の通知（officer_pay_window / officer_pay_upcoming）を既読にする。
+      (state.notifications || []).filter(n => !n.read && (n.kind === 'officer_pay_window' || n.kind === 'officer_pay_upcoming'))
+        .forEach(n => { state = L.markNotificationRead(state, n.id).state; });
+      pushLog(`🏢 役員報酬を設定した（月額 ${L.yen(monthly)}／賞与 ${bonus > 0 ? L.yen(bonus) : 'なし'}）`);
+      save(); render(); close(); back?.();
+    });
+  };
+  draw();
+  overlay.querySelector('#op-close').addEventListener('click', dismiss(close));
+  overlay.querySelector('#op-back').addEventListener('click', () => {
+    if (navStack.length > 1) navBack(); else { close(); back?.(); }
+  });
+}
+
+// v31: 役員退職金モーダル。器の上限・損金算入額・1/2課税の可否・法人税の減少額を即時に見せる。
+function openOfficerRetirementModal(back) {
+  navGo({ key: 'officer-retire', open: () => openOfficerRetirementModal(back) });
+  const op = state.officerPay;
+  const years = L.officerServiceYears(state);
+  const avgMonthly = op.monthsAccrued > 0 ? Math.round(op.totalMonthlyAccrued / op.monthsAccrued) : 0;
+  const allowance = L.retirementAllowance(state);
+  const deduction = L.retirementDeduction(years);
+  const halved = years > L.SPECIFIC_OFFICER_YEARS;
+  const maxAmount = Math.max(0, Math.min(Math.round(allowance * 1.5), state.cash));
+  let amount = Math.min(allowance, state.cash);
+  // 法人の今期の法人所得見込み（退職金を引く前）。officerPayEstimateと同じ考え方で年換算する。
+  const monthsElapsed = L.calMonthOf(state.month);
+  const cb = state.books?.corp ?? { income: 0, expense: 0, bonusBooked: 0 };
+  const bonusBooked = cb.bonusBooked ?? 0;
+  const netCorpBase = Math.round(((cb.income - cb.expense) + bonusBooked) * 12 / monthsElapsed) - bonusBooked;
+  const corpTaxOf = (net) => L.corporateTaxOf(Math.max(0, net)) + L.CORP_PER_CAPITA_TAX;
+
+  const overlay = el(`<div id="lm-officerretire-modal" class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" style="align-items:safe center;">
+    <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0">
+        <div class="flex justify-between items-center gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <button id="or-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
+            <h2 class="font-bold text-base truncate">🏁 役員退職金</h2>
+          </div>
+          <button id="or-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
+        </div>
+      </div>
+      <div id="or-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3"></div>
+    </div>
+  </div>`);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const body = overlay.querySelector('#or-body');
+
+  const draw = () => {
+    const allowed = Math.min(amount, allowance);
+    const disallowed = amount - allowed;
+    const base = Math.max(0, amount - deduction);
+    const taxable = Math.round(halved ? base / 2 : base);
+    const tax = L.incomeTaxOf(taxable) + Math.round(taxable * L.RESIDENT_TAX_RATE);
+    const corpTaxBefore = corpTaxOf(netCorpBase);
+    const corpTaxAfter = corpTaxOf(netCorpBase - allowed);
+    const corpTaxSaved = corpTaxBefore - corpTaxAfter;
+    const netSaving = corpTaxSaved - tax;
+    const insufficientCash = amount > state.cash;
+
+    body.innerHTML = `
+      <table class="w-full text-sm">
+        <tr><td>勤続年数</td><td class="text-right font-bold">${years}年</td></tr>
+        <tr><td>在任中の平均月額報酬</td><td class="text-right">${L.yen(avgMonthly)}</td></tr>
+        <tr class="border-t"><td>${term('retirement_allowance', '器の上限')}（${term('merit_multiplier', '功績倍率')}3.0）</td><td class="text-right font-bold">${L.yen(allowance)}</td></tr>
+      </table>
+      <div>
+        <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">支給額</span><span class="font-bold text-lg">${L.yen(amount)}</span></div>
+        <input id="or-amount" type="range" min="0" max="${maxAmount}" step="100000" value="${amount}" class="w-full" ${maxAmount === 0 ? 'disabled' : ''}>
+      </div>
+      <div class="text-xs bg-slate-50 rounded-lg p-2.5 space-y-1">
+        <div class="flex justify-between"><span>損金算入額</span><span>${L.yen(allowed)}</span></div>
+        ${disallowed > 0 ? `<div class="flex justify-between text-red-600 font-bold"><span>損金不算入額（器の超過分）</span><span>${L.yen(disallowed)}</span></div>` : ''}
+        <div class="flex justify-between border-t pt-1 mt-1"><span>${term('retirement_deduction', '退職所得控除')}</span><span>${L.yen(deduction)}</span></div>
+        <div class="flex justify-between"><span>課税退職所得</span><span>${L.yen(taxable)}</span></div>
+        <div class="text-[10.5px] ${halved ? 'text-slate-400' : 'text-amber-700 font-bold'}">${halved ? '勤続5年超なので1/2課税が適用されています' : '⚠️ 勤続5年以下のため1/2課税は使えません'}</div>
+      </div>
+      <div class="border rounded-lg p-3 bg-slate-50 space-y-1">
+        <div class="flex justify-between text-sm"><span>法人税等が減る額</span><span class="text-emerald-700 font-bold">-${L.yen(corpTaxSaved)}</span></div>
+        <div class="flex justify-between text-sm"><span>個人が払う税金（源泉徴収）</span><span class="text-red-600 font-bold">${L.yen(tax)}</span></div>
+        <div class="flex justify-between text-sm border-t pt-1 mt-1 font-bold"><span>差引の節税額</span><span class="${netSaving >= 0 ? 'text-emerald-700' : 'text-red-600'}">${netSaving >= 0 ? L.yen(netSaving) : `-${L.yen(-netSaving)}`}</span></div>
+      </div>
+      <div class="text-xs text-slate-600 space-y-0.5">
+        <div class="flex justify-between"><span>必要残高</span><span class="${insufficientCash ? 'text-red-600 font-bold' : ''}">${L.yen(amount)}</span></div>
+        <div class="flex justify-between"><span>現在の残高</span><span>${L.yen(state.cash)}</span></div>
+      </div>
+      ${insufficientCash ? `<div class="text-[11px] text-red-600 font-bold">⚠️ 現金が足りません</div>` : ''}
+      <button id="or-confirm" class="w-full bg-red-600 text-white rounded py-2 text-sm font-bold ${(amount <= 0 || insufficientCash) ? 'opacity-40' : ''}" ${(amount <= 0 || insufficientCash) ? 'disabled' : ''}>支給して退任する（取り消せません）</button>
+    `;
+    body.querySelector('#or-amount')?.addEventListener('input', (e) => { amount = Number(e.target.value); draw(); });
+    body.querySelector('#or-confirm')?.addEventListener('click', () => {
+      if (!confirm(`役員退職金 ${L.yen(amount)} を支給して退任します。以後、役員報酬・賞与は一切出せなくなります。よろしいですか？`)) return;
+      const r = L.payRetirement(state, amount);
+      if (!r.done) return;
+      state = r.state;
+      pushLog(`🏁 役員退職金 ${L.yen(amount)} を支給し、退任した`);
+      save(); render(); close(); back?.();
+    });
+  };
+  draw();
+  overlay.querySelector('#or-close').addEventListener('click', dismiss(close));
+  overlay.querySelector('#or-back').addEventListener('click', () => {
+    if (navStack.length > 1) navBack(); else { close(); back?.(); }
+  });
 }
 
 // v3.5: 一括査定の結果から直接売出設定へ（査定は取得済み。既に売出中なら管理画面へ）
@@ -12056,6 +12736,7 @@ const PL_COL_GROUPS = {
   in:    'bg-emerald-50',
   loss:  'bg-amber-50',
   cost:  'bg-rose-50',
+  noncash: 'bg-indigo-50 text-indigo-700',
   result:'bg-white font-bold',
   bal:   'bg-slate-50 text-slate-500',
 };
@@ -12072,6 +12753,7 @@ function monthlyPlTable(p) {
     ${td(`-${L.yen(h.propTaxM ?? 0)}`, 'cost', false)}
     ${td(`-${L.yen(h.interest)}`, 'cost', false)}
     ${td(`-${L.yen(h.principal)}`, 'cost', false)}
+    ${td(h.depr == null ? '—' : '-' + L.yen(h.depr), 'noncash', true)}
     ${td(h.tax ? `-${L.yen(h.tax)}` : '—', 'cost', false)}
     ${td(signedYen(h.cf), 'result', true, h.cf >= 0 ? 'text-emerald-700' : 'text-red-600')}
     ${td(h.balance == null ? '—' : L.yen(h.balance), 'bal', true)}
@@ -12080,12 +12762,12 @@ function monthlyPlTable(p) {
     <table class="w-full text-[11px] whitespace-nowrap tabular-nums border-collapse">
       <thead class="sticky top-0"><tr>
         ${th('月', 'head', false)}${th('家賃', 'in', true)}${th('空室損', 'loss', true)}
-        ${th('運営費', 'cost', true)}${th('固都税', 'cost', false)}${th('利息', 'cost', false)}${th('元金', 'cost', false)}${th('税(試算)', 'cost', false)}
+        ${th('運営費', 'cost', true)}${th('固都税', 'cost', false)}${th('利息', 'cost', false)}${th('元金', 'cost', false)}${th('償却', 'noncash', true)}${th('税(試算)', 'cost', false)}
         ${th('CF', 'result', true)}${th('残高', 'bal', true)}
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div></div>
-    <div class="text-[10px] text-slate-500 mt-1 px-0.5">※「税(試算)」はこの物件だけを切り出した理論値。実際の納税は名義（個人／法人）ごとに全物件を合算して、決まった月にまとめて払う。</div>`;
+    <div class="text-[10px] text-slate-500 mt-1 px-0.5">※「税(試算)」はこの物件だけを切り出した理論値。実際の納税は名義（個人／法人）ごとに全物件を合算して、決まった月にまとめて払う。※「償却」は現金が出ていかない経費なので、CFには含まれていない。</div>`;
 }
 
 // v15: 収支タブをこの物件の通信簿として一本化する。売却後に見る記録カードと
@@ -12099,11 +12781,13 @@ function plTab(p, opts = {}) {
   // v15: 償却が切れると課税が始まる（デッドクロス）。あと何年で切れるのかは
   // 売却タイミングの判断に直結するので、収支タブに常設する。
   const dm = p.deprRemaining ?? 0;
+  const deprMonthlyAmt = Math.round(L.monthlyDepreciation(p.boughtPrice ?? p.price, p.bldgRatio, L.deprTotalOf(p, state.month)));
+  const deprAnnualAmt = deprMonthlyAmt * 12;
   const deprLine = dm <= 0
-    ? `<div class="text-xs mt-2 text-center"><span class="text-red-600 font-bold">償却切れ（デッドクロス）</span></div>`
+    ? `<div class="text-xs mt-2 text-center"><span class="text-red-600 font-bold">償却切れ（デッドクロス）</span><span class="text-[10px] text-slate-500"> 経費にできる償却費は0円です</span></div>`
     : dm <= 24
-      ? `<div class="text-xs mt-2 text-center text-amber-600">あと${Math.floor(dm / 12)}年${dm % 12}ヶ月で償却切れ</div>`
-      : `<div class="text-xs mt-2 text-center text-slate-600">残存償却 ${Math.floor(dm / 12)}年${dm % 12}ヶ月</div>`;
+      ? `<div class="text-xs mt-2 text-center text-amber-600">あと${Math.floor(dm / 12)}年${dm % 12}ヶ月で償却切れ（いまの償却費 月${L.yen(deprMonthlyAmt)}・年${L.yen(deprAnnualAmt)}）</div>`
+      : `<div class="text-xs mt-2 text-center text-slate-600">残存償却 ${Math.floor(dm / 12)}年${dm % 12}ヶ月／償却費 月${L.yen(deprMonthlyAmt)}（年${L.yen(deprAnnualAmt)}）</div>`;
   const last = p.history.at(-1);
   return `<div class="border rounded-lg p-3">${scorecardSummaryHtml(card, { summaryOpen: !!opts.plSummaryOpen })}${deprLine}</div>
     <div class="mt-3">${collapseHeader('pl-toggle-breakdown', !!opts.plBreakdownOpen, '損益の内訳', `手取り見込 <span class="text-emerald-700">${L.yen(card.netProceeds)}</span>`)}</div>
@@ -13138,9 +13822,9 @@ function openCorpTransfer(propId) {
       <tr class="border-t font-bold"><td>支払い合計</td><td class="text-right whitespace-nowrap w-px pl-2 text-red-600">${L.yen(total)}</td></tr>
     </table>
     <div class="text-xs text-slate-600 bg-slate-50 rounded p-2 space-y-1">
-      <div>✅ 以後の課税は法人税率30%（${term('dead_cross', 'デッドクロス')}後も40%にならない）</div>
+      <div>✅ 以後の課税は法人税率（800万円以下23%・超過33%＋均等割7万円）に（${term('dead_cross', 'デッドクロス')}後も税率は変わらない）</div>
       <div>✅ <b>${term('depreciation', '減価償却')}が再スタート</b>（中古簡便法・取得価額=現在の時価）</div>
-      <div>✅ 売却時の${term('capital_gains_tax', '譲渡税')}が保有期間に関係なく30%に</div>
+      <div>✅ 売却益は保有期間による税率区分がなくなる（法人の利益に合算して課税）</div>
     </div>
     <button id="tc-run" class="w-full bg-navy text-white rounded py-2 text-sm font-bold ${state.cash < total ? 'opacity-40' : ''}" ${state.cash < total ? 'disabled' : ''}>法人へ移転する（${L.yen(total)} 支払い）</button>
     <button id="tc-cancel" class="w-full text-slate-500 text-sm">やめる</button>
@@ -13156,7 +13840,7 @@ function openCorpTransfer(propId) {
     pushLog(`${p.name || p.label} を法人へ移転（譲渡税${L.yen(r.capTax)}・取得コスト${L.yen(r.acqCost)}・償却再スタート）`);
     save(); render(); close();
     // v3.6: 移転も決定的イベントとして判子スタンプ演出に統一
-    playStampFx({ stamp: '移転完了', title: '法人名義へ！', sub: `${p.name || p.label}（課税30%・償却再スタート）`, emojis: ['🏢', '📋', '✨', '💴', '✨'] });
+    playStampFx({ stamp: '移転完了', title: '法人名義へ！', sub: `${p.name || p.label}（法人税率・償却再スタート）`, emojis: ['🏢', '📋', '✨', '💴', '✨'] });
   });
 }
 
@@ -14452,27 +15136,39 @@ function playPurchaseCelebration(name, priceText) {
 // v3.5: 法人設立の演出。買付・購入と同トーンの判子スタンプ＋「何が変わったか」の明示リスト。
 function playIncorporationCelebration() {
   sfxFanfare();
-  const overlay = el(`<div class="fixed inset-0 z-[70] overflow-hidden flex items-center justify-center p-4" style="background:radial-gradient(ellipse at center, rgba(15,23,42,0.86) 0%, rgba(2,6,23,0.96) 100%);">
+  // v31.1: 内容が増えて 375×667 では主ボタンが初期表示から画面外へ落ちていた（実測 top 638 / 画面高 667）。
+  // 全画面オーバーレイを縦フレックスにし、説明リストだけを伸縮＋内部スクロールさせて、
+  // ボタンは常に最下部に見えるようにする（モーダルの標準型と同じ考え方）。
+  const overlay = el(`<div class="fixed inset-0 z-[70] overflow-hidden flex items-center justify-center p-4" style="background:radial-gradient(ellipse at center, rgba(15,23,42,0.86) 0%, rgba(2,6,23,0.96) 100%);align-items:safe center;">
     <style>
       @keyframes ic-stamp { 0% { transform: scale(3.2) rotate(14deg); opacity: 0; } 55% { transform: scale(0.92) rotate(-8deg); opacity: 1; } 75% { transform: scale(1.07) rotate(-8deg); } 100% { transform: scale(1) rotate(-8deg); opacity: 1; } }
       @keyframes ic-burst { 0% { transform: scale(0.2) rotate(0deg); opacity: 1; } 100% { transform: scale(1.9) rotate(24deg); opacity: 0; } }
     </style>
     <div class="absolute inset-0 flex items-center justify-center pointer-events-none"><div style="width:520px;height:520px;border-radius:50%;background:repeating-conic-gradient(rgba(251,191,36,0.4) 0 10deg, transparent 10deg 30deg);animation: ic-burst 1.0s ease-out forwards;"></div></div>
-    <div class="relative text-center text-white space-y-4 max-w-md w-full">
-      <div class="mx-auto w-40 h-40 rounded-full bg-white/95 shadow-2xl flex items-center justify-center" style="border:9px solid #dc2626;animation: ic-stamp 0.55s cubic-bezier(.2,1.4,.4,1) forwards;">
-        <span class="text-4xl font-black" style="color:#dc2626;">法人設立</span></div>
-      <div class="text-3xl font-black tracking-widest">🏢 <span style="background:linear-gradient(180deg,#fde68a,#f59e0b);-webkit-background-clip:text;background-clip:text;color:transparent;">法人成り！</span></div>
-      <div class="bg-white/95 rounded-xl p-4 text-left text-sm text-slate-800 space-y-2">
+    <div class="relative text-center text-white max-w-md w-full max-h-full flex flex-col gap-3">
+      <div class="mx-auto w-32 sm:w-40 h-32 sm:h-40 rounded-full bg-white/95 shadow-2xl flex items-center justify-center shrink-0" style="border:9px solid #dc2626;animation: ic-stamp 0.55s cubic-bezier(.2,1.4,.4,1) forwards;">
+        <span class="text-3xl sm:text-4xl font-black" style="color:#dc2626;">法人設立</span></div>
+      <div class="text-2xl sm:text-3xl font-black tracking-widest shrink-0">🏢 <span style="background:linear-gradient(180deg,#fde68a,#f59e0b);-webkit-background-clip:text;background-clip:text;color:transparent;">法人成り！</span></div>
+      <div class="bg-white/95 rounded-xl p-4 text-left text-sm text-slate-800 space-y-2 flex-1 min-h-0 overflow-y-auto">
         <div class="font-bold text-navy">ここが変わりました</div>
         <div>✅ 購入時に<b>名義（👤個人／🏢法人）</b>を選べるように</div>
-        <div>✅ 法人名義の物件は<b>${term('dead_cross', 'デッドクロス')}後の課税が30%</b>に軽減（個人は40%）</div>
-        <div>✅ 法人名義の売却は<b>保有期間に関係なく${term('capital_gains_tax', '譲渡税')}${L.fmtTaxRate(L.CONFIG.corporateTaxRate)}</b>（個人の短期${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}より転売に有利）</div>
+        <div>✅ 利益にかかるのは<b>法人税</b>（800万円以下${L.fmtTaxRate(L.CORP_LOW_RATE)}・超過${L.fmtTaxRate(L.CORP_HIGH_RATE)}＋均等割${L.yen(L.CORP_PER_CAPITA_TAX)}）。${term('dead_cross', 'デッドクロス')}後も税率は変わらない</div>
+        <div>✅ 売却益は<b>保有期間による税率区分がない</b>（個人は5年以内なら${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}）。法人の利益に合算して課税される</div>
+        <div>✅ <b>自分への給与（${term('officer_pay', '役員報酬')}）を法人の経費にできる</b>。ただし${term('social_insurance', '社会保険料')}がかかるので、出せば得とは限らない</div>
+        <div>✅ <b>引退時に役員退職金</b>を出せる。退職所得は税がとても軽く、月額報酬がその${term('retirement_allowance', '「器」')}を育てる</div>
         <div>✅ 既存の物件は<b>👤個人名義のまま</b>。詳細画面の「🏢法人へ売却」で移転できます（ローン完済物件のみ・移転すると減価償却が再スタート）</div>
       </div>
-      <button id="ic-close" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-3 font-bold">経営を続ける ▶</button>
+      <div class="text-sm font-bold bg-amber-50 border border-amber-200 rounded-lg p-2.5 text-amber-800 shrink-0">⏳ 役員報酬を決められるのは事業年度に1度、期首月だけです。今月がその月です。</div>
+      <div class="shrink-0 space-y-2">
+        <button id="ic-decide" class="w-full bg-navy text-white rounded-xl py-3 font-bold">役員報酬を決める</button>
+        <button id="ic-later" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-2.5 font-bold">あとで</button>
+        <div class="text-[10.5px] text-white/70 text-center">今月中に決めるまで翌月へは進めません</div>
+      </div>
     </div></div>`);
   document.body.appendChild(overlay);
-  overlay.querySelector('#ic-close').addEventListener('click', () => overlay.remove());
+  const close = () => overlay.remove();
+  overlay.querySelector('#ic-decide').addEventListener('click', () => { close(); openOfficerPaySimulator(); });
+  overlay.querySelector('#ic-later').addEventListener('click', () => { close(); });
 }
 
 // 購入・売却成立時のお祝い演出（人生の大イベント感を出す：コンフェッティ+ファンファーレ+バナー）
@@ -14555,9 +15251,12 @@ function renderPanelRight() {
       ${skillRow('目利き力', 'appraisal')}${skillRow('交渉力', 'negotiation')}${skillRow('自主管理', 'selfmgmt')}
     </div>
   `));
+  // v31.1: 期首月に役員報酬が未確定なら、翌月へ進めない旨を理由付きで示す。
+  const opPendingDesk = L.officerPayPending(state).pending;
   c.appendChild(el(`
     <div class="mt-auto hud-panel pointer-events-auto rounded-xl shadow-xl p-2">
-      <button id="btn-next-month-desk" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-4 font-bold text-base shadow-lg">📅 翌月へ進む ▶</button>
+      ${opPendingDesk ? `<div class="text-[11px] font-bold text-red-600 text-center mb-1">⏳ 今月中に役員報酬を決めてください</div>` : ''}
+      <button id="btn-next-month-desk" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-4 font-bold text-base shadow-lg ${opPendingDesk ? 'opacity-40' : ''}">📅 翌月へ進む ▶</button>
       <div class="text-[11px] hud-accent font-bold text-center mt-1">⚡ 進むと行動力が全回復</div>
     </div>
   `));
@@ -14838,13 +15537,18 @@ function openNotificationsModal() {
   // ただし他決済みで snapshot も無い場合は飛び先が無いため、その行だけタップ不可のままにする。
   const rows = notifs.length ? notifs.map(n => {
     const canJump = !(n.kind === 'sold_out' && !n.snapshot);
+    // v31.1: severity（danger/warn/未指定）で通知行の色を分ける。未指定は従来どおり amber。
+    const sev = L.NOTIF_KIND_INFO[n.kind]?.severity;
+    const rowCls = sev === 'danger' ? 'bg-red-50' : 'bg-amber-50';
+    const hoverCls = sev === 'danger' ? 'hover:bg-red-100' : 'hover:bg-amber-100';
+    const badgeCls = sev === 'danger' ? 'bg-red-500' : 'bg-amber-500';
     return `
-    <div class="notif-row border rounded p-2 text-xs space-y-1 ${n.read ? 'opacity-50' : 'bg-amber-50'} ${canJump ? 'cursor-pointer hover:bg-amber-100' : ''}" data-id="${n.id}">
+    <div class="notif-row border rounded p-2 text-xs space-y-1 ${n.read ? 'opacity-50' : rowCls} ${canJump ? `cursor-pointer ${hoverCls}` : ''}" data-id="${n.id}">
       <div class="flex justify-between items-center">
         <div class="text-slate-500 text-[11px]">${Math.floor(n.month / 12)}年${n.month % 12}ヶ月</div>
-        ${n.read ? '' : '<span class="text-[9px] bg-amber-500 text-white rounded px-1">未読</span>'}
+        ${n.read ? '' : `<span class="text-[9px] ${badgeCls} text-white rounded px-1">未読</span>`}
       </div>
-      <div>${n.kind === 'sold_out' ? '🚫' : n.kind === 'repair_needed' ? '🔧' : n.kind === 'repair_done' ? '✅' : n.kind === 'valueup_done' ? '✨' : '💸'} ${n.message}</div>
+      <div>${n.kind === 'sold_out' ? '🚫' : n.kind === 'repair_needed' ? '🔧' : n.kind === 'repair_done' ? '✅' : n.kind === 'valueup_done' ? '✨' : n.kind === 'officer_pay_window' ? '⏳' : n.kind === 'officer_pay_upcoming' ? '📊' : n.kind === 'officer_bonus_due' ? '📅' : '💸'} ${n.message}</div>
       ${n.advice ? `<button class="notif-advice-toggle text-[11px] font-bold text-navy underline" data-id="${n.id}">${openAdviceIds.has(n.id) ? '▲ アドバイスを閉じる' : '▶ アドバイス'}</button>
       ${openAdviceIds.has(n.id) ? `<div class="text-[11px] text-slate-600 bg-slate-50 rounded p-1.5">💡 ${n.advice}</div>` : ''}` : ''}
       <div class="flex gap-1 justify-end">
@@ -15334,6 +16038,12 @@ function maybeOfferRewind() {
 }
 
 function onNextMonth() {
+  // v31.1: 期首月に翌期の役員報酬が未確定なら、翌月へ進めない（据え置きでも解除される）。
+  if (L.officerPayPending(state).pending) {
+    alert('⏳ 今月中に役員報酬を決めてください。決めるまで翌月へ進めません（据え置きでもかまいません）。');
+    openOfficerPaySimulator();
+    return;
+  }
   dangerBannerDismissed = false;   // v8.10: 危険バナーの「今月だけ閉じる」を翌月にリセット
   // v7.4: チュートリアルの「翌月へ進む」では本物の月送り（イベント・空室判定・収支）は走らせない。
   // どのみち捨てる状態なので、伝えたいこと＝「月が変わると行動力が全回復する」だけを見せる。
@@ -16032,7 +16742,7 @@ if (btnTerms) {
 }
   </script>
 <!-- tw-warmup:start -->
-<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-l border-navy border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-4 h-40 h-44 h-5 h-52 h-6 h-7 h-full hidden hover:bg-amber-600 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null of-act opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-4 w-40 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
+<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-full hidden hover:bg-amber-600 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null of-act opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:text-4xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
 <!-- tw-warmup:end -->
 </body>
 </html>
