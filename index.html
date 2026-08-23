@@ -258,6 +258,26 @@
   }
 
   /* ============================================================
+     v30.1: カスタム色（tailwind.config で足した navy / emerald / ink / canvas）を素のCSSでも定義する。
+     Tailwind CDN(JIT) は「そのクラスがDOMに現れた瞬間」に初めてCSSを生成する方式で、初期HTMLに
+     出てこないクラスはページ読込時点では存在しない（実測: 読込直後の bg-emerald は transparent、
+     DOM挿入から生成まで desktop で約100ms）。bg-emerald はアプリ内3箇所（一覧の売出設定ボタン・
+     売出価格の決定ボタン・買付の承諾ボタン）でしか使っておらず、多くのプレイでは「売出価格を
+     決める／変更する」画面がそのセッション最初の bg-emerald になる。生成が間に合わない・走らないと
+     背景が transparent のまま text-white だけが効き、白地に白文字＝ボタンが消えて見える
+     （2026-08-23 iPhoneで発生。ボタンの場所は空白のまま高さだけ残る）。
+     ここで先に定義しておけばJITの生成有無に関係なく必ず色が付く。
+     ※ ダークモードの読み替えは下のブロック（html[data-theme="dark"] 付きで詳細度が高い）が引き続き勝つ。
+     ============================================================ */
+  .bg-emerald   { background-color: #059669; }
+  .text-emerald { color: #059669; }
+  .bg-navy      { background-color: #1e3a5f; }
+  .text-navy    { color: #1e3a5f; }
+  .border-navy  { border-color: #1e3a5f; }
+  .text-ink     { color: #1e293b; }
+  .bg-canvas    { background-color: #f8fafc; }
+
+  /* ============================================================
      v25: ダークモード。html[data-theme="dark"] のときだけ、モーダル等で使っている
      Tailwind のユーティリティクラスを暗い側へ読み替える。ui.mjs は一切書き換えない方式なので、
      新しい画面を足しても同じクラスを使っている限り自動で追従する。
