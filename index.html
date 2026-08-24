@@ -4715,19 +4715,22 @@ export function corporateTaxOf(income) {
 }
 export const CORP_PER_CAPITA_TAX = 70_000;   // 均等割（赤字でも必ずかかる）
 export const CORP_CARRY_LOSS_YEARS = 10;     // 法人の繰越損失は10年（個人より長い）
-// v17: 前事業年度の法人税額（均等割込み）がこれを超えると、決算月の8ヶ月後に前期実績の
-// 1/2を中間納付する（事業年度開始から6ヶ月経過後2ヶ月以内の実務ルールをそのまま反映）。
+// v17: 前事業年度の法人税額がこれを超えると、決算月の8ヶ月後に前期実績の1/2を中間納付する
+// （事業年度開始から6ヶ月経過後2ヶ月以内の実務ルールをそのまま反映）。
+// v33: 実務の中間申告義務は「国税の法人税額」で判定するので、この閾値と突き合わせるのは
+// 均等割を含めない corporateTaxOf(課税所得) のほうにする（納付額の側は均等割込みのまま）。
 export const CORP_INTERIM_THRESHOLD = 200_000;
 
 // === v31: 役員報酬・賞与・役員退職金（法人の給与経費化） ===
 
 // v31: 役員報酬にかかる社会保険料（健康保険＋厚生年金）。労使折半。
 // 標準報酬月額には上限があり、賞与は月額とは別枠の上限がかかる（実務どおり）。
-// 介護保険料（40歳以上）は健康保険料率に含めた中庸値で簡略化している。
+// ゲームは年齢という概念を持たないため、40〜64歳にかかる介護保険料（全国一律約1.59%）
+// は含めていない。HEALTH_RATEは協会けんぽの介護なし・全国平均に近い値。
 export const PENSION_RATE = 0.183;              // 厚生年金
 export const PENSION_CAP_MONTHLY = 650_000;     // 標準報酬月額の上限
 export const PENSION_CAP_BONUS = 1_500_000;     // 標準賞与額の上限（1回あたり）
-export const HEALTH_RATE = 0.10;                // 健康保険（介護込みの中庸値）
+export const HEALTH_RATE = 0.10;                // 健康保険（協会けんぽ・介護なしの全国平均）
 export const HEALTH_CAP_MONTHLY = 1_390_000;    // 標準報酬月額の上限
 export const HEALTH_CAP_BONUS_YEAR = 5_730_000; // 標準賞与額の上限（年度累計）
 
@@ -4768,6 +4771,33 @@ export function officerPayWindow(state) {
 export const BONUS_MONTHS_CAP = 12;   // 賞与は月額報酬の12ヶ月分（＝年俸の半分）まで
 export function bonusCapOf(monthly) { return monthly * BONUS_MONTHS_CAP; }
 
+// v32.1: 賞与の支給月から「期首月」と「決算月」を外し、期の2〜11ヶ月目の10ヶ月だけ選べるようにする。
+// 期首月を外す理由: 実務では期首月の定時株主総会で決議し、事前確定届出給与に関する届出書を出して
+//   から支給する（届出期限は「決議日から1ヶ月」と「期首から4ヶ月」の早いほう）。決議と同じ月に
+//   払うと"事前"確定の実態がない。ゲーム側でも、v32の「前月に予告→残高を空ける→支給月に判断」が
+//   成立せず、期首月に役員報酬を確定した瞬間に支給判断イベントが出てしまう。
+// 決算月を外す理由: advanceMonthは「賞与の予告・判断待ち通知 → closeCorpBooks」の順に走るのに、
+//   プレイヤーの支給判断はティックが終わった後に行われる。決算が先に確定するため、賞与が当期では
+//   なく翌期の損金にずれる（月額報酬は決算判定より前に計上していて、そこと挙動が食い違う）。
+export function bonusMonthOptions(state) {
+  const all = Array.from({ length: 12 }, (_, i) => i + 1);
+  const fiscal = state?.corpFiscalMonth;
+  if (fiscal == null) return all;               // 法人化前は決算月が無いので絞り込めない
+  const start = (fiscal % 12) + 1;              // 期首月＝決算月の翌月
+  return all.filter(m => m !== start && m !== fiscal);
+}
+
+export function isBonusMonthAllowed(state, m) {
+  return bonusMonthOptions(state).includes(m);
+}
+
+// 未設定のときの既定値。期のちょうど半ばに置く（期首月・決算月のどちらからも遠い）。
+export function defaultBonusMonth(state) {
+  const fiscal = state?.corpFiscalMonth;
+  if (fiscal == null) return (calMonthOf(state?.month ?? 0) % 12) + 1;
+  return ((fiscal + 5) % 12) + 1;               // 期の6ヶ月目
+}
+
 // v31: 月額報酬と賞与をまとめて確定する。改定ウィンドウ外・上限超過は拒否する。
 export function setOfficerPay(state, { monthly, bonus, bonusMonth }) {
   const s = structuredClone(state);
@@ -4780,6 +4810,10 @@ export function setOfficerPay(state, { monthly, bonus, bonusMonth }) {
   if (bonus > bonusCapOf(monthly)) return { state, done: false, reason: 'bonus_over_cap' };
   if (bonus > 0 && !(Number.isInteger(bonusMonth) && bonusMonth >= 1 && bonusMonth <= 12)) {
     return { state, done: false, reason: 'bonus_month_invalid' };
+  }
+  // v32.1: 期首月・決算月は選べない（理由は bonusMonthOptions のコメント）。
+  if (bonus > 0 && !isBonusMonthAllowed(s, bonusMonth)) {
+    return { state, done: false, reason: 'bonus_month_forbidden' };
   }
   s.officerPay.monthly = monthly;
   s.officerPay.bonus = bonus;
@@ -4856,9 +4890,19 @@ export const RETIREMENT_MULTIPLIER = 3.0;    // 功績倍率（代表取締役�
 export const SPECIFIC_OFFICER_YEARS = 5;     // 勤続5年以下は1/2課税なし（特定役員退職手当等）
 
 // 勤続年数（法人設立からの経過年数・切り捨て・最低1年）
+// 功績倍率法（損金算入の器）に使う実在年数。法令上の定めがなく、実務では
+// 端数を切り捨てた実在年数を使う。税額計算には使わない（下の…ForTaxを使う）。
 export function officerServiceYears(state) {
   if (!state.isIncorporated || state.corpFoundedMonth == null) return 0;
   return Math.max(1, Math.floor((state.month - state.corpFoundedMonth) / 12));
+}
+
+// 退職所得控除・特定役員退職手当等（1/2課税の可否）の判定に使う勤続年数。
+// 所得税法施行令69条・69条の2により、1年未満の端数は1年に切り上げる
+// （例: 5年1ヶ月なら6年）。功績倍率法の器には使わない。
+export function officerServiceYearsForTax(state) {
+  if (!state.isIncorporated || state.corpFoundedMonth == null) return 0;
+  return Math.max(1, Math.ceil((state.month - state.corpFoundedMonth) / 12));
 }
 
 // 損金算入の上限（功績倍率法）＝ 在任中の平均月額報酬 × 勤続年数 × 功績倍率
@@ -4886,14 +4930,16 @@ export function payRetirement(state, amount) {
   if (amount <= 0) return { state, done: false, reason: 'invalid_amount' };
   if (s.cash < amount) return { state, done: false, reason: 'insufficient_cash' };
 
-  const years = officerServiceYears(s);
+  const years = officerServiceYears(s);            // 功績倍率法の器に使う実在年数
+  const yearsForTax = officerServiceYearsForTax(s); // 控除・1/2課税判定に使う切り上げ年数
   const allowed = Math.min(amount, retirementAllowance(s));   // 損金算入できる額
   const disallowed = amount - allowed;                        // 不相当に高額な部分
   bookOf(s, 'corp').expense += allowed;                       // 法人は allowed だけ損金
 
   // 個人は分離課税。勤続5年以下は1/2課税が使えない（特定役員退職手当等）。
-  const deduction = retirementDeduction(years);
-  const halved = years > SPECIFIC_OFFICER_YEARS;
+  // 控除額・1/2判定は税法上の切り上げ年数（yearsForTax）で行う。
+  const deduction = retirementDeduction(yearsForTax);
+  const halved = yearsForTax > SPECIFIC_OFFICER_YEARS;
   const base = Math.max(0, amount - deduction);
   const taxable = Math.round(halved ? base / 2 : base);
   const tax = incomeTaxOf(taxable) + Math.round(taxable * RESIDENT_TAX_RATE);
@@ -4904,7 +4950,7 @@ export function payRetirement(state, amount) {
   s.officerPay.bonus = 0;
   s.officerPay.bonusMonth = null;
   s.officerPay.bonusDecision = null;
-  const record = { month: s.month, amount, allowed, disallowed, years, deduction, taxable, tax, halved };
+  const record = { month: s.month, amount, allowed, disallowed, years, yearsForTax, deduction, taxable, tax, halved };
   s.retirementRecord = record;
   return { state: s, done: true, reason: null, record };
 }
@@ -5063,10 +5109,16 @@ function closeCorpBooks(s) {
   }
   book.prepaidCorpTax = 0;
 
-  // v17: 中間申告。今回の税額（均等割込み）が20万円超なら、決算月の8ヶ月後に前期実績の
-  // 1/2を中間納付する。初心者向けは前払い系の税を積まないので対象外。
+  // v17: 中間申告。実務の中間申告義務は「前事業年度の法人税額（国税）が20万円超」で
+  // 判定するので、均等割（CORP_PER_CAPITA_TAX）を含めない corporateTaxOf(taxableIncome) だけで
+  // 判定する（tax は均等割込みなので判定にはそのまま使わない）。
+  // 初心者向けは前払い系の税を積まないので対象外。
   const diff = difficultyOf(s);
-  if (!diff.skipPrepaidTax && tax > CORP_INTERIM_THRESHOLD) {
+  const corpTaxOnly = corporateTaxOf(taxableIncome);   // 均等割抜きの法人税額（判定用）
+  if (!diff.skipPrepaidTax && corpTaxOnly > CORP_INTERIM_THRESHOLD) {
+    // v17: 納付額は tax（均等割込み）の1/2のまま変えない。法人住民税の予定申告額は
+    // 「前期の法人税割額×6/前期の月数＋均等割額×6/12」で均等割の半分を含むため、
+    // 均等割込みの1/2は実務として正しい（判定基準と納付額で"均等割を含むか"が異なる）。
     s.taxSchedule.push({ month: s.month + 8, kind: 'corp_tax_interim',
       amount: Math.round(tax / 2), label: '法人税の中間納付', owner: 'corp' });
   }
@@ -5205,6 +5257,10 @@ export function officerPayEstimate(state, { monthly, bonus }) {
   const projectedYears = s.corpFoundedMonth == null
     ? officerServiceYears(s)
     : Math.max(1, Math.floor((goalEndMonth - s.corpFoundedMonth) / 12));
+  // 退職所得控除・1/2課税判定用（切り上げ）。projectedYearsと同じ月数から出す。
+  const projectedYearsForTax = s.corpFoundedMonth == null
+    ? officerServiceYearsForTax(s)
+    : Math.max(1, Math.ceil((goalEndMonth - s.corpFoundedMonth) / 12));
   const retirementRoom = monthly > 0 ? Math.round(monthly * projectedYears * RETIREMENT_MULTIPLIER) : 0;
 
   // 賞与支給月に必要な残高（§4-2のneedと同じ式）。
@@ -5221,7 +5277,7 @@ export function officerPayEstimate(state, { monthly, bonus }) {
   return {
     annualPay, corpDeductible, corpTax, personalTaxDelta,
     siCorp, siSelf, siTotal, totalOutflow, deltaVsZero,
-    retirementRoom, projectedYears, bonusCashNeeded,
+    retirementRoom, projectedYears, projectedYearsForTax, bonusCashNeeded,
     // 試算の前提。年換算した法人の年間所得で、改定できるのは期首月＝実績1ヶ月ぶんを12倍した
     // 数字なので、売却益のような一時的な収入が混ざると大きくぶれる。画面に出して検算できるようにする。
     assumedCorpIncome: netCorpBase,
@@ -5232,14 +5288,15 @@ export function officerPayEstimate(state, { monthly, bonus }) {
 // v32: 役員報酬を出し続けて最後に退職金を受け取るまで通した最終収支。
 export function officerRetirementNet(state, { monthly, bonus }) {
   const est = officerPayEstimate(state, { monthly, bonus });
-  const years = est.projectedYears;
-  const over = Math.max(0, est.retirementRoom - retirementDeduction(years));
-  const taxable = years > SPECIFIC_OFFICER_YEARS ? over / 2 : over;
+  const years = est.projectedYears;                 // 器（功績倍率法）に使う年数
+  const yearsForTax = est.projectedYearsForTax;      // 控除・1/2課税判定に使う切り上げ年数
+  const over = Math.max(0, est.retirementRoom - retirementDeduction(yearsForTax));
+  const taxable = yearsForTax > SPECIFIC_OFFICER_YEARS ? over / 2 : over;
   const retireTax = incomeTaxOf(taxable) + Math.round(taxable * RESIDENT_TAX_RATE);
   const base = Math.max(0, est.assumedCorpIncome);
   const corpTaxSave = corporateTaxOf(base) - corporateTaxOf(Math.max(0, base - est.retirementRoom));
   const net = -est.deltaVsZero * years + corpTaxSave - retireTax;
-  return { net, years, room: est.retirementRoom, retireTax, corpTaxSave, annualDelta: est.deltaVsZero };
+  return { net, years, yearsForTax, room: est.retirementRoom, retireTax, corpTaxSave, annualDelta: est.deltaVsZero };
 }
 
 // v32: 月額0〜150万(5万刻み)×賞与0〜上限(25万刻み)を総当たりし、単年の得と退職金までの得の
@@ -5507,9 +5564,15 @@ export function advanceMonth(state, rng = Math.random) {
         `⏳ 今月中に役員賞与 ${yen(bonus)} を支給するか決めてください。決めるまで翌月へ進めません。`);
     }
     // 支給月の前月に予告通知を出す（残高を空ける猶予を与えるため）。
+    // ただし期首月には出さない。期首月は役員報酬・賞与額を決める月そのもので、
+    // 予告はティック中（プレイヤーが今期の額を決める前）に走るため、まだ前期の
+    // 古い賞与額が本文に載ってしまう（例: 予告¥300万→その月に確定した額¥500万、
+    // という不一致が起きる）。期首月には役員報酬シミュレーターに「賞与支給月に
+    // 必要な残高」が出るので、予告が無くても情報は欠けない。
     if (s.isIncorporated && !s.officerPay.retired && s.officerPay.bonus > 0
         && s.officerPay.bonusMonth != null
-        && monthsUntilCalMonth(s.month, s.officerPay.bonusMonth) === 1) {
+        && monthsUntilCalMonth(s.month, s.officerPay.bonusMonth) === 1
+        && !(s.corpFiscalMonth != null && calMonthOf(s.month) === ((s.corpFiscalMonth % 12) + 1))) {
       const bonus = s.officerPay.bonus;
       const need = bonus + splitSocialInsurance(socialInsuranceBonus(bonus)).corp;
       pushNotification(s, 'officer_bonus_due', null, '役員賞与の支給予定',
@@ -5647,6 +5710,16 @@ export function migrateSave(state) {
   // v32: 賞与の支給判断。旧セーブには無いので既定値（未判断）で補う。
   if (s.officerPay && s.officerPay.bonusDecision === undefined) {
     s.officerPay.bonusDecision = null;
+  }
+  // v32.1: v32のセーブには期首月・決算月の支給月が入りうる。そのままだと決算月のセーブで賞与が
+  // 翌期の損金にずれ続けるので、選べる月のうち最も近い月へ寄せる（賞与を出していないセーブは対象外）。
+  if (s.isIncorporated && s.officerPay && s.officerPay.bonus > 0
+      && s.officerPay.bonusMonth != null && !isBonusMonthAllowed(s, s.officerPay.bonusMonth)) {
+    const opts = bonusMonthOptions(s);
+    const cur = s.officerPay.bonusMonth;
+    // 暦月の環状距離が最も近い候補。同距離なら若い月を選ぶ。
+    const dist = (m) => Math.min((m - cur + 12) % 12, (cur - m + 12) % 12);
+    s.officerPay.bonusMonth = opts.slice().sort((a, b) => dist(a) - dist(b) || a - b)[0];
   }
   // v31.1: officer_pay_window は temp では期限が見逃されるので、旧セーブの設定が残っていたら既定（persist）に戻す。
   if (s.notifSettings && s.notifSettings.officer_pay_window === 'temp') {
@@ -6856,7 +6929,7 @@ export const TERMS = {
     hint: '改定を逃すと前年と同じ額のまま次の期首まで固定される。0円に戻ったりはしない。' },
   predetermined_bonus: { scope: 'real', reading: 'じぜんかくていとどけでぎゅうよ', group: '税・会計', label: '事前確定届出給与',
     def: 'あらかじめ税務署に届け出た金額・支給日どおりに払う役員賞与。届出どおりに支給できないと全額が損金不算入になる。',
-    calc: '年1回、指定した支給月にまとめて支払う。ゲームでは「不相当に高額」の判定を簡略化し、上限を月額報酬の12ヶ月分に制限している。',
+    calc: '年1回、指定した支給月にまとめて支払う。ゲームでは「不相当に高額」の判定を簡略化し、上限を月額報酬の12ヶ月分に制限している。支給月は期首月と決算月を除く10ヶ月から選ぶ（期首月は決議・届出のあとに支給する必要があり、決算月は決算が先に確定してしまうため、どちらも選べない）。',
     here: '支給月に現金が足りないと不支給になり、損金も社会保険料もゼロになる（支給前月に予告通知が出る）。',
     hint: '月額を0円にすると賞与も出せない。月額をある程度出しておくことが賞与を使う前提になる。' },
   social_insurance: { scope: 'real', reading: 'しゃかいほけんりょう', group: '税・会計', label: '社会保険料',
@@ -6871,12 +6944,12 @@ export const TERMS = {
     hint: '高額の月額報酬ほど社会保険料の実効負担率は下がっていく。' },
   retirement_allowance: { scope: 'real', reading: 'やくいんたいしょくいろうきん', group: '税・会計', label: '役員退職慰労金',
     def: '役員が退任するときに法人から支払う退職金。生涯に1回だけ支給でき、損金にできる上限（器）がある。',
-    calc: '損金算入の上限 ＝ 在任中の平均月額報酬 × 勤続年数 × 功績倍率（3.0）。器を超えた分は損金不算入になる。',
+    calc: '損金算入の上限 ＝ 在任中の平均月額報酬 × 勤続年数 × 功績倍率（3.0）。器を超えた分は損金不算入になる。ここでの勤続年数は実在年数（端数切り捨て）で、退職所得控除・1/2課税判定に使う勤続年数（端数切り上げ）とは異なる。',
     here: '役員退職金モーダルで器の上限・支給額・損金算入額を確認できる。賞与は器に入らない（月額報酬だけが積み上がる）。',
     hint: '退職直前に月額を吊り上げても、平均額で計算するので器は大きくならない。' },
   retirement_deduction: { scope: 'real', reading: 'たいしょくしょとくこうじょ', group: '税・会計', label: '退職所得控除',
     def: '退職金の個人課税を大きく軽くする控除。勤続年数が長いほど控除額が増える。',
-    calc: '勤続20年以下は40万円×勤続年数（最低80万円）、20年超は800万円＋70万円×（勤続年数−20）。控除後の額はさらに、勤続5年超なら1/2にしてから課税される（勤続5年以下は1/2課税が使えない）。',
+    calc: '勤続20年以下は40万円×勤続年数（最低80万円）、20年超は800万円＋70万円×（勤続年数−20）。控除後の額はさらに、勤続5年超なら1/2にしてから課税される（勤続5年以下は1/2課税が使えない）。ここでの勤続年数は1年未満の端数を1年に切り上げる（所得税法施行令69条・69条の2。例: 5年1ヶ月なら6年）。功績倍率法の器に使う勤続年数（端数切り捨て）とは別物。',
     here: '役員退職金モーダルに控除額・課税退職所得・1/2課税の可否が出る。',
     hint: '勤続年数を延ばすほど控除も1/2課税も両方効くようになる。退職金は長期の役員報酬とセットで考える。' },
   merit_multiplier: { scope: 'real', reading: 'こうせきばいりつ', group: '税・会計', label: '功績倍率',
@@ -6936,7 +7009,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, PENSION_RATE, PENSION_CAP_MONTHLY, PENSION_CAP_BONUS, HEALTH_RATE, HEALTH_CAP_MONTHLY, HEALTH_CAP_BONUS_YEAR, socialInsuranceMonthly, socialInsuranceBonus, splitSocialInsurance, officerPayWindow, BONUS_MONTHS_CAP, bonusCapOf, setOfficerPay, officerPayPending, officerBonusPending, decideOfficerBonus, RETIREMENT_MULTIPLIER, SPECIFIC_OFFICER_YEARS, officerServiceYears, retirementAllowance, retirementDeduction, payRetirement, afterTaxCF, officerPayEstimate, officerRetirementNet, officerPayRecommend, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, deprTotalOf, totalMonthlyDepr, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, PENSION_RATE, PENSION_CAP_MONTHLY, PENSION_CAP_BONUS, HEALTH_RATE, HEALTH_CAP_MONTHLY, HEALTH_CAP_BONUS_YEAR, socialInsuranceMonthly, socialInsuranceBonus, splitSocialInsurance, officerPayWindow, BONUS_MONTHS_CAP, bonusCapOf, bonusMonthOptions, isBonusMonthAllowed, defaultBonusMonth, setOfficerPay, officerPayPending, officerBonusPending, decideOfficerBonus, RETIREMENT_MULTIPLIER, SPECIFIC_OFFICER_YEARS, officerServiceYears, officerServiceYearsForTax, retirementAllowance, retirementDeduction, payRetirement, afterTaxCF, officerPayEstimate, officerRetirementNet, officerPayRecommend, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, deprTotalOf, totalMonthlyDepr, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -11656,7 +11729,8 @@ function openOfficerPaySimulator(back) {
   const op = state.officerPay;
   let monthly = op.monthly;
   let bonus = op.bonus;
-  let bonusMonth = op.bonusMonth || ((state.month % 12) + 1);   // 未設定なら適当な既定値
+  // v32.1: 未設定、または既存値が今の許可リスト（期首月・決算月を除く10ヶ月）に無い場合は既定値へ寄せる。
+  let bonusMonth = (op.bonusMonth != null && L.isBonusMonthAllowed(state, op.bonusMonth)) ? op.bonusMonth : L.defaultBonusMonth(state);
   let recoOpen = false;
   let reco = null;
   const win = L.officerPayWindow(state);
@@ -11707,8 +11781,9 @@ function openOfficerPaySimulator(back) {
       <div class="${bonus > 0 ? '' : 'opacity-40'}">
         <label class="text-sm font-bold">賞与の支給月</label>
         <select id="op-bonus-month" class="w-full border rounded p-2 text-sm mt-1" ${bonusDisabled || bonus === 0 ? 'disabled' : ''}>
-          ${Array.from({ length: 12 }, (_, i) => i + 1).map(m => `<option value="${m}" ${m === bonusMonth ? 'selected' : ''}>${m}月</option>`).join('')}
+          ${L.bonusMonthOptions(state).map(m => `<option value="${m}" ${m === bonusMonth ? 'selected' : ''}>${m}月</option>`).join('')}
         </select>
+        ${state.corpFiscalMonth != null ? `<div class="text-[10.5px] text-slate-400 mt-0.5">${(state.corpFiscalMonth % 12) + 1}月（期首月）と${state.corpFiscalMonth}月（決算月）は選べません。期首月は決議・届出のあとに支給する必要があり、決算月は決算が先に確定してしまうためです</div>` : ''}
       </div>
       <button id="op-reco-btn" class="w-full border-2 border-navy text-navy rounded-lg py-2 text-sm font-bold hover:bg-slate-50">🧮 おすすめを計算</button>
       ${recoOpen && reco ? recoHtml(reco) : ''}
@@ -11757,11 +11832,12 @@ function openOfficerPaySimulator(back) {
 function openOfficerRetirementModal(back) {
   navGo({ key: 'officer-retire', open: () => openOfficerRetirementModal(back) });
   const op = state.officerPay;
-  const years = L.officerServiceYears(state);
+  const years = L.officerServiceYears(state);             // 器（功績倍率法）に使う実在年数
+  const yearsForTax = L.officerServiceYearsForTax(state);  // 控除・1/2課税判定に使う切り上げ年数
   const avgMonthly = op.monthsAccrued > 0 ? Math.round(op.totalMonthlyAccrued / op.monthsAccrued) : 0;
   const allowance = L.retirementAllowance(state);
-  const deduction = L.retirementDeduction(years);
-  const halved = years > L.SPECIFIC_OFFICER_YEARS;
+  const deduction = L.retirementDeduction(yearsForTax);
+  const halved = yearsForTax > L.SPECIFIC_OFFICER_YEARS;
   const maxAmount = Math.max(0, Math.min(Math.round(allowance * 1.5), state.cash));
   let amount = Math.min(allowance, state.cash);
   // 法人の今期の法人所得見込み（退職金を引く前）。officerPayEstimateと同じ考え方で年換算する。
@@ -11814,7 +11890,8 @@ function openOfficerRetirementModal(back) {
       <div class="text-xs bg-slate-50 rounded-lg p-2.5 space-y-1">
         <div class="flex justify-between"><span>損金算入額</span><span>${L.yen(allowed)}</span></div>
         ${disallowed > 0 ? `<div class="flex justify-between text-red-600 font-bold"><span>損金不算入額（器の超過分）</span><span>${L.yen(disallowed)}</span></div>` : ''}
-        <div class="flex justify-between border-t pt-1 mt-1"><span>${term('retirement_deduction', '退職所得控除')}</span><span>${L.yen(deduction)}</span></div>
+        <div class="flex justify-between border-t pt-1 mt-1"><span>${term('retirement_deduction', '退職所得控除')}（勤続${yearsForTax}年）</span><span>${L.yen(deduction)}</span></div>
+        ${yearsForTax > years ? `<div class="text-[10.5px] text-slate-400">勤続年数は1年未満を1年に切り上げ（在任${years}年→${yearsForTax}年）</div>` : ''}
         <div class="flex justify-between"><span>課税退職所得</span><span>${L.yen(taxable)}</span></div>
         <div class="text-[10.5px] ${halved ? 'text-slate-400' : 'text-amber-700 font-bold'}">${halved ? '勤続5年超なので1/2課税が適用されています' : '⚠️ 勤続5年以下のため1/2課税は使えません'}</div>
       </div>
