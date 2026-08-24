@@ -4102,6 +4102,7 @@ export function createInitialState({ attr, goalType, goalAmount, goalYears, seed
       totalMonthlyAccrued: 0,  // 同・計上した月額報酬の累計額
       retired: false,          // 役員退職金を支給済み（以後 monthly / bonus は 0 固定）
       decidedForYear: null,    // v31.1: 役員報酬を確定した事業年度（books.corp.year）。期首月ロックの判定に使う
+      bonusDecision: null,     // v32: 支給月の判断（null|'pay'|'skip'）。bonusPaidYearと同時に立てる
     },
     retirementRecord: null,    // v31: 退職金の記録
     // v16: 名義ごとの帳簿（所得税・法人税の課税計算に使う）。決まった月にまとめて納付するので、
@@ -4243,6 +4244,8 @@ export const NOTIF_KIND_INFO = {
   officer_pay_window:   { label: '⏳ 役員報酬の改定期限', defaultMode: 'persist', severity: 'danger' },
   // v31.1 新規
   officer_pay_upcoming: { label: '📊 来月は役員報酬を決める月', defaultMode: 'persist', severity: 'warn' },
+  // v32: 賞与を「支給月に支給／不支給を選ぶ」方式へ変更。支給月に入ったら判断待ちを知らせる。
+  officer_bonus_window: { label: '⏳ 役員賞与の支給判断', defaultMode: 'persist', severity: 'danger' },
 };
 export function defaultNotifSettings() {
   const o = {};
@@ -4797,6 +4800,58 @@ export function officerPayPending(state) {
   return { pending: true, fiscalYear };
 }
 
+// v32: 事前確定届出給与（賞与）は、支給月が来ても自動では支給しない。支給／不支給を
+// プレイヤーに選ばせる。pending の条件はv31の自動支給の判定条件をそのまま流用する。
+export function officerBonusPending(state) {
+  const op = state.officerPay;
+  const cb = state.books?.corp;
+  const pending = !!(state.isIncorporated && op && !op.retired && op.bonus > 0
+    && op.bonusMonth != null && calMonthOf(state.month) === op.bonusMonth
+    && cb && op.bonusPaidYear !== cb.year);
+  if (!pending) return { pending: false };
+  const bonus = op.bonus;
+  const need = bonus + splitSocialInsurance(socialInsuranceBonus(bonus)).corp;
+  return { pending: true, bonus, need, canPay: state.cash >= need };
+}
+
+// v32: 支給月に「届出どおり支給する／今期は不支給にする」を確定する。取り消せない。
+// choice==='pay': v31までの自動支給と同じ処理（帳簿・現金・社保）をそのまま行う。
+// choice==='skip': 帳簿・現金・社保は一切動かさない（全額不支給は正当な選択で、ペナルティは無い）。
+export function decideOfficerBonus(state, choice) {
+  const pend = officerBonusPending(state);
+  if (!pend.pending) return { state, done: false, reason: 'not_pending', logs: [] };
+  const s = structuredClone(state);
+  const cb = bookOf(s, 'corp');
+  const logs = [];
+
+  if (choice === 'pay') {
+    if (!pend.canPay) return { state, done: false, reason: 'insufficient_cash', logs: [] };
+    const bonus = s.officerPay.bonus;
+    const si = splitSocialInsurance(socialInsuranceBonus(bonus));
+    cb.expense += bonus + si.corp;
+    cb.bonusBooked = (cb.bonusBooked ?? 0) + bonus + si.corp;   // §5-4(b) の年換算補正に使う
+    moveCash(s, -si.corp, 'tax', '社会保険料（賞与・会社負担）', null, 'corp');
+    moveCash(s, -si.self, 'tax', '社会保険料（賞与・本人負担）', null, 'personal');
+    const pb = bookOf(s, 'personal');
+    pb.officerPayYTD = (pb.officerPayYTD ?? 0) + bonus;
+    pb.socialInsurance = (pb.socialInsurance ?? 0) + si.self;
+    logs.push(`役員賞与 ${yen(bonus)} を支給した（社会保険料 ${yen(si.total)}）`);
+    s.officerPay.bonusPaidYear = cb.year;
+    s.officerPay.bonusDecision = 'pay';
+    return { state: s, done: true, reason: null, logs };
+  }
+
+  if (choice === 'skip') {
+    const bonus = s.officerPay.bonus;
+    logs.push(`今期は役員賞与 ${yen(bonus)} を不支給にした（法人に ${yen(bonus)} が残る）`);
+    s.officerPay.bonusPaidYear = cb.year;
+    s.officerPay.bonusDecision = 'skip';
+    return { state: s, done: true, reason: null, logs };
+  }
+
+  return { state, done: false, reason: 'invalid_choice', logs: [] };
+}
+
 export const RETIREMENT_MULTIPLIER = 3.0;    // 功績倍率（代表取締役の実務目安）
 export const SPECIFIC_OFFICER_YEARS = 5;     // 勤続5年以下は1/2課税なし（特定役員退職手当等）
 
@@ -4848,6 +4903,7 @@ export function payRetirement(state, amount) {
   s.officerPay.monthly = 0;
   s.officerPay.bonus = 0;
   s.officerPay.bonusMonth = null;
+  s.officerPay.bonusDecision = null;
   const record = { month: s.month, amount, allowed, disallowed, years, deduction, taxable, tax, halved };
   s.retirementRecord = record;
   return { state: s, done: true, reason: null, record };
@@ -5132,8 +5188,11 @@ export function officerPayEstimate(state, { monthly, bonus }) {
   };
   const personalTaxDelta = personalTaxOf(annualPay, siSelf) - personalTaxOf(0, 0);
 
-  // 年間トータル流出＝法人税等＋社会保険料（労使計）＋個人税の増分。役員報酬なし（totalOutflowZero）
+  // totalOutflow＝法人税等＋社会保険料（労使計）＋個人税の増分。役員報酬なし（totalOutflowZero）
   // との差が deltaVsZero（マイナスなら得）。
+  // v32: totalOutflow は法人税・社保が実額、個人税だけが増分という混合値で合計になっていないため、
+  // 画面からは外した（表示は keepTotal ＝ 手元に残る合計に一本化）。deltaVsZero の算出と
+  // 既存テストの非回帰比較でまだ使うので、値そのものは残している。
   const totalOutflow = corpTax + siTotal + personalTaxDelta;
   const totalOutflowZero = corpTaxZero;
   const deltaVsZero = totalOutflow - totalOutflowZero;
@@ -5151,6 +5210,14 @@ export function officerPayEstimate(state, { monthly, bonus }) {
   // 賞与支給月に必要な残高（§4-2のneedと同じ式）。
   const bonusCashNeeded = bonus > 0 ? bonus + siB.corp : 0;
 
+  // v32: 「法人・個人にいくら残るか」を直接見せるための派生値。既存の式には一切手を入れない。
+  const keepCorp = netCorpBase - corpDeductible - corpTax;       // 法人に残る
+  const keepSelf = annualPay - siSelf - personalTaxDelta;        // 自分の手取り
+  const keepTotal = keepCorp + keepSelf;
+  const keepTotalZero = netCorpBase - corpTaxZero;
+  const savedRate = annualPay > 0 ? (corpTaxZero - corpTax) / annualPay : null;
+  const burdenRate = annualPay > 0 ? (siTotal + personalTaxDelta) / annualPay : null;
+
   return {
     annualPay, corpDeductible, corpTax, personalTaxDelta,
     siCorp, siSelf, siTotal, totalOutflow, deltaVsZero,
@@ -5158,7 +5225,46 @@ export function officerPayEstimate(state, { monthly, bonus }) {
     // 試算の前提。年換算した法人の年間所得で、改定できるのは期首月＝実績1ヶ月ぶんを12倍した
     // 数字なので、売却益のような一時的な収入が混ざると大きくぶれる。画面に出して検算できるようにする。
     assumedCorpIncome: netCorpBase,
+    corpTaxZero, keepCorp, keepSelf, keepTotal, keepTotalZero, savedRate, burdenRate,
   };
+}
+
+// v32: 役員報酬を出し続けて最後に退職金を受け取るまで通した最終収支。
+export function officerRetirementNet(state, { monthly, bonus }) {
+  const est = officerPayEstimate(state, { monthly, bonus });
+  const years = est.projectedYears;
+  const over = Math.max(0, est.retirementRoom - retirementDeduction(years));
+  const taxable = years > SPECIFIC_OFFICER_YEARS ? over / 2 : over;
+  const retireTax = incomeTaxOf(taxable) + Math.round(taxable * RESIDENT_TAX_RATE);
+  const base = Math.max(0, est.assumedCorpIncome);
+  const corpTaxSave = corporateTaxOf(base) - corporateTaxOf(Math.max(0, base - est.retirementRoom));
+  const net = -est.deltaVsZero * years + corpTaxSave - retireTax;
+  return { net, years, room: est.retirementRoom, retireTax, corpTaxSave, annualDelta: est.deltaVsZero };
+}
+
+// v32: 月額0〜150万(5万刻み)×賞与0〜上限(25万刻み)を総当たりし、単年の得と退職金までの得の
+// それぞれで最適な組み合わせを返す。同点は月額が小さいほう（社保負担が軽く安全）を採る。
+export function officerPayRecommend(state) {
+  let byYear = null;
+  let byRetirement = null;
+  for (let monthly = 0; monthly <= 1_500_000; monthly += 50_000) {
+    const cap = bonusCapOf(monthly);
+    for (let bonus = 0; bonus <= cap; bonus += 250_000) {
+      const est = officerPayEstimate(state, { monthly, bonus });
+      const gainYear = -est.deltaVsZero;
+      if (!byYear || gainYear > byYear.gain
+          || (gainYear === byYear.gain && monthly < byYear.monthly)) {
+        byYear = { monthly, bonus, gain: gainYear };
+      }
+      const gainRetirement = officerRetirementNet(state, { monthly, bonus }).net;
+      if (!byRetirement || gainRetirement > byRetirement.gain
+          || (gainRetirement === byRetirement.gain && monthly < byRetirement.monthly)) {
+        byRetirement = { monthly, bonus, gain: gainRetirement };
+      }
+    }
+  }
+  const same = byYear.monthly === byRetirement.monthly && byYear.bonus === byRetirement.bonus;
+  return { byYear, byRetirement, same };
 }
 
 export function advanceMonth(state, rng = Math.random) {
@@ -5387,32 +5493,18 @@ export function advanceMonth(state, rng = Math.random) {
     s.officerPay.totalMonthlyAccrued += pay;
   }
 
-  // === v31: 事前確定届出給与（賞与）の支給月の処理 ===
+  // === v32: 事前確定届出給与（賞与）の支給月 ===
+  // 実際の支給／不支給の判断は decideOfficerBonus() で行う（自動支給はしない）。
+  // ここでは支給月・前月・期首月の通知だけを出す。
   {
     const cb = bookOf(s, 'corp');
+    // 支給月かつ未判断なら、判断待ちの通知を出す（決めるまで翌月へ進めない）。
     if (s.isIncorporated && !s.officerPay.retired && s.officerPay.bonus > 0
         && calMonthOf(s.month) === s.officerPay.bonusMonth
         && s.officerPay.bonusPaidYear !== cb.year) {
       const bonus = s.officerPay.bonus;
-      const si = splitSocialInsurance(socialInsuranceBonus(bonus));
-      const need = bonus + si.corp;              // 支給に必要な残高
-      if (s.cash >= need) {
-        cb.expense += bonus + si.corp;
-        cb.bonusBooked = (cb.bonusBooked ?? 0) + bonus + si.corp;   // §5-4(b) の年換算補正に使う
-        moveCash(s, -si.corp, 'tax', '社会保険料（賞与・会社負担）', null, 'corp');
-        moveCash(s, -si.self, 'tax', '社会保険料（賞与・本人負担）', null, 'personal');
-        const pb = bookOf(s, 'personal');
-        pb.officerPayYTD = (pb.officerPayYTD ?? 0) + bonus;
-        pb.socialInsurance = (pb.socialInsurance ?? 0) + si.self;
-        logs.push(`役員賞与 ${yen(bonus)} を支給した（社会保険料 ${yen(si.total)}）`);
-      } else {
-        // 届出どおりに支給できなかった＝全額損金不算入。損金も社保も一切立たない。
-        logs.push(`⚠ 現金不足で役員賞与 ${yen(bonus)} を支給できなかった（必要残高 ${yen(need)}）。事前確定届出給与は届出どおりに支給できないと全額損金不算入になる`);
-        pushNotification(s, 'officer_bonus_failed', null, '役員賞与の不支給',
-          `現金不足で役員賞与 ${yen(bonus)} を支給できませんでした。全額損金不算入となり、今期の節税は発生しません。`, null,
-          '事前確定届出給与は、届け出た金額・支給日どおりに支給しないと全額が損金にできません。支給月に必要な残高を空けておくか、賞与の額を下げてください。');
-      }
-      s.officerPay.bonusPaidYear = cb.year;   // 成否にかかわらず、その事業年度は処理済み
+      pushNotification(s, 'officer_bonus_window', null, '役員賞与の支給判断',
+        `⏳ 今月中に役員賞与 ${yen(bonus)} を支給するか決めてください。決めるまで翌月へ進めません。`);
     }
     // 支給月の前月に予告通知を出す（残高を空ける猶予を与えるため）。
     if (s.isIncorporated && !s.officerPay.retired && s.officerPay.bonus > 0
@@ -5551,6 +5643,10 @@ export function migrateSave(state) {
   // v31.1: 進行中のセーブがロード直後にいきなりロックされないよう、確定済みとして移行する。
   if (s.isIncorporated && s.officerPay && s.officerPay.decidedForYear === undefined) {
     s.officerPay.decidedForYear = s.books?.corp?.year ?? null;
+  }
+  // v32: 賞与の支給判断。旧セーブには無いので既定値（未判断）で補う。
+  if (s.officerPay && s.officerPay.bonusDecision === undefined) {
+    s.officerPay.bonusDecision = null;
   }
   // v31.1: officer_pay_window は temp では期限が見逃されるので、旧セーブの設定が残っていたら既定（persist）に戻す。
   if (s.notifSettings && s.notifSettings.officer_pay_window === 'temp') {
@@ -6840,7 +6936,7 @@ export function grossYieldOf(property) {
 }
 
   // ==== L 名前空間（city/ui が L.xxx で参照）====
-  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, PENSION_RATE, PENSION_CAP_MONTHLY, PENSION_CAP_BONUS, HEALTH_RATE, HEALTH_CAP_MONTHLY, HEALTH_CAP_BONUS_YEAR, socialInsuranceMonthly, socialInsuranceBonus, splitSocialInsurance, officerPayWindow, BONUS_MONTHS_CAP, bonusCapOf, setOfficerPay, officerPayPending, RETIREMENT_MULTIPLIER, SPECIFIC_OFFICER_YEARS, officerServiceYears, retirementAllowance, retirementDeduction, payRetirement, afterTaxCF, officerPayEstimate, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, deprTotalOf, totalMonthlyDepr, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
+  const L = { CONFIG, yen, yenShort, calMonthOf, calYearOf, fmtYM, monthsUntilCalMonth, CASH_CATEGORIES, CASH_LOG_RETENTION_MONTHS, moveCash, monthlyPayment, remainingPrincipal, loanRemaining, loanPaymentOf, noiAnnual, dscr, monthlyDepreciation, monthlyTax, incorporate, negotiationRateCut, termBonusYears, ltvCap, applicableRate, canFinance, requiredCash, EXP_THRESHOLDS, skillLevel, expToNext, troubleRepairCost, ageBandOf, DECAY_BY_AGE, DECAY_BY_STRUCTURE, CARE_DECAY_PER_MONTH, structuralDecay, annualDecay, REPAIR_CYCLE, MGMT_QUALITY_EFFECT, MGMT_QUALITY_DIST, JITTER, FLOOR, ELDERLY_REASON, lineageOf, rollMgmtQuality, initialRepairState, DIFFICULTY, difficultyOf, STRUCT_BANDS, CARE_BANDS, BAND_RANK, structBandOf, careBandOf, worstBandOf, marketValueOf, CREDIT_HIT_DANGER, CREDIT_HIT_DEAD, CREDIT_HIT_CAP, creditPenalty, effectiveCredit, ASSET_BACKING_MAX, DOWN_PAYMENT_BONUS_MAX, DOWN_BONUS_START, DOWN_BONUS_FULL, assetBackingBonus, downPaymentBonus, creditForReview, reformCreditFor, isCondemned, CONDEMNED_COST_MULT, CONDEMNED_EXTRA_MONTHS, STRUCT_DANGER_VACATE_CHANCE, CARE_DANGER_CLAIM_CHANCE, CARE_DANGER_CLAIM_AP, VACANCY_BY_AGE, TROUBLE_BY_AGE, vacancyRate, troubleChanceFor, PLACE_TOKENS_MODERN, PLACE_ROMAJI, propertyName, LAYOUT_SIZES, estimateRent, generateProperty, maxBrokerCut, hasSellerBackground, offerSuccessChance, offerBlockedReason, makeOffer, buyPropertyV2, currentMarketValue, gpiAnnual, vacancyLossAnnual, egiAnnual, opexAnnual, noiAnnualV2, propertyMonthlyPL, bookValueV2, offerChance, sashineChance, rollBuyOffer, respondToOffer, LONG_TERM_MONTHS, heldMonthsOf, isLongTermHold, monthsToLongTerm, fmtTaxRate, capGainTaxRate, capGainOf, capGainTaxOf, amortizationSchedule, loanSummary, loanPayoffOf, allLoansOf, CONSUMPTION_TAX, CONSUMPTION_TAX_THRESHOLD, isConsumptionTaxPayer, isSellerTaxable, LOW_PRICE_BROKER_FEE_MAX_PRICE, LOW_PRICE_BROKER_FEE_CAP, brokerFee, STAMP_DUTY_TABLE, stampDuty, MORTGAGE_RELEASE_FEE, mortgageReleaseFee, REG_TAX_LAND, REG_TAX_BLDG, REG_TAX_MORTGAGE, ACQUISITION_TAX_RATE, ACQ_LAND_TAXBASE_RATE, ACQ_EXEMPT_LAND, ACQ_EXEMPT_BLDG, acquisitionTaxOf, ACQ_TAX_DELAY_MIN, ACQ_TAX_DELAY_MAX, scrivenerFee, LOAN_FEE_RATE, LOAN_FEE_FLAT, loanArrangementFee, ASSESSED_VALUE_RATE, REBUILD_COST_PER_SQM, ASSESSED_USEFUL_LIFE, ASSESSED_DEPRECIATION_FLOOR, PROPERTY_TAX_RATE, LAND_VALUE_RANGE_BY_AREA, LAND_VALUE_SKEW, landValuePerSqm, totalFloorSqm, estimateAssessedValueDetail, estimateAssessedValue, assessedValueBreakdown, REPLACEMENT_COST_PER_SQM, sekisanValueDetail, sekisanValue, CITY_PLANNING_TAX_RATE, SMALL_RESIDENTIAL_LAND_SQM, propertyTaxAnnual, assessedValue, assessedValueOf, FIRE_INSURANCE_RATE_BY_STRUCTURE, FIRE_INSURANCE_YEARS, fireInsuranceOf, purchaseCosts, closingCostOf, saleCosts, saleBreakdown, incorporationSaving, incorporationPaybackYears, propertyScorecard, settleSale, soldSummary, monthlyVacancyRoll, APPEAL_WEIGHTS, APPEAL_AGE_LIMIT, APPEAL_SQM_MIN, APPEAL_SQM_MAX, FILL_BASE, FILL_APPEAL_SPAN, appealBreakdown, APPEAL_EXTRA_CAP, appealScore, naturalFillChance, AD_PLANS, AD_MAX_CHANCE, SELF_FILL_AP, SELF_FILL_BASE, SELF_FILL_PER_LV, adCost, adBonusOf, unitFillChance, LONG_VACANCY_MONTHS, APPEAL_ALERT_SCORE, naturalFillRoll, fillVacancy, DIY_WORK_TOTAL, RESTORE_DIY_AP, RESTORE_DIY_STEP, DIY_MATERIAL_RATE, diyWorkStep, DIY_QUALITY, diyQualityOf, estimateDiySessionsLeft, restoreCost, pendingRestoreCostOf, startRestore, REPAIR_KINDS, repairJobsOf, repairJobForGauge, repairJobForKind, hasAnyRepairJob, repairKindAvailable, DEEPCLEAN_COST_MULT, repairGaugeValue, repairCost, largeRepairMonths, repairJobMonths, purchaseReformQuote, purchaseReformTotal, REFORM_TRUST_BASE, REFORM_TRUST_MAX, reformTrust, REFORM_NOI_RESTORE_OCC, REFORM_NOI_LARGE_FILL, REFORM_NOI_RENT_UPLIFT, reviewNoiWithReform, repairDetail, repairResultState, startRepair, AUTO_MANAGE_MARKUP, AUTO_MANAGE_CARE_FLOOR, autoManageCost, setAutoManage, totalDebt, reformLoansRemaining, professionalRepairCost, reformLoanAmount, REFORM_LOAN_MIN_COST, REFORM_LENDERS, canUseReformLoan, REFORM_LOAN_RATE_BANDS, reformLoanRateFor, reformLenderRate, securedReformFees, COLLATERAL_LTV, collateralHeadroom, reformLoanHeadroom, canUseReformLoanFor, reformLoanAmountFor, reformFinanceCompare, repairMonthsForCost, startProfessionalRepair, VALUE_UP_PLANS, VALUE_UP_MAX_LEVEL, valueUpCost, startValueUp, VALUE_UP_CAPEX_MONTHS, CAPEX_THRESHOLD, applyValueUp, setUnitRent, applyPendingRent, vacateUnit, totalAssetsV2, netWorth, assetsByOwner, monthlyCF, monthlyCashSummary, recentCashSummaries, isClearedV2, isTimeUpV2, isBankrupt, taxRiskLevelV2, isBusinessScale, TAIFU_REPAIR_COST, TAIFU_DEDUCTIBLE, INSURANCE_CARE_THRESHOLD, insuranceCoversWind, SEMINAR_TOPICS, QUIZ_MIN_Q, QUIZ_MAX_Q, QUIZ_COMBO_MULT, QUIZ_CASH_PER_CORRECT, QUIZ_SASHINE_BONUS, quizComboMult, quizRank, buildQuiz, applyQuizResult, sashineBuffBonus, consumeSashineBuff, EVENTS, BLUE_RETURN_FULL, BLUE_RETURN_SIMPLE, EVENT_LOAN_MIN_COST, eventLoanQuote, eventChoiceCost, applyEventChoice, eventChoiceVisible, EVENT_COOLDOWN_MONTHS, EVENT_COOLDOWN_GLOBAL, eventCooldownOf, eventOnCooldown, eventTitle, eventTargets, eligibleEvents, maxYearsForAge, doWork, createInitialState, dedupePropertyIds, transferToCorp, recordJunkRepair, markJunkResolved, FAVORITE_LIMIT, addFavorite, removeFavorite, NOTIF_KIND_INFO, defaultNotifSettings, notifModeOf, setNotifMode, markNotificationsRead, markNotificationRead, markAllNotificationsRead, BADGES, AD_FREE_BADGE_COUNT, evaluateBadges, resultTitle, bandAdviceText, REGIONS, SEA_GAP, ROAD_W, ZOOM_MIN, BLD_RANGE, ROAD_CURVE, CAPES, CAPE_SIZE, ROAD_CLEAR, LAKES, HILLS, COAST_AMP, COAST_OCT, SHELF, LAKE_WARP, RIVERS, RIVER_CURVE, RIDGES, HILL_VAR, LANE_COUNT, BLD_BAND, COAST_CLEAR, regionAngularDistance, regionOverlaps, isRegionUnlocked, regionUnlockProgress, checkRegionUnlocks, unlockRegion, unitVacancyAdvice, propertyAdviceLines, INCOME_TAX_BRACKETS, incomeTaxOf, salaryDeduction, salaryIncomeOf, BASIC_DEDUCTION, RESIDENT_TAX_RATE, PERSONAL_CARRY_LOSS_YEARS, PREPAY_THRESHOLD, BUSINESS_TAX_RATE, BUSINESS_TAX_DEDUCTION, CORP_LOW_RATE, CORP_HIGH_RATE, CORP_LOW_RATE_CAP, corporateTaxOf, CORP_PER_CAPITA_TAX, CORP_CARRY_LOSS_YEARS, CORP_INTERIM_THRESHOLD, PENSION_RATE, PENSION_CAP_MONTHLY, PENSION_CAP_BONUS, HEALTH_RATE, HEALTH_CAP_MONTHLY, HEALTH_CAP_BONUS_YEAR, socialInsuranceMonthly, socialInsuranceBonus, splitSocialInsurance, officerPayWindow, BONUS_MONTHS_CAP, bonusCapOf, setOfficerPay, officerPayPending, officerBonusPending, decideOfficerBonus, RETIREMENT_MULTIPLIER, SPECIFIC_OFFICER_YEARS, officerServiceYears, retirementAllowance, retirementDeduction, payRetirement, afterTaxCF, officerPayEstimate, officerRetirementNet, officerPayRecommend, advanceMonth, serialize, deserialize, migrateSave, GENRE, AREA_ADJ, SHAPE_BY_GENRE, svgBuildingParts, MIN_LOAN_RATIO, OVER_LOAN_LTV_MAX, BANKS, LTV_BANDS, ltvBandOf, effectiveLtvMax, overLoanAmount, isUnderwater, dropCushionAtPurchase, effectiveMinLoan, STRUCTURE_LIFE, JUNK_FLAGS, PERMANENT_JUNK_FLAGS, usefulLifeRemaining, deprMonthsFor, deprTotalOf, totalMonthlyDepr, bankRate, koukoBalanceOf, reviewLoan, REASON_PRIORITY, primaryReason, reviewAllBanks, VALUEUP_YIELD_STEP, VALUEUP_YIELD_MAX, marketYield, incomeValue, timeValueOf, fairValue, appraise, requestAppraisal, listForSale, normalizeListingHistory, pruneListings, updateListing, delist, bargainScore, tickMarket, searchHitChance, SEARCH_PRESS_COST, SEARCH_MIN, SEARCH_MAX, drawSearchThreshold, MUNDANE_SEARCH_DIVISOR, RARE_HIGHYIELD_CHANCE, RARE_WAKEARI_CHANCE, doSalesPress, TERM_GROUPS, TERMS, minRequiredCash, purchaseSignal, currentYieldOf, grossYieldOf };
 
   // ==== inlined from src/city.mjs（import行除去・export除去）====
 // src/city.mjs — 疑似3Dの球体マップ（ピンハネ帝国と同じ正射影の球）。描画とタップ判定だけを担当し、ゲーム状態は読み取り専用。
@@ -10165,20 +10261,26 @@ function renderMobileBars() {
 
   const unread = (state.notifications || []).filter(n => !n.read).length;
   // v31.1: 期首月に役員報酬が未確定なら、翌月へ進めない旨を理由付きで示す。
+  // v32: 役員賞与の支給判断が未確定のときも同様にブロックする（役員報酬を優先して1つだけ出す）。
   const opPending = L.officerPayPending(state).pending;
+  const obPending = !opPending && L.officerBonusPending(state).pending;
+  const anyPending = opPending || obPending;
   actEl.innerHTML = `
     <div class="w-full flex flex-col gap-1">
-      ${opPending ? `<div class="text-center text-[10px] font-bold text-red-600">⏳ 今月中に役員報酬を決めてください</div>` : ''}
+      ${opPending ? `<button id="m-op-pending" class="text-center text-[10px] font-bold text-red-600">⏳ 今月中に役員報酬を決めてください</button>`
+        : obPending ? `<button id="m-ob-pending" class="text-center text-[10px] font-bold text-red-600">⏳ 今月中に役員賞与を決めてください</button>` : ''}
       <div class="flex gap-2">
         <button id="m-search" class="flex-1 bg-navy text-white rounded-xl py-3 text-xs font-bold shadow-lg">🏘️探す</button>
         <button id="m-work" class="flex-1 bg-amber-500 text-white rounded-xl py-3 text-xs font-bold shadow-lg select-none touch-none">💼働く</button>
-        <button id="m-next" class="flex-1 bg-amber-600 text-white rounded-xl py-3 text-xs font-bold shadow-lg ${opPending ? 'opacity-40' : ''}">📅翌月</button>
+        <button id="m-next" class="flex-1 bg-amber-600 text-white rounded-xl py-3 text-xs font-bold shadow-lg ${anyPending ? 'opacity-40' : ''}">📅翌月</button>
         <button id="m-menu" class="w-12 bg-white text-navy rounded-xl py-3 text-lg font-bold shadow-lg relative">≡${unread ? `<span class="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] rounded-full px-1">${unread}</span>` : ''}</button>
       </div>
     </div>`;
   actEl.querySelector('#m-search').addEventListener('click', openSearchModal);
   wireWorkButton(actEl.querySelector('#m-work'));
   actEl.querySelector('#m-next').addEventListener('click', onNextMonth);
+  actEl.querySelector('#m-op-pending')?.addEventListener('click', () => openOfficerPaySimulator());
+  actEl.querySelector('#m-ob-pending')?.addEventListener('click', () => openOfficerBonusModal());
   actEl.querySelector('#m-menu').addEventListener('click', openMobileDrawer);
   fitMobileHud();
 }
@@ -10843,9 +10945,10 @@ function hasCorpSide(state) {
 // v18: 「💰 お金」ハブの税金タブ。旧 openBooksModal の中身をそのまま移設。
 // 今月の収支ブロック（monthlyCashBox）は独立した「今月」タブへ切り出したので、ここには含めない。
 // uiStateは呼び出し側（openMoneyHub）が保持する { expenseOpen }。
-function taxTabHtml(state, uiState) {
-  // (a) 今年の損益＋税額の概算。個人・法人で計算式が違うため引数isCorpで分岐する。
-  const yearCard = (label, book, isCorp) => {
+// v32: 税金タブ・法人タブの両方で使う「今年の損益＋税額の概算」カード。
+// もとは taxTabHtml のローカル関数だったが、法人タブへ移設した「🏢 法人の損益」でも
+// 使うため module-level に引き上げた（挙動は一切変えていない）。
+function yearCardHtml(state, label, book, isCorp) {
     const net = book.income - book.expense;
     const carryLossSum = (book.carryLoss || []).reduce((t, l) => t + l.amount, 0);
     let taxLines;
@@ -10936,26 +11039,26 @@ function taxTabHtml(state, uiState) {
       ${taxLines}
       <div class="text-[10.5px] text-slate-400 mt-2">※ 年末（決算）までの実績で変わる概算です</div>
     </div>`;
-  };
+}
 
-  // (b) 繰越損失。個人3年・法人10年で期限切れ（無い年度は節ごと省略）。
-  const carryLossCard = (label, book, years) => {
-    if (!book.carryLoss || !book.carryLoss.length) return '';
-    const rows = [...book.carryLoss].sort((a, b) => b.year - a.year).map(l => {
-      const left = Math.max(1, years - (book.year - l.year));
-      return `<div class="flex justify-between"><span>${l.year}年目の赤字</span><span class="text-red-600">${L.yen(l.amount)}（あと${left}年）</span></div>`;
-    }).join('');
-    return `<div class="border rounded-lg p-3 mb-3 text-xs space-y-1">
-      <div class="font-bold mb-1">📉 繰越損失（${label}）</div>
-      ${rows}
-    </div>`;
-  };
+// v32: 繰越損失カード。個人3年・法人10年で期限切れ（無い年度は節ごと省略）。
+// もとは taxTabHtml のローカル関数だったが、法人タブへ移設した「🏢 法人の繰越損失」でも
+// 使うため module-level に引き上げた。
+function carryLossCardHtml(label, book, years) {
+  if (!book.carryLoss || !book.carryLoss.length) return '';
+  const rows = [...book.carryLoss].sort((a, b) => b.year - a.year).map(l => {
+    const left = Math.max(1, years - (book.year - l.year));
+    return `<div class="flex justify-between"><span>${l.year}年目の赤字</span><span class="text-red-600">${L.yen(l.amount)}（あと${left}年）</span></div>`;
+  }).join('');
+  return `<div class="border rounded-lg p-3 mb-3 text-xs space-y-1">
+    <div class="font-bold mb-1">📉 繰越損失（${label}）</div>
+    ${rows}
+  </div>`;
+}
 
-  const personalCard = yearCard(`👤 個人 ${state.books.personal.year}年目の損益（1〜12月で締め）`, state.books.personal, false);
-  const corpCard = state.isIncorporated
-    ? yearCard(`🏢 法人 ${state.books.corp.year}年目の損益（決算 ${state.corpFiscalMonth}月）`, state.books.corp, true) : '';
-  const carryLossHtml = carryLossCard('個人', state.books.personal, L.PERSONAL_CARRY_LOSS_YEARS)
-    + (state.isIncorporated ? carryLossCard('法人', state.books.corp, L.CORP_CARRY_LOSS_YEARS) : '');
+function taxTabHtml(state, uiState) {
+  const personalCard = yearCardHtml(state, `👤 個人 ${state.books.personal.year}年目の損益（1〜12月で締め）`, state.books.personal, false);
+  const carryLossHtml = carryLossCardHtml('個人', state.books.personal, L.PERSONAL_CARRY_LOSS_YEARS);
 
   // (c) 納税の予定。v18.1: どちらの財布から出るか分かるよう個人・法人でブロックを分ける
   // （現金は1つなので、合計と現金超過の警告だけは両方を合わせた総額で判定する）。
@@ -11058,8 +11161,6 @@ function taxTabHtml(state, uiState) {
 
   return `
     ${personalCard}
-    ${corpCard}
-    ${state.isIncorporated ? officerPayCardHtml(state) : ''}
     ${carryLossHtml}
     ${consumptionTaxLine}
     <div class="border rounded-lg p-3 mb-3">
@@ -11099,6 +11200,44 @@ function officerPayCardHtml(state) {
     <button id="mh-officer-pay" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-2">役員報酬を決める</button>
     ${showRetireBtn ? `<button id="mh-officer-retire" class="w-full border rounded-lg py-2 text-xs font-bold text-red-600 hover:bg-red-50 mt-2">🏁 役員退職金</button>` : ''}
   </div>`;
+}
+
+// v32: 「💰 お金」ハブの「🏢 法人」タブ。役員報酬・法人の損益・繰越損失など法人まわりの
+// 情報をここへ集約する（state.isIncorporated が true のときだけタブごと出す）。
+function corpTabHtml(state) {
+  const op = state.officerPay;
+  const overviewHtml = `<div class="border rounded-lg p-3 mb-3 text-sm space-y-1">
+    <div class="font-bold text-sm mb-1">🏢 法人の概要</div>
+    <div class="flex justify-between"><span>設立</span><span>${L.fmtYM(state.corpFoundedMonth)}</span></div>
+    <div class="flex justify-between"><span>決算</span><span>${state.corpFiscalMonth}月</span></div>
+    <div class="flex justify-between"><span>勤続</span><span>${L.officerServiceYears(state)}年</span></div>
+  </div>`;
+
+  // v32: 役員賞与の支給判断カード。届出額が0のあいだは出さない（情報を増やさない）。
+  let bonusCardHtml = '';
+  if (!op.retired && op.bonus > 0) {
+    const decisionLabel = op.bonusDecision === 'pay' ? '支給済み' : op.bonusDecision === 'skip' ? '不支給' : '未判断';
+    const pend = L.officerBonusPending(state);
+    bonusCardHtml = `<div class="border rounded-lg p-3 mb-3 text-sm space-y-1">
+      <div class="font-bold text-sm mb-1">📅 役員賞与</div>
+      <div class="flex justify-between"><span>届出額</span><span class="font-bold">${L.yen(op.bonus)}</span></div>
+      <div class="flex justify-between"><span>支給月</span><span>${op.bonusMonth}月</span></div>
+      <div class="flex justify-between"><span>今期の判断</span><span>${decisionLabel}</span></div>
+      ${pend.pending ? `<div class="text-[11px] font-bold text-red-600 mt-1">⏳ 今月中に支給するか決めてください</div>
+        <button id="mh-officer-bonus" class="w-full border rounded-lg py-2 text-xs font-bold text-navy hover:bg-slate-50 mt-1">賞与の支給を決める</button>` : ''}
+    </div>`;
+  }
+
+  const corpCard = yearCardHtml(state, `🏢 法人 ${state.books.corp.year}年目の損益（決算 ${state.corpFiscalMonth}月）`, state.books.corp, true);
+  const carryLossHtml = carryLossCardHtml('法人', state.books.corp, L.CORP_CARRY_LOSS_YEARS);
+
+  return `
+    ${overviewHtml}
+    ${officerPayCardHtml(state)}
+    ${bonusCardHtml}
+    ${corpCard}
+    ${carryLossHtml}
+  `;
 }
 
 // v18: 「💰 お金」ハブの資産タブ。旧 openKpiModal('cash')（資産スナップショット）の中身をそのまま移設。
@@ -11249,10 +11388,12 @@ function openMoneyHub(initialTab = 'month') {
   </div>`);
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
+  // v32: 「🏢 法人」タブは法人化済みのときだけ出す（未法人化のあいだは情報を増やさない、という既存方針）。
   const tabs = [
     { key: 'month', label: '💴 今月' },
     { key: 'assets', label: '📊 資産' },
     { key: 'tax', label: '🧾 税金' },
+    ...(state.isIncorporated ? [{ key: 'corp', label: '🏢 法人' }] : []),
     { key: 'loans', label: '🏦 借入' },
   ];
   // 「今月」タブの折りたたみ状態。trendMonthOpen/trendItemOpenはv18.1で追加（過去12ヶ月の推移の月別内訳）。
@@ -11303,8 +11444,11 @@ function openMoneyHub(initialTab = 'month') {
     } else if (activeTab === 'tax') {
       body.innerHTML = taxTabHtml(state, taxState);
       body.querySelector('.books-toggle-expense')?.addEventListener('click', () => { taxState.expenseOpen = !taxState.expenseOpen; draw(); });
-      body.querySelector('#mh-officer-pay')?.addEventListener('click', () => { close(); openOfficerPaySimulator(() => openMoneyHub('tax')); });
-      body.querySelector('#mh-officer-retire')?.addEventListener('click', () => { close(); openOfficerRetirementModal(() => openMoneyHub('tax')); });
+    } else if (activeTab === 'corp') {
+      body.innerHTML = corpTabHtml(state);
+      body.querySelector('#mh-officer-pay')?.addEventListener('click', () => { close(); openOfficerPaySimulator(() => openMoneyHub('corp')); });
+      body.querySelector('#mh-officer-retire')?.addEventListener('click', () => { close(); openOfficerRetirementModal(() => openMoneyHub('corp')); });
+      body.querySelector('#mh-officer-bonus')?.addEventListener('click', () => { close(); openOfficerBonusModal(() => openMoneyHub('corp')); });
     } else if (activeTab === 'loans') {
       body.innerHTML = loansTabHtml(state);
       body.querySelectorAll('.mh-loan-row').forEach(b => b.addEventListener('click', () => {
@@ -11329,13 +11473,192 @@ function openMoneyHub(initialTab = 'month') {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
 }
 
+// v32: 役員報酬シミュレーターの結果表示（積み上げバー）。est.assumedCorpIncome を分母に
+// 6区分ちょうど合計100%になる（officerPayEstimateの恒等式に依存）。
+// 例外: 法人がまだ黒字でない／報酬が法人の利益を超えているときはバーを出さない。
+function allocationBarHtml(est) {
+  if (est.assumedCorpIncome <= 0) {
+    return `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2.5 text-amber-800">
+      今期の法人はまだ利益が出ていません（見込み ${L.yen(est.assumedCorpIncome)}）。この試算は参考値です</div>`;
+  }
+  if (est.keepCorp < 0) {
+    return `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2.5 text-red-800 font-bold">
+      この報酬額は法人の年間利益 ${L.yen(est.assumedCorpIncome)} を超えています。法人は赤字になり、毎月の現金が減っていきます</div>`;
+  }
+  const denom = est.assumedCorpIncome;
+  const seg = (v, cls) => `<div class="${cls}" style="width:${Math.max(0, v / denom * 100)}%"></div>`;
+  return `<div class="border rounded-lg p-3 bg-slate-50">
+    <div class="text-xs text-slate-500 mb-2">🏢 法人の年間利益（見込み） ${L.yen(est.assumedCorpIncome)}</div>
+    <div class="flex w-full h-8 rounded-lg overflow-hidden">
+      ${seg(est.keepCorp, 'bg-emerald-600')}
+      ${seg(est.corpTax, 'bg-red-500')}
+      ${seg(est.siCorp, 'bg-red-400')}
+      ${seg(est.siSelf, 'bg-red-400')}
+      ${seg(est.personalTaxDelta, 'bg-red-300')}
+      ${seg(est.keepSelf, 'bg-amber-500')}
+    </div>
+    <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+      <span>← 法人に残る</span><span>税・社会保険で消える</span><span>自分の手取り →</span>
+    </div>
+  </div>`;
+}
+
+// v32: 積み上げバーの下に置く2列の台帳（法人に置いたぶん／自分に移したぶん）。
+function ledgerHtml(est) {
+  const corpTaxable = est.assumedCorpIncome - est.corpDeductible;
+  return `<div class="grid grid-cols-2 gap-2 text-xs">
+    <div class="border rounded-lg p-2.5 space-y-1">
+      <div class="font-bold text-[11px] mb-1">🏢 法人に置いたぶん</div>
+      <div class="flex justify-between"><span>法人の課税所得</span><span>${L.yen(corpTaxable)}</span></div>
+      <div class="flex justify-between text-red-600"><span>法人税等</span><span>−${L.yen(est.corpTax)}</span></div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>法人に残る</span><span>${L.yen(est.keepCorp)}</span></div>
+    </div>
+    <div class="border rounded-lg p-2.5 space-y-1">
+      <div class="font-bold text-[11px] mb-1">👤 自分に移したぶん</div>
+      <div class="flex justify-between"><span>役員報酬（年額）</span><span>${L.yen(est.annualPay)}</span></div>
+      <div class="flex justify-between text-red-600"><span>社会保険（本人）</span><span>−${L.yen(est.siSelf)}</span></div>
+      <div class="flex justify-between text-red-600"><span>所得税・住民税の増分</span><span>−${L.yen(est.personalTaxDelta)}</span></div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>自分の手取り</span><span>${L.yen(est.keepSelf)}</span></div>
+    </div>
+  </div>
+  <div class="text-[10.5px] text-slate-400">※ 会社負担の社会保険 ${L.yen(est.siCorp)} は法人の経費として先に引かれています（どちらの手元にも残りません）</div>`;
+}
+
+// v32: 手元に残る合計（法人＋自分）と、役員報酬を出さなかった場合との比較判定。
+function totalJudgementHtml(est) {
+  const judgeHtml = est.annualPay === 0
+    ? `<div class="text-xs text-slate-500 mt-1">いまは役員報酬を出していません。スライダーを動かすと、この合計がどう動くか比べられます。</div>`
+    : est.deltaVsZero > 0
+    ? `<div class="text-xs text-red-600 font-bold mt-1">❌ この設定だと手元に残る合計が ${L.yen(est.deltaVsZero)} 減ります。法人に置いたままのほうがトクです。</div>`
+    : est.deltaVsZero < 0
+    ? `<div class="text-xs text-emerald-700 font-bold mt-1">✅ この設定だと手元に残る合計が ${L.yen(-est.deltaVsZero)} 増えます。自分に移したほうがトクです。</div>`
+    : `<div class="text-xs text-slate-500 mt-1">ちょうど同じです。</div>`;
+  return `<div class="border-2 rounded-lg p-3 text-center">
+    <div class="text-xs text-slate-500">手元に残る合計（法人＋自分）</div>
+    <div class="text-2xl font-black tabular-nums">${L.yen(est.keepTotal)}</div>
+    <div class="text-[11px] text-slate-400 mt-0.5">役員報酬を出さなかった場合 ${L.yen(est.keepTotalZero)}</div>
+    ${judgeHtml}
+  </div>`;
+}
+
+// v32: 損得の正体（法人税率 vs 社会保険＋所得税率）を数字で見せる解説ブロック。annualPay>0でだけ出す。
+function explainHtml(est) {
+  // v32: 3つの率は「引き算が画面の上で合う」ことを優先する。savedRate/burdenRateを個別に
+  // 丸めてから差を取らないと、37.7%と45.7%を並べて差が+8.1%になり（実値は8.06%）、
+  // 読んだ人が引き算して検算した瞬間に画面を信用しなくなる。ここは学習用の画面なので
+  // 0.1%以下の厳密さより、表示どうしの整合を採る。
+  const round1 = (r) => Math.round(r * 1000) / 10;      // %で小数第1位まで
+  const savedPct = round1(est.savedRate);
+  const burdenPct = round1(est.burdenRate);
+  const diffPct = Math.round((burdenPct - savedPct) * 10) / 10;
+  const pct = (v) => `${v.toFixed(1)}%`;
+  const diffCls = diffPct > 0 ? 'text-red-600' : diffPct < 0 ? 'text-emerald-700' : '';
+  const diffTxt = `${diffPct >= 0 ? '+' : ''}${pct(diffPct)}`;
+  const corpKeptTax = est.corpTaxZero - est.corpTax;
+  const burdenAmount = est.siCorp + est.siSelf + est.personalTaxDelta;
+  return `<div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-2">
+    <div class="grid grid-cols-3 gap-1.5 text-center">
+      <div class="border rounded-lg p-1.5 bg-white">
+        <div class="text-[10px] text-slate-400">法人に置いたままなら</div>
+        <div class="font-bold">${pct(savedPct)}</div>
+      </div>
+      <div class="border rounded-lg p-1.5 bg-white">
+        <div class="text-[10px] text-slate-400">自分に移すと</div>
+        <div class="font-bold">${pct(burdenPct)}</div>
+      </div>
+      <div class="border rounded-lg p-1.5 bg-white">
+        <div class="text-[10px] text-slate-400">差（損得の正体）</div>
+        <div class="font-bold ${diffCls}">${diffTxt}</div>
+      </div>
+    </div>
+    <div class="leading-relaxed">
+      この役員報酬 <b>${L.yen(est.annualPay)}</b> を法人に置いたままにすると、法人税等が <b>${L.yen(corpKeptTax)}</b>（${pct(savedPct)}）かかります。
+      同じ額を自分に移すと、社会保険と所得税・住民税で <b>${L.yen(burdenAmount)}</b>（${pct(burdenPct)}）かかります。<b>安いほうを選ぶ</b>のが役員報酬の決め方で、それだけの話です。
+      ${state.salaryAnnual > 0 ? `<br>本業給与 ${L.yen(state.salaryAnnual)} がすでに低い税率の枠を使っているため、役員報酬はその上に積まれて高い税率で課税されます。ここが効いています。` : ''}
+    </div>
+    <div class="text-[10.5px] text-slate-400 leading-relaxed">
+      差 ＝ 役員報酬 ${L.yen(est.annualPay)} ×（${pct(burdenPct)} − ${pct(savedPct)}） ＝ ${est.deltaVsZero >= 0 ? L.yen(est.deltaVsZero) + '（損）' : L.yen(-est.deltaVsZero) + '（得）'}<br>
+      ${term('social_insurance', '社会保険')}は会社と本人で折半ですが、どちらもあなたのお金なので合算しています。
+    </div>
+  </div>`;
+}
+
+// v32: annualPay===0のときの1文だけの簡易解説（explainHtmlの代わり）。
+function explainZeroHtml() {
+  return `<div class="text-[11px] text-slate-500">法人の利益は、法人に置いたままにするか、役員報酬として自分に移すかのどちらかしかありません。どちらにも税金がかかりますが、税率が違います。役員報酬を動かして、2つの率を比べてみてください。</div>`;
+}
+
+// v32: 退職金まで通した最終収支。既存の「退職金の器」の1行表示から officerRetirementNet を
+// 使った収支表示へ作り替えた。
+function retirementNetHtml(monthly, bonus) {
+  if (monthly === 0) {
+    return `<div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
+      <div class="font-bold text-[11px] mb-1">🏁 退職金まで通した収支</div>
+      <div class="flex justify-between"><span>${term('retirement_allowance', '退職金の器')}</span><span>—</span></div>
+      <div class="flex justify-between"><span>毎年の差 ×勤続年数</span><span>—</span></div>
+      <div class="flex justify-between"><span>支給年の法人税の減り</span><span>—</span></div>
+      <div class="flex justify-between"><span>退職所得税</span><span>—</span></div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>最終的な差引</span><span>—</span></div>
+      <div class="text-[10.5px] text-slate-400 mt-1">月額報酬を出すと、退職金として非課税で受け取れる「器」が育ちます。ここで元が取れるかどうかを見せます。</div>
+    </div>`;
+  }
+  const ret = L.officerRetirementNet(state, { monthly, bonus });
+  const yearlyTotal = -ret.annualDelta * ret.years;
+  const netCls = ret.net >= 0 ? 'text-emerald-700' : 'text-red-600';
+  return `<div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
+    <div class="font-bold text-[11px] mb-1">🏁 退職金まで通した収支（勤続${ret.years}年）</div>
+    <div class="flex justify-between"><span>${term('retirement_allowance', '退職金の器')}</span><span>${L.yen(ret.room)}</span></div>
+    <div class="flex justify-between"><span>毎年の差 ×勤続年数</span><span class="${yearlyTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}">${yearlyTotal >= 0 ? '+' : '−'}${L.yen(Math.abs(yearlyTotal))}</span></div>
+    <div class="flex justify-between text-emerald-700"><span>支給年の法人税の減り</span><span>+${L.yen(ret.corpTaxSave)}</span></div>
+    <div class="flex justify-between text-red-600"><span>退職所得税</span><span>−${L.yen(ret.retireTax)}</span></div>
+    <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>最終的な差引</span><span class="${netCls}">${ret.net >= 0 ? '+' : '−'}${L.yen(Math.abs(ret.net))}</span></div>
+    <div class="text-[11px] font-bold ${netCls}">${ret.net >= 0
+      ? `✅ 退職金まで通せば ${L.yen(ret.net)} のプラス。毎年の負担を退職金で取り返せています。`
+      : `❌ 退職金まで通しても ${L.yen(-ret.net)} のマイナス。器は育ちますが、そこまでの負担を取り返せません。`}</div>
+  </div>`;
+}
+
+// v32: 「🧮 おすすめを計算」の展開カード。
+function recoHtml(reco) {
+  const allZero = reco.byYear.monthly === 0 && reco.byYear.bonus === 0
+    && reco.byRetirement.monthly === 0 && reco.byRetirement.bonus === 0;
+  if (allZero) {
+    return `<div class="text-xs bg-slate-50 border rounded-lg p-2.5 text-slate-600">いまは役員報酬を出さないのが最善です。法人に置いたままのほうが税率が低いためです。</div>`;
+  }
+  if (reco.same) {
+    return `<button class="op-reco-apply border-2 border-navy bg-slate-50 rounded-xl p-3 text-left w-full" data-monthly="${reco.byYear.monthly}" data-bonus="${reco.byYear.bonus}">
+      <div class="font-bold text-sm">おすすめ</div>
+      <div class="text-xs text-slate-600 mt-0.5">月額 ${L.yen(reco.byYear.monthly)}・賞与 ${L.yen(reco.byYear.bonus)}</div>
+      <div class="text-[11px] text-emerald-700 mt-1">今期 +${L.yen(reco.byYear.gain)}・退職金まで通して +${L.yen(reco.byRetirement.gain)}</div>
+    </button>`;
+  }
+  const years = L.officerRetirementNet(state, { monthly: reco.byRetirement.monthly, bonus: reco.byRetirement.bonus }).years;
+  return `<div class="grid grid-cols-1 gap-2">
+    <button class="op-reco-apply border-2 rounded-xl p-3 text-left" data-monthly="${reco.byYear.monthly}" data-bonus="${reco.byYear.bonus}">
+      <div class="font-bold text-sm">今期の手残りが最大</div>
+      <div class="text-xs text-slate-600 mt-0.5">月額 ${L.yen(reco.byYear.monthly)}・賞与 ${L.yen(reco.byYear.bonus)}</div>
+      <div class="text-[11px] text-emerald-700 mt-1">年 +${L.yen(reco.byYear.gain)}</div>
+    </button>
+    <button class="op-reco-apply border-2 rounded-xl p-3 text-left" data-monthly="${reco.byRetirement.monthly}" data-bonus="${reco.byRetirement.bonus}">
+      <div class="font-bold text-sm">退職金まで受け取る前提で最大</div>
+      <div class="text-xs text-slate-600 mt-0.5">月額 ${L.yen(reco.byRetirement.monthly)}・賞与 ${L.yen(reco.byRetirement.bonus)}</div>
+      <div class="text-[11px] text-emerald-700 mt-1">通算 +${L.yen(reco.byRetirement.gain)}</div>
+      <div class="text-[10.5px] text-slate-400 mt-1">同じ月額を${years}年続けて、最後に退職金を受け取る前提です。途中で退任しないとこの差は出ません。</div>
+    </button>
+  </div>`;
+}
+
 // v31: 役員報酬シミュレーター。月額・賞与のスライダーを動かすたびに年間負担を再計算する。
+// v32: 結果表示を「法人の利益をどう振り分けるか」の積み上げバー＋台帳に作り替え、
+// 「🧮 おすすめを計算」で officerPayRecommend の最適解をその場に展開できるようにした。
 function openOfficerPaySimulator(back) {
   navGo({ key: 'officer-pay', open: () => openOfficerPaySimulator(back) });
   const op = state.officerPay;
   let monthly = op.monthly;
   let bonus = op.bonus;
   let bonusMonth = op.bonusMonth || ((state.month % 12) + 1);   // 未設定なら適当な既定値
+  let recoOpen = false;
+  let reco = null;
   const win = L.officerPayWindow(state);
   const overlay = el(`<div id="lm-officerpay-modal" class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" style="align-items:safe center;">
     <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
@@ -11387,31 +11710,31 @@ function openOfficerPaySimulator(back) {
           ${Array.from({ length: 12 }, (_, i) => i + 1).map(m => `<option value="${m}" ${m === bonusMonth ? 'selected' : ''}>${m}月</option>`).join('')}
         </select>
       </div>
-      <div class="border rounded-lg p-3 bg-slate-50">
-        <div class="text-[10.5px] text-slate-400 mb-1">この試算は法人の年間所得を <b>${L.yen(est.assumedCorpIncome)}</b> と見込んでいます（今期の実績を年換算した額）</div>
-        <div class="text-xs text-slate-500">年間トータル流出</div>
-        <div class="text-2xl font-black tabular-nums">${L.yen(est.totalOutflow)}</div>
-        <div class="text-sm mt-1">役員報酬なしとの差
-          <b class="${est.deltaVsZero < 0 ? 'text-emerald-700' : est.deltaVsZero > 0 ? 'text-red-600' : ''}">${
-            est.deltaVsZero < 0 ? `${L.yen(-est.deltaVsZero)} 得` : est.deltaVsZero > 0 ? `${L.yen(est.deltaVsZero)} 損` : L.yen(0)
-          }</b>
-        </div>
-        <div class="text-xs text-slate-600 mt-2 space-y-0.5">
-          <div class="flex justify-between"><span>法人税等（見込み）</span><span>${L.yen(est.corpTax)}</span></div>
-          <div class="flex justify-between"><span>個人の所得税・住民税の増分</span><span>${signedYen(est.personalTaxDelta)}</span></div>
-          <div class="flex justify-between"><span>${term('social_insurance', '社会保険料')}（労使計）</span><span>${L.yen(est.siTotal)}</span></div>
-          <div class="text-[10.5px] text-slate-400 pl-2">↳ 会社負担 ${L.yen(est.siCorp)} ／ 本人負担 ${L.yen(est.siSelf)}</div>
-        </div>
-      </div>
-      <div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
-        <div class="flex justify-between"><span>${term('retirement_allowance', '退職金の器')}（この月額を目標期限まで続けた場合・勤続${est.projectedYears}年）</span><span class="font-bold">${L.yen(est.retirementRoom)}</span></div>
-        ${bonus > 0 ? `<div class="flex justify-between"><span>賞与支給月に必要な残高</span><span class="font-bold">${L.yen(est.bonusCashNeeded)}</span></div>` : ''}
-      </div>
+      <button id="op-reco-btn" class="w-full border-2 border-navy text-navy rounded-lg py-2 text-sm font-bold hover:bg-slate-50">🧮 おすすめを計算</button>
+      ${recoOpen && reco ? recoHtml(reco) : ''}
+      ${allocationBarHtml(est)}
+      ${ledgerHtml(est)}
+      ${totalJudgementHtml(est)}
+      ${est.annualPay > 0 ? explainHtml(est) : explainZeroHtml()}
+      ${retirementNetHtml(monthly, bonus)}
+      ${bonus > 0 ? `<div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5">
+        <div class="flex justify-between"><span>賞与支給月に必要な残高</span><span class="font-bold">${L.yen(est.bonusCashNeeded)}</span></div>
+      </div>` : ''}
       <button id="op-confirm" class="w-full bg-navy text-white rounded py-2 text-sm font-bold ${confirmDisabled ? 'opacity-40' : ''}" ${confirmDisabled ? 'disabled' : ''}>この内容で確定する（据え置きでもOK・今期は変更できません）</button>
     `;
     body.querySelector('#op-monthly')?.addEventListener('input', (e) => { monthly = Number(e.target.value); draw(); });
     body.querySelector('#op-bonus')?.addEventListener('input', (e) => { bonus = Number(e.target.value); draw(); });
     body.querySelector('#op-bonus-month')?.addEventListener('change', (e) => { bonusMonth = Number(e.target.value); draw(); });
+    body.querySelector('#op-reco-btn')?.addEventListener('click', () => {
+      recoOpen = !recoOpen;
+      if (recoOpen && !reco) reco = L.officerPayRecommend(state);
+      draw();
+    });
+    body.querySelectorAll('.op-reco-apply').forEach(b => b.addEventListener('click', () => {
+      monthly = Number(b.dataset.monthly);
+      bonus = Number(b.dataset.bonus);
+      draw();
+    }));
     body.querySelector('#op-confirm')?.addEventListener('click', () => {
       const r = L.setOfficerPay(state, { monthly, bonus, bonusMonth: bonus > 0 ? bonusMonth : null });
       if (!r.done) return;
@@ -11520,6 +11843,75 @@ function openOfficerRetirementModal(back) {
   draw();
   overlay.querySelector('#or-close').addEventListener('click', dismiss(close));
   overlay.querySelector('#or-back').addEventListener('click', () => {
+    if (navStack.length > 1) navBack(); else { close(); back?.(); }
+  });
+}
+
+// v32: 事前確定届出給与（賞与）の支給月に「届出どおり支給する／今期は不支給にする」を
+// 選ばせるモーダル。額を変えて支給することはできない（変えると全額が経費にならないため）。
+function openOfficerBonusModal(back) {
+  navGo({ key: 'officer-bonus', open: () => openOfficerBonusModal(back) });
+  const pend = L.officerBonusPending(state);
+  const siCorp = pend.pending ? pend.need - pend.bonus : 0;
+  const overlay = el(`<div id="lm-officerbonus-modal" class="fixed inset-0 bg-black/60 z-[55] flex items-center justify-center p-4" style="align-items:safe center;">
+    <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+      <div class="p-4 pb-2 border-b shrink-0">
+        <div class="flex justify-between items-center gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <button id="ob-back" class="text-slate-400 text-sm shrink-0">← 戻る</button>
+            <h2 class="font-bold text-base truncate">📅 役員賞与の支給判断</h2>
+          </div>
+          <button id="ob-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
+        </div>
+      </div>
+      <div id="ob-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3"></div>
+    </div>
+  </div>`);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const body = overlay.querySelector('#ob-body');
+
+  const draw = () => {
+    if (!pend.pending) {
+      body.innerHTML = `<div class="text-sm text-slate-500">今月は判断待ちの役員賞与がありません。</div>`;
+      return;
+    }
+    body.innerHTML = `
+      <div class="text-xs text-slate-600 leading-relaxed">事前確定届出給与は、届け出た額をそのまま支給するか、全額不支給にするかのどちらかです。額を変えて支給することはできません（変えると全額が経費になりません）。</div>
+      <div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
+        <div class="flex justify-between"><span>届出額</span><span class="font-bold">${L.yen(pend.bonus)}</span></div>
+        <div class="flex justify-between"><span>会社負担の社会保険</span><span>${L.yen(siCorp)}</span></div>
+        <div class="flex justify-between"><span>支給に必要な残高</span><span class="font-bold">${L.yen(pend.need)}</span></div>
+        <div class="flex justify-between"><span>現在の残高</span><span>${L.yen(state.cash)}</span></div>
+        <div class="flex justify-between border-t pt-1 mt-1"><span>支給後の残高</span><span class="${state.cash - pend.need >= 0 ? '' : 'text-red-600 font-bold'}">${L.yen(state.cash - pend.need)}</span></div>
+      </div>
+      <div class="grid grid-cols-1 gap-2">
+        <button id="ob-pay" class="border-2 rounded-xl p-3 text-left ${pend.canPay ? '' : 'opacity-40'}" ${pend.canPay ? '' : 'disabled'}>
+          <div class="font-bold text-sm">届出どおり支給する</div>
+          <div class="text-xs text-slate-600 mt-0.5">法人の経費になり、今期の法人税が減ります。</div>
+          ${pend.canPay ? '' : `<div class="text-[11px] text-red-600 font-bold mt-1">残高が ${L.yen(pend.need - state.cash)} 足りません</div>`}
+        </button>
+        <button id="ob-skip" class="border-2 rounded-xl p-3 text-left">
+          <div class="font-bold text-sm">今期は不支給にする</div>
+          <div class="text-xs text-slate-600 mt-0.5">法人に ${L.yen(pend.need)} が残ります。経費にはならないので、今期の法人税は減りません。ペナルティはありません。</div>
+        </button>
+      </div>
+    `;
+    const decide = (choice) => {
+      const r = L.decideOfficerBonus(state, choice);
+      if (!r.done) return;
+      state = r.state;
+      r.logs.forEach(pushLog);
+      (state.notifications || []).filter(n => !n.read && n.kind === 'officer_bonus_window')
+        .forEach(n => { state = L.markNotificationRead(state, n.id).state; });
+      save(); render(); close(); back?.();
+    };
+    body.querySelector('#ob-pay')?.addEventListener('click', () => decide('pay'));
+    body.querySelector('#ob-skip')?.addEventListener('click', () => decide('skip'));
+  };
+  draw();
+  overlay.querySelector('#ob-close').addEventListener('click', dismiss(close));
+  overlay.querySelector('#ob-back').addEventListener('click', () => {
     if (navStack.length > 1) navBack(); else { close(); back?.(); }
   });
 }
@@ -15252,11 +15644,15 @@ function renderPanelRight() {
     </div>
   `));
   // v31.1: 期首月に役員報酬が未確定なら、翌月へ進めない旨を理由付きで示す。
+  // v32: 役員賞与の支給判断が未確定のときも同様にブロックする（役員報酬を優先して1つだけ出す）。
   const opPendingDesk = L.officerPayPending(state).pending;
+  const obPendingDesk = !opPendingDesk && L.officerBonusPending(state).pending;
+  const anyPendingDesk = opPendingDesk || obPendingDesk;
   c.appendChild(el(`
     <div class="mt-auto hud-panel pointer-events-auto rounded-xl shadow-xl p-2">
-      ${opPendingDesk ? `<div class="text-[11px] font-bold text-red-600 text-center mb-1">⏳ 今月中に役員報酬を決めてください</div>` : ''}
-      <button id="btn-next-month-desk" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-4 font-bold text-base shadow-lg ${opPendingDesk ? 'opacity-40' : ''}">📅 翌月へ進む ▶</button>
+      ${opPendingDesk ? `<button id="btn-op-pending-desk" class="w-full text-[11px] font-bold text-red-600 text-center mb-1">⏳ 今月中に役員報酬を決めてください</button>`
+        : obPendingDesk ? `<button id="btn-ob-pending-desk" class="w-full text-[11px] font-bold text-red-600 text-center mb-1">⏳ 今月中に役員賞与を決めてください</button>` : ''}
+      <button id="btn-next-month-desk" class="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-4 font-bold text-base shadow-lg ${anyPendingDesk ? 'opacity-40' : ''}">📅 翌月へ進む ▶</button>
       <div class="text-[11px] hud-accent font-bold text-center mt-1">⚡ 進むと行動力が全回復</div>
     </div>
   `));
@@ -15267,6 +15663,8 @@ function renderPanelRight() {
   c.querySelector('#btn-open-notifs').addEventListener('click', openNotificationsModal);
   c.querySelector('#btn-open-log').addEventListener('click', openLogModal);
   c.querySelector('#btn-next-month-desk').addEventListener('click', onNextMonth);
+  c.querySelector('#btn-op-pending-desk')?.addEventListener('click', () => openOfficerPaySimulator());
+  c.querySelector('#btn-ob-pending-desk')?.addEventListener('click', () => openOfficerBonusModal());
 }
 
 // === v3: 💼働く。1回タップ=1回、長押しで約120msごとに連続実行（行動力1につき¥1,000〜10,000）===
@@ -16044,6 +16442,12 @@ function onNextMonth() {
     openOfficerPaySimulator();
     return;
   }
+  // v32: 役員賞与の支給月に支給／不支給の判断が未確定なら、翌月へ進めない。
+  if (L.officerBonusPending(state).pending) {
+    alert('⏳ 今月中に役員賞与を支給するか決めてください。決めるまで翌月へ進めません。');
+    openOfficerBonusModal();
+    return;
+  }
   dangerBannerDismissed = false;   // v8.10: 危険バナーの「今月だけ閉じる」を翌月にリセット
   // v7.4: チュートリアルの「翌月へ進む」では本物の月送り（イベント・空室判定・収支）は走らせない。
   // どのみち捨てる状態なので、伝えたいこと＝「月が変わると行動力が全回復する」だけを見せる。
@@ -16742,7 +17146,7 @@ if (btnTerms) {
 }
   </script>
 <!-- tw-warmup:start -->
-<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-full hidden hover:bg-amber-600 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null of-act opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:text-4xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
+<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-8 h-full hidden hover:bg-amber-600 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null of-act op-reco-apply opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:text-4xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
 <!-- tw-warmup:end -->
 </body>
 </html>
