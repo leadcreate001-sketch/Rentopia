@@ -11546,6 +11546,37 @@ function openMoneyHub(initialTab = 'month') {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(close)(); });
 }
 
+// v35: 金額表示の共通ヘルパー。この画面には記号のつけ方が3つ混在していた（手書きの − ／
+// L.yen() が返す ASCII ハイフン ／ 退職金ブロックの +）。②が「負の値なのに黒」「①と別の文字・
+// 別の幅」の原因だったので、金額は必ずここを通す。桁が変わっても幅が動かないよう tabular-nums、
+// 記号だけが行に残らないよう whitespace-nowrap を必ず付ける。
+const MONEY_NUM_CLS = 'tabular-nums whitespace-nowrap';
+
+// v35: 符号の判定は必ず「丸めた後の値」で行う。L.yen() が内部で四捨五入するので、
+// 生の値で判定すると -0.4 が「−¥0」（赤）になる。0は出入りが無い状態なので、
+// 記号も色も付けない（月額0円の初期表示で「−¥0」が2行並ぶのを防ぐ）。
+function moneyHtml(n, posCls = '', extraCls = '') {
+  const v = Math.round(n);
+  return v < 0
+    ? `<span class="${MONEY_NUM_CLS} text-red-600 ${extraCls}">−${L.yen(-v)}</span>`
+    : `<span class="${MONEY_NUM_CLS} ${v === 0 ? '' : posCls} ${extraCls}">${L.yen(v)}</span>`;
+}
+// 出ていくお金。値は正で持っているが、表示は必ず −＋赤（0のときだけ記号も色も無し）。
+function moneyOutHtml(n) {
+  const v = Math.round(Math.abs(n));
+  return v === 0
+    ? `<span class="${MONEY_NUM_CLS}">¥0</span>`
+    : `<span class="${MONEY_NUM_CLS} text-red-600">−${L.yen(v)}</span>`;
+}
+// 増減（差額）。正は +＋緑、負は −＋赤、0は記号も色も無し。
+function moneyDeltaHtml(n) {
+  const v = Math.round(n);
+  if (v === 0) return `<span class="${MONEY_NUM_CLS}">¥0</span>`;
+  return v > 0
+    ? `<span class="${MONEY_NUM_CLS} text-emerald-700">+${L.yen(v)}</span>`
+    : `<span class="${MONEY_NUM_CLS} text-red-600">−${L.yen(-v)}</span>`;
+}
+
 // v32: 役員報酬シミュレーターの結果表示（積み上げバー）。est.assumedCorpIncome を分母に
 // 6区分ちょうど合計100%になる（officerPayEstimateの恒等式に依存）。
 // 例外: 法人がまだ黒字でない／報酬が法人の利益を超えているときはバーを出さない。
@@ -11556,7 +11587,9 @@ function allocationBarHtml(est) {
   }
   if (est.keepCorp < 0) {
     return `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2.5 text-red-800 font-bold">
-      この報酬額は法人の年間利益 ${L.yen(est.assumedCorpIncome)} を超えています。法人は赤字になり、毎月の現金が減っていきます</div>`;
+      この報酬額は法人の年間利益 ${L.yen(est.assumedCorpIncome)} を超えています。法人は赤字になり、毎月の現金が減っていきます
+      <div class="font-normal mt-1">この赤字は最長${L.CORP_CARRY_LOSS_YEARS}年、将来の法人の利益と相殺できます（この試算には含めていません）</div>
+    </div>`;
   }
   const denom = est.assumedCorpIncome;
   const seg = (v, cls) => `<div class="${cls}" style="width:${Math.max(0, v / denom * 100)}%"></div>`;
@@ -11579,19 +11612,21 @@ function allocationBarHtml(est) {
 // v32: 積み上げバーの下に置く2列の台帳（法人に置いたぶん／自分に移したぶん）。
 function ledgerHtml(est) {
   const corpTaxable = est.assumedCorpIncome - est.corpDeductible;
-  return `<div class="grid grid-cols-2 gap-2 text-xs">
+  const corpTaxableLabel = corpTaxable < 0 ? '法人の課税所得（欠損）' : '法人の課税所得';
+  const keepCorpLabel = est.keepCorp < 0 ? '法人の赤字' : '法人に残る';
+  return `<div class="grid grid-cols-1 gap-2 text-xs">
     <div class="border rounded-lg p-2.5 space-y-1">
       <div class="font-bold text-[11px] mb-1">🏢 法人に置いたぶん</div>
-      <div class="flex justify-between"><span>法人の課税所得</span><span>${L.yen(corpTaxable)}</span></div>
-      <div class="flex justify-between text-red-600"><span>法人税等</span><span>−${L.yen(est.corpTax)}</span></div>
-      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>法人に残る</span><span>${L.yen(est.keepCorp)}</span></div>
+      <div class="flex justify-between"><span>${corpTaxableLabel}</span>${moneyHtml(corpTaxable)}</div>
+      <div class="flex justify-between"><span>法人税等</span>${moneyOutHtml(est.corpTax)}</div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>${keepCorpLabel}</span>${moneyHtml(est.keepCorp, 'text-emerald-700')}</div>
     </div>
     <div class="border rounded-lg p-2.5 space-y-1">
       <div class="font-bold text-[11px] mb-1">👤 自分に移したぶん</div>
-      <div class="flex justify-between"><span>役員報酬（年額）</span><span>${L.yen(est.annualPay)}</span></div>
-      <div class="flex justify-between text-red-600"><span>社会保険（本人）</span><span>−${L.yen(est.siSelf)}</span></div>
-      <div class="flex justify-between text-red-600"><span>所得税・住民税の増分</span><span>−${L.yen(est.personalTaxDelta)}</span></div>
-      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>自分の手取り</span><span>${L.yen(est.keepSelf)}</span></div>
+      <div class="flex justify-between"><span>役員報酬（年額）</span>${moneyHtml(est.annualPay)}</div>
+      <div class="flex justify-between"><span>社会保険（本人）</span>${moneyOutHtml(est.siSelf)}</div>
+      <div class="flex justify-between"><span>所得税・住民税の増分</span>${moneyOutHtml(est.personalTaxDelta)}</div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>自分の手取り</span>${moneyHtml(est.keepSelf, 'text-amber-700')}</div>
     </div>
   </div>
   <div class="text-[10.5px] text-slate-400">※ 会社負担の社会保険 ${L.yen(est.siCorp)} は法人の経費として先に引かれています（どちらの手元にも残りません）</div>`;
@@ -11606,10 +11641,11 @@ function totalJudgementHtml(est) {
     : est.deltaVsZero < 0
     ? `<div class="text-xs text-emerald-700 font-bold mt-1">✅ この設定だと手元に残る合計が ${L.yen(-est.deltaVsZero)} 増えます。自分に移したほうがトクです。</div>`
     : `<div class="text-xs text-slate-500 mt-1">ちょうど同じです。</div>`;
+  const totalLabel = est.keepTotal < 0 ? 'トータルの持ち出し（法人＋自分）' : '手元に残る合計（法人＋自分）';
   return `<div class="border-2 rounded-lg p-3 text-center">
-    <div class="text-xs text-slate-500">手元に残る合計（法人＋自分）</div>
-    <div class="text-2xl font-black tabular-nums">${L.yen(est.keepTotal)}</div>
-    <div class="text-[11px] text-slate-400 mt-0.5">役員報酬を出さなかった場合 ${L.yen(est.keepTotalZero)}</div>
+    <div class="text-xs text-slate-500">${totalLabel}</div>
+    ${moneyHtml(est.keepTotal, '', 'text-2xl font-black')}
+    <div class="text-[11px] text-slate-400 mt-0.5">役員報酬を出さなかった場合 ${moneyHtml(est.keepTotalZero)}</div>
     ${judgeHtml}
   </div>`;
 }
@@ -11680,11 +11716,11 @@ function retirementNetHtml(monthly, bonus) {
   const netCls = ret.net >= 0 ? 'text-emerald-700' : 'text-red-600';
   return `<div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5 space-y-1">
     <div class="font-bold text-[11px] mb-1">🏁 退職金まで通した収支（勤続${ret.years}年）</div>
-    <div class="flex justify-between"><span>${term('retirement_allowance', '退職金の器')}</span><span>${L.yen(ret.room)}</span></div>
-    <div class="flex justify-between"><span>毎年の差 ×勤続年数</span><span class="${yearlyTotal >= 0 ? 'text-emerald-700' : 'text-red-600'}">${yearlyTotal >= 0 ? '+' : '−'}${L.yen(Math.abs(yearlyTotal))}</span></div>
-    <div class="flex justify-between text-emerald-700"><span>支給年の法人税の減り</span><span>+${L.yen(ret.corpTaxSave)}</span></div>
-    <div class="flex justify-between text-red-600"><span>退職所得税</span><span>−${L.yen(ret.retireTax)}</span></div>
-    <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>最終的な差引</span><span class="${netCls}">${ret.net >= 0 ? '+' : '−'}${L.yen(Math.abs(ret.net))}</span></div>
+    <div class="flex justify-between"><span>${term('retirement_allowance', '退職金の器')}</span>${moneyHtml(ret.room)}</div>
+    <div class="flex justify-between"><span>毎年の差 ×勤続年数</span>${moneyDeltaHtml(yearlyTotal)}</div>
+    <div class="flex justify-between"><span>支給年の法人税の減り</span>${moneyDeltaHtml(ret.corpTaxSave)}</div>
+    <div class="flex justify-between"><span>退職所得税</span>${moneyOutHtml(ret.retireTax)}</div>
+    <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>最終的な差引</span>${moneyDeltaHtml(ret.net)}</div>
     <div class="text-[11px] font-bold ${netCls}">${ret.net >= 0
       ? `✅ 退職金まで通せば ${L.yen(ret.net)} のプラス。毎年の負担を退職金で取り返せています。`
       : `❌ 退職金まで通しても ${L.yen(-ret.net)} のマイナス。器は育ちますが、そこまでの負担を取り返せません。`}</div>
@@ -11692,31 +11728,39 @@ function retirementNetHtml(monthly, bonus) {
 }
 
 // v32: 「🧮 おすすめを計算」の展開カード。
-function recoHtml(reco) {
+// v34: カードが押せることを示すCTAバーを付け、いま選ばれている値と一致するカードは「適用中」にする。
+function recoHtml(reco, monthly, bonus) {
   const allZero = reco.byYear.monthly === 0 && reco.byYear.bonus === 0
     && reco.byRetirement.monthly === 0 && reco.byRetirement.bonus === 0;
   if (allZero) {
     return `<div class="text-xs bg-slate-50 border rounded-lg p-2.5 text-slate-600">いまは役員報酬を出さないのが最善です。法人に置いたままのほうが税率が低いためです。</div>`;
   }
+  const ctaBar = (m, b) => (monthly === m && bonus === b)
+    ? `<div class="mt-2 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded py-1.5 text-center text-xs font-bold">✓ 適用中</div>`
+    : `<div class="mt-2 bg-navy text-white rounded py-1.5 text-center text-xs font-bold">この金額にする</div>`;
+  const desc = `<div class="text-[11px] text-slate-500">タップするとスライダーがその金額に切り替わります（確定はまだされません）</div>`;
   if (reco.same) {
-    return `<button class="op-reco-apply border-2 border-navy bg-slate-50 rounded-xl p-3 text-left w-full" data-monthly="${reco.byYear.monthly}" data-bonus="${reco.byYear.bonus}">
+    return `${desc}<button class="op-reco-apply border-2 border-navy bg-slate-50 rounded-xl p-3 text-left w-full" data-monthly="${reco.byYear.monthly}" data-bonus="${reco.byYear.bonus}">
       <div class="font-bold text-sm">おすすめ</div>
       <div class="text-xs text-slate-600 mt-0.5">月額 ${L.yen(reco.byYear.monthly)}・賞与 ${L.yen(reco.byYear.bonus)}</div>
       <div class="text-[11px] text-emerald-700 mt-1">今期 +${L.yen(reco.byYear.gain)}・退職金まで通して +${L.yen(reco.byRetirement.gain)}</div>
+      ${ctaBar(reco.byYear.monthly, reco.byYear.bonus)}
     </button>`;
   }
   const years = L.officerRetirementNet(state, { monthly: reco.byRetirement.monthly, bonus: reco.byRetirement.bonus }).years;
-  return `<div class="grid grid-cols-1 gap-2">
+  return `${desc}<div class="grid grid-cols-1 gap-2">
     <button class="op-reco-apply border-2 rounded-xl p-3 text-left" data-monthly="${reco.byYear.monthly}" data-bonus="${reco.byYear.bonus}">
       <div class="font-bold text-sm">今期の手残りが最大</div>
       <div class="text-xs text-slate-600 mt-0.5">月額 ${L.yen(reco.byYear.monthly)}・賞与 ${L.yen(reco.byYear.bonus)}</div>
       <div class="text-[11px] text-emerald-700 mt-1">年 +${L.yen(reco.byYear.gain)}</div>
+      ${ctaBar(reco.byYear.monthly, reco.byYear.bonus)}
     </button>
     <button class="op-reco-apply border-2 rounded-xl p-3 text-left" data-monthly="${reco.byRetirement.monthly}" data-bonus="${reco.byRetirement.bonus}">
       <div class="font-bold text-sm">退職金まで受け取る前提で最大</div>
       <div class="text-xs text-slate-600 mt-0.5">月額 ${L.yen(reco.byRetirement.monthly)}・賞与 ${L.yen(reco.byRetirement.bonus)}</div>
       <div class="text-[11px] text-emerald-700 mt-1">通算 +${L.yen(reco.byRetirement.gain)}</div>
       <div class="text-[10.5px] text-slate-400 mt-1">同じ月額を${years}年続けて、最後に退職金を受け取る前提です。途中で退任しないとこの差は出ません。</div>
+      ${ctaBar(reco.byRetirement.monthly, reco.byRetirement.bonus)}
     </button>
   </div>`;
 }
@@ -11785,8 +11829,8 @@ function openOfficerPaySimulator(back) {
         </select>
         ${state.corpFiscalMonth != null ? `<div class="text-[10.5px] text-slate-400 mt-0.5">${(state.corpFiscalMonth % 12) + 1}月（期首月）と${state.corpFiscalMonth}月（決算月）は選べません。期首月は決議・届出のあとに支給する必要があり、決算月は決算が先に確定してしまうためです</div>` : ''}
       </div>
-      <button id="op-reco-btn" class="w-full border-2 border-navy text-navy rounded-lg py-2 text-sm font-bold hover:bg-slate-50">🧮 おすすめを計算</button>
-      ${recoOpen && reco ? recoHtml(reco) : ''}
+      <button id="op-reco-btn" class="w-full border-2 border-navy text-navy rounded-lg py-2 text-sm font-bold hover:bg-slate-50">${recoOpen ? '✕ おすすめを閉じる' : '🧮 おすすめの金額を出す'}</button>
+      ${recoOpen && reco ? recoHtml(reco, monthly, bonus) : ''}
       ${allocationBarHtml(est)}
       ${ledgerHtml(est)}
       ${totalJudgementHtml(est)}
@@ -11795,7 +11839,10 @@ function openOfficerPaySimulator(back) {
       ${bonus > 0 ? `<div class="text-xs text-slate-600 bg-slate-50 rounded-lg p-2.5">
         <div class="flex justify-between"><span>賞与支給月に必要な残高</span><span class="font-bold">${L.yen(est.bonusCashNeeded)}</span></div>
       </div>` : ''}
-      <button id="op-confirm" class="w-full bg-navy text-white rounded py-2 text-sm font-bold ${confirmDisabled ? 'opacity-40' : ''}" ${confirmDisabled ? 'disabled' : ''}>この内容で確定する（据え置きでもOK・今期は変更できません）</button>
+      <button id="op-confirm" class="w-full bg-navy text-white rounded py-2 text-sm font-bold leading-tight ${confirmDisabled ? 'opacity-40' : ''}" ${confirmDisabled ? 'disabled' : ''}>
+        <div>この内容で確定する</div>
+        <div class="text-[10.5px] font-normal opacity-80 mt-0.5">据え置きでもOK・今期は変更できません</div>
+      </button>
     `;
     body.querySelector('#op-monthly')?.addEventListener('input', (e) => { monthly = Number(e.target.value); draw(); });
     body.querySelector('#op-bonus')?.addEventListener('input', (e) => { bonus = Number(e.target.value); draw(); });
@@ -13989,7 +14036,10 @@ function showPayment(propId, price, close) {
   const cashClosing = L.closingCostOf(p, price, 0);
   const cashNeed = price + cashClosing;
   let downRatio = 0.2;
-  let buyOwner = 'personal';   // v3.5: 法人設立済みなら購入名義を選べる
+  // v34: 法人設立済みなら既定を法人名義にする（公庫の枠判定が名義ごとのため審査結果に影響するが、実務として正しい挙動）。
+  let buyOwner = state.isIncorporated ? 'corp' : 'personal';
+  // v34: 確認モーダルで名義を切り替えて融資を引き直したとき、その旨を名義行の下に出す。
+  let ownerSwitchNote = null;
   // v19: 公庫のときだけ選べる元金据置（なし/1年/2年）。既定はなし（0ヶ月）。
   let graceMonths = 0;
   // v26.2: 公庫の「借りる」を押すとカード内に3択を開く（押すまでは出さない）。draw()は
@@ -14050,6 +14100,12 @@ function showPayment(propId, price, close) {
     // font-size:clamp() をやめて 16px の見出し＋小さいグレーの補足（成約価格）にした。
     // ヘッダーを2段にすると 22px 食って法人名義（名義の行が1つ増える）で銀行が初期表示から
     // 外れるため、ここは1段のまま。
+    // v34: 同じ理由で「法人が既定です」の案内も独立した行にしない。375×667で実測したところ、
+    // 10.5pxの注記1本（2行に折れて32px＋space-y-1.5の6px＝37px）で銀行1行目の上端が
+    // 615px→652pxへ動き、コンテナ下端624pxを越えて初期表示から完全に消えた。
+    // 案内は🏢法人ラベル内の（既定）に畳んである（行が増えず、実測で615→616pxに収まる）。
+    // ownerSwitchNoteだけは行が増えるが、確認モーダルで名義を切り替えた直後にしか出ず、
+    // そのときdraw()はprevScroll（＝銀行カードまでスクロールした位置）を書き戻すので隠れない。
     const box = el(`<div class="bg-white rounded-xl w-full max-w-md max-h-[94vh] flex flex-col modal-card" style="max-height:94dvh">
       <div class="p-4 pb-2 border-b shrink-0 flex justify-between items-center gap-2">
         <h2 class="font-bold truncate min-w-0 flex-1">支払い方法 <span class="text-[11px] font-normal text-slate-500">成約価格 ${L.yen(price)}</span></h2>
@@ -14059,7 +14115,8 @@ function showPayment(propId, price, close) {
       <div class="flex justify-center">${sellerTypeBadge(p)}</div>
       ${state.isIncorporated ? `<div class="flex gap-2 text-sm items-center"><span class="font-bold shrink-0">名義:</span>
         <label class="flex-1 border rounded p-1 text-center cursor-pointer ${buyOwner === 'personal' ? 'bg-slate-100 font-bold border-navy' : ''}"><input type="radio" name="buy-owner" value="personal" ${buyOwner === 'personal' ? 'checked' : ''} class="mr-1">👤 個人</label>
-        <label class="flex-1 border rounded p-1 text-center cursor-pointer ${buyOwner === 'corp' ? 'bg-slate-100 font-bold border-navy' : ''}"><input type="radio" name="buy-owner" value="corp" ${buyOwner === 'corp' ? 'checked' : ''} class="mr-1">🏢 法人</label></div>` : ''}
+        <label class="flex-1 border rounded p-1 text-center cursor-pointer ${buyOwner === 'corp' ? 'bg-slate-100 font-bold border-navy' : ''}"><input type="radio" name="buy-owner" value="corp" ${buyOwner === 'corp' ? 'checked' : ''} class="mr-1">🏢 法人<span class="text-[10px] font-normal">（既定）</span></label></div>
+        ${ownerSwitchNote ? `<div class="text-[11px] bg-amber-50 border border-amber-200 rounded p-1.5 text-amber-800">${ownerSwitchNote}</div>` : ''}` : ''}
       <div class="rounded-lg bg-emerald-50 border border-emerald-200 p-2 space-y-1.5">
         <div class="text-sm font-bold text-emerald-800">💰 現金で一括払い</div>
         <button id="pay-cash" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded py-1.5 text-sm font-bold ${state.cash < cashNeed ? 'opacity-40' : ''}" ${state.cash < cashNeed ? 'disabled' : ''}>現金一括（必要 ${L.yen(cashNeed)}）</button>
@@ -14202,7 +14259,7 @@ function showPayment(propId, price, close) {
       box.querySelector('#pay-credit').innerHTML = creditSummaryBox(pct / 100, openCredit);   // v8.7: 評価も追従
     });
     range.addEventListener('change', () => { downRatio = Number(range.value) / 100; draw(); });
-    box.querySelectorAll('input[name="buy-owner"]').forEach(rb => rb.addEventListener('change', e => { buyOwner = e.target.value; draw(); }));
+    box.querySelectorAll('input[name="buy-owner"]').forEach(rb => rb.addEventListener('change', e => { buyOwner = e.target.value; ownerSwitchNote = null; draw(); }));
     // v15: リフォーム項目のチェック。触るたびに合計額と4行同時審査（rs）を引き直す。
     box.querySelectorAll('.reform-check').forEach(c => c.addEventListener('change', () => {
       reformPlan = { ...reformPlan, [c.dataset.k]: c.checked };
@@ -14233,20 +14290,79 @@ function showPayment(propId, price, close) {
       draw();
     });
     const ownerLabel = () => buyOwner === 'corp' ? '🏢法人名義' : '👤個人名義';
-    box.querySelector('#pay-cash').addEventListener('click', () => {
+    const doCashPurchase = () => {
       const r = L.buyPropertyV2(state, propId, { method: 'cash', price, owner: buyOwner });
       state = r.state; r.logs.forEach(pushLog); save(); navReset(); render(); close(); checkEnd();
       playPurchaseCelebration(p.name || p.label, `${L.yen(price)}（現金一括・${ownerLabel()}）`);
       tutMaybeAdvance('payment');
-    });
-    box.querySelectorAll('.pay-bank').forEach(b => b.addEventListener('click', () => {
+    };
+    const doBankPurchase = (bankKey) => {
       // v19: graceMonthsは公庫以外ではbuyPropertyV2側で必ず0にクランプされるので、そのまま渡してよい。
-      const r = L.buyPropertyV2(state, propId, { method: b.dataset.k, downRatio, price, owner: buyOwner, reformPlan, graceMonths, financeClosingCost });
+      const r = L.buyPropertyV2(state, propId, { method: bankKey, downRatio, price, owner: buyOwner, reformPlan, graceMonths, financeClosingCost });
       state = r.state; r.logs.forEach(pushLog); save(); navReset(); render(); close(); checkEnd();
       // v15: リフォームを一緒に借りたときは演出の2行目にも込みであることを出す。
       const reformTotal = L.purchaseReformTotal(p, reformPlan);
       playPurchaseCelebration(p.name || p.label, `${L.yen(price)}（融資利用・${ownerLabel()}${reformTotal > 0 ? `／リフォーム${L.yen(reformTotal)}込み` : ''}）`);
       tutMaybeAdvance('payment');
+    };
+    // v34: 法人設立後は実行ボタンの直後に名義の確認を挟む（読み飛ばして個人で買ってしまう事故を防ぐ）。
+    // 融資は「今と違う名義」を選んでも即購入せず、draw()で4行審査を引き直して支払い方法画面に戻す
+    // （buyPropertyV2は否決銀行でもterms?.years等のフォールバックでそのまま購入が成立してしまうため）。
+    const openOwnerConfirmModal = (payKind, bankKey) => {
+      const bankLabel = bankKey ? rs.find(r => r.bankKey === bankKey)?.label : null;
+      const paySummary = payKind === 'cash' ? `現金一括（必要 ${L.yen(cashNeed)}）` : `融資利用${bankLabel ? `（${bankLabel}）` : ''}`;
+      const ocOverlay = el(`<div class="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4" style="align-items:safe center;">
+        <div class="bg-white rounded-xl w-full max-w-md max-h-[85vh] flex flex-col modal-card" style="max-height:85dvh">
+          <div class="p-4 pb-2 border-b shrink-0">
+            <h2 class="font-bold text-base">どちらの名義で買いますか？</h2>
+            <div class="text-[11px] text-slate-500 mt-0.5">${p.name || p.label} ／ ${paySummary}</div>
+          </div>
+          <div class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+            <button class="oc-pick w-full border-2 border-emerald-500 hover:bg-emerald-50 rounded-lg p-3 text-left" data-owner="personal">
+              <div class="flex justify-between items-center gap-2">
+                <div class="font-bold text-sm">👤 個人名義</div>
+                ${buyOwner === 'personal' ? `<span class="text-[10.5px] font-bold text-emerald-700">✓ いまの選択</span>` : ''}
+              </div>
+              <div class="text-xs text-slate-600 mt-0.5">所得税・住民税。5年以内に売ると短期譲渡（${L.fmtTaxRate(L.CONFIG.capGainTaxShort)}）</div>
+            </button>
+            <button class="oc-pick w-full border-2 border-navy hover:bg-slate-50 rounded-lg p-3 text-left" data-owner="corp">
+              <div class="flex justify-between items-center gap-2">
+                <div class="font-bold text-sm">🏢 法人名義</div>
+                ${buyOwner === 'corp' ? `<span class="text-[10.5px] font-bold text-emerald-700">✓ いまの選択</span>` : ''}
+              </div>
+              <div class="text-xs text-slate-600 mt-0.5">法人税。役員報酬を経費にできる／売却益に保有期間の区分がない</div>
+            </button>
+            <button id="oc-back" class="w-full text-slate-500 text-sm">← 支払い方法に戻る</button>
+          </div>
+        </div>
+      </div>`);
+      document.body.appendChild(ocOverlay);
+      const closeOc = () => ocOverlay.remove();
+      ocOverlay.querySelector('#oc-back').addEventListener('click', closeOc);
+      ocOverlay.querySelectorAll('.oc-pick').forEach(btn => btn.addEventListener('click', () => {
+        const chosen = btn.dataset.owner;
+        const same = chosen === buyOwner;
+        closeOc();
+        if (same) {
+          if (payKind === 'cash') doCashPurchase(); else doBankPurchase(bankKey);
+          return;
+        }
+        buyOwner = chosen;
+        if (payKind === 'cash') {
+          doCashPurchase();
+        } else {
+          ownerSwitchNote = `🔁 名義を${chosen === 'corp' ? '🏢法人' : '👤個人'}に変えたので、下の融資審査をやり直しました`;
+          draw();
+        }
+      }));
+    };
+    box.querySelector('#pay-cash').addEventListener('click', () => {
+      if (state.isIncorporated) { openOwnerConfirmModal('cash', null); return; }
+      doCashPurchase();
+    });
+    box.querySelectorAll('.pay-bank').forEach(b => b.addEventListener('click', () => {
+      if (state.isIncorporated) { openOwnerConfirmModal('bank', b.dataset.k); return; }
+      doBankPurchase(b.dataset.k);
     }));
     box.querySelector('#pay-cancel').addEventListener('click', () => { pushLog('買付を取り下げた'); close(); });
     box.querySelector('#pay-x').addEventListener('click', () => { pushLog('買付を取り下げた'); close(); });
@@ -15616,7 +15732,7 @@ function playIncorporationCelebration() {
     <div class="absolute inset-0 flex items-center justify-center pointer-events-none"><div style="width:520px;height:520px;border-radius:50%;background:repeating-conic-gradient(rgba(251,191,36,0.4) 0 10deg, transparent 10deg 30deg);animation: ic-burst 1.0s ease-out forwards;"></div></div>
     <div class="relative text-center text-white max-w-md w-full max-h-full flex flex-col gap-3">
       <div class="mx-auto w-32 sm:w-40 h-32 sm:h-40 rounded-full bg-white/95 shadow-2xl flex items-center justify-center shrink-0" style="border:9px solid #dc2626;animation: ic-stamp 0.55s cubic-bezier(.2,1.4,.4,1) forwards;">
-        <span class="text-3xl sm:text-4xl font-black" style="color:#dc2626;">法人設立</span></div>
+        <span class="text-2xl sm:text-3xl font-black whitespace-nowrap" style="color:#dc2626;">法人設立</span></div>
       <div class="text-2xl sm:text-3xl font-black tracking-widest shrink-0">🏢 <span style="background:linear-gradient(180deg,#fde68a,#f59e0b);-webkit-background-clip:text;background-clip:text;color:transparent;">法人成り！</span></div>
       <div class="bg-white/95 rounded-xl p-4 text-left text-sm text-slate-800 space-y-2 flex-1 min-h-0 overflow-y-auto">
         <div class="font-bold text-navy">ここが変わりました</div>
@@ -17223,7 +17339,7 @@ if (btnTerms) {
 }
   </script>
 <!-- tw-warmup:start -->
-<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-8 h-full hidden hover:bg-amber-600 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null of-act op-reco-apply opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:text-4xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
+<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-emerald-500 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-8 h-full hidden hover:bg-amber-600 hover:bg-emerald-50 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null oc-pick of-act op-reco-apply opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
 <!-- tw-warmup:end -->
 </body>
 </html>
