@@ -432,6 +432,28 @@
   }
   .hud-panel .sld-btn:active,
   html[data-theme="dark"] .hud-panel .sld-btn:active { background-color: rgba(255,255,255,0.22); }
+  /* ============================================================
+     v36: 役員報酬シミュレーターの積み上げバーと、台帳の凡例チップで共有する区分色。
+     Tailwindの階調（bg-red-400 等）は Play CDN の JIT が「クラスがDOMに現れた瞬間」に
+     初めてCSSを作るため、初回表示では無色（実測 rgba(0,0,0,0)）の隙間になる。しかも
+     build-inline.mjs のウォームアップ収集は class="${cls}" のような動的断片を捨てるので、
+     バーの色は仕組み上あそこに載らない。だから素のCSSでここに持つ。
+     色の並びは「残る＝緑／税＝赤2段／社会保険＝紫2段／手取り＝琥珀」。社会保険を紫にして
+     いるのは、隣り合う2本を判別させるためと、「社会保険は税ではない」を色でも示すため。
+     ============================================================ */
+  .alloc-keepcorp { background-color: #059669; }
+  .alloc-corptax  { background-color: #dc2626; }
+  .alloc-sicorp   { background-color: #8b5cf6; }
+  .alloc-siself   { background-color: #c4b5fd; }
+  .alloc-ptax     { background-color: #f87171; }
+  .alloc-keepself { background-color: #f59e0b; }
+  html[data-theme="dark"] .alloc-keepcorp { background-color: #10b981; }
+  html[data-theme="dark"] .alloc-corptax  { background-color: #ef4444; }
+  html[data-theme="dark"] .alloc-sicorp   { background-color: #a78bfa; }
+  /* チップ。台帳のラベル頭に置く小さな四角。バーと同じ .alloc-* を重ねて色を付ける。 */
+  .alloc-chip { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
+  /* 区分に対応しない行（合計・小計）の位置合わせ用。見えないが幅は取る。 */
+  .alloc-chip-none { background-color: transparent; }
 </style>
 </head>
 <body class="bg-canvas text-ink overflow-hidden flex flex-col">
@@ -9051,6 +9073,10 @@ function wrapRangeWithSteppers(input) {
     b.textContent = label;
     b.setAttribute('aria-label', aria);
     b.disabled = input.disabled;           // 指値モーダルは売主次第でスライダーごと無効になる
+    // v36: スライダーを使い回す画面（役員報酬シミュレーターの賞与）ができたので、
+    // 包んだ時点の disabled を焼き付けず、属性の変化に追従させる。
+    new MutationObserver(() => { b.disabled = input.disabled; })
+      .observe(input, { attributes: true, attributeFilter: ['disabled'] });
     let delayTimer = 0, repeatTimer = 0, holding = false, moved = false;
     const stopRepeat = () => {
       clearTimeout(delayTimer); clearInterval(repeatTimer);
@@ -11596,12 +11622,12 @@ function allocationBarHtml(est) {
   return `<div class="border rounded-lg p-3 bg-slate-50">
     <div class="text-xs text-slate-500 mb-2">🏢 法人の年間利益（見込み） ${L.yen(est.assumedCorpIncome)}</div>
     <div class="flex w-full h-8 rounded-lg overflow-hidden">
-      ${seg(est.keepCorp, 'bg-emerald-600')}
-      ${seg(est.corpTax, 'bg-red-500')}
-      ${seg(est.siCorp, 'bg-red-400')}
-      ${seg(est.siSelf, 'bg-red-400')}
-      ${seg(est.personalTaxDelta, 'bg-red-300')}
-      ${seg(est.keepSelf, 'bg-amber-500')}
+      ${seg(est.keepCorp, 'alloc-keepcorp')}
+      ${seg(est.corpTax, 'alloc-corptax')}
+      ${seg(est.siCorp, 'alloc-sicorp')}
+      ${seg(est.siSelf, 'alloc-siself')}
+      ${seg(est.personalTaxDelta, 'alloc-ptax')}
+      ${seg(est.keepSelf, 'alloc-keepself')}
     </div>
     <div class="flex justify-between text-[10px] text-slate-400 mt-1">
       <span>← 法人に残る</span><span>税・社会保険で消える</span><span>自分の手取り →</span>
@@ -11610,26 +11636,35 @@ function allocationBarHtml(est) {
 }
 
 // v32: 積み上げバーの下に置く2列の台帳（法人に置いたぶん／自分に移したぶん）。
+// v36: バーの6区分と台帳の6行を1対1に対応させ、チップ（.alloc-*）で対応を示す。
+// 法人カードは「年間利益から引いていく」形にし、いま注釈にしかない会社負担の社会保険を行へ上げた。
 function ledgerHtml(est) {
+  // officerPayEstimate の corpDeductible は annualPay + siCorp で計算しているので、
+  // 「年間利益 − 役員報酬 − 会社負担社保 ＝ 課税所得」の引き算が画面の上でちょうど合う。
+  // corpDeductible に項目が増えるとこの前提が崩れ、行の合計が表示上の数字と合わなくなる。
   const corpTaxable = est.assumedCorpIncome - est.corpDeductible;
   const corpTaxableLabel = corpTaxable < 0 ? '法人の課税所得（欠損）' : '法人の課税所得';
   const keepCorpLabel = est.keepCorp < 0 ? '法人の赤字' : '法人に残る';
+  const chip = (cls) => `<span class="alloc-chip ${cls}"></span>`;
+  const rowLabel = (chipCls, label) => `<span class="flex items-center gap-1.5">${chip(chipCls)}${label}</span>`;
   return `<div class="grid grid-cols-1 gap-2 text-xs">
     <div class="border rounded-lg p-2.5 space-y-1">
       <div class="font-bold text-[11px] mb-1">🏢 法人に置いたぶん</div>
-      <div class="flex justify-between"><span>${corpTaxableLabel}</span>${moneyHtml(corpTaxable)}</div>
-      <div class="flex justify-between"><span>法人税等</span>${moneyOutHtml(est.corpTax)}</div>
-      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>${keepCorpLabel}</span>${moneyHtml(est.keepCorp, 'text-emerald-700')}</div>
+      <div class="flex justify-between">${rowLabel('alloc-chip-none', '法人の年間利益')}${moneyHtml(est.assumedCorpIncome)}</div>
+      <div class="flex justify-between">${rowLabel('alloc-chip-none', '役員報酬（年額）')}${moneyOutHtml(est.annualPay)}</div>
+      <div class="flex justify-between">${rowLabel('alloc-sicorp', '社会保険（会社負担）')}${moneyOutHtml(est.siCorp)}</div>
+      <div class="flex justify-between border-t pt-1 mt-1">${rowLabel('alloc-chip-none', corpTaxableLabel)}${moneyHtml(corpTaxable)}</div>
+      <div class="flex justify-between">${rowLabel('alloc-corptax', '法人税等')}${moneyOutHtml(est.corpTax)}</div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1">${rowLabel('alloc-keepcorp', keepCorpLabel)}${moneyHtml(est.keepCorp)}</div>
     </div>
     <div class="border rounded-lg p-2.5 space-y-1">
       <div class="font-bold text-[11px] mb-1">👤 自分に移したぶん</div>
-      <div class="flex justify-between"><span>役員報酬（年額）</span>${moneyHtml(est.annualPay)}</div>
-      <div class="flex justify-between"><span>社会保険（本人）</span>${moneyOutHtml(est.siSelf)}</div>
-      <div class="flex justify-between"><span>所得税・住民税の増分</span>${moneyOutHtml(est.personalTaxDelta)}</div>
-      <div class="flex justify-between font-bold border-t pt-1 mt-1"><span>自分の手取り</span>${moneyHtml(est.keepSelf, 'text-amber-700')}</div>
+      <div class="flex justify-between">${rowLabel('alloc-chip-none', '役員報酬（年額）')}${moneyHtml(est.annualPay)}</div>
+      <div class="flex justify-between">${rowLabel('alloc-siself', '社会保険（本人）')}${moneyOutHtml(est.siSelf)}</div>
+      <div class="flex justify-between">${rowLabel('alloc-ptax', '所得税・住民税の増分')}${moneyOutHtml(est.personalTaxDelta)}</div>
+      <div class="flex justify-between font-bold border-t pt-1 mt-1">${rowLabel('alloc-keepself', '自分の手取り')}${moneyHtml(est.keepSelf)}</div>
     </div>
-  </div>
-  <div class="text-[10.5px] text-slate-400">※ 会社負担の社会保険 ${L.yen(est.siCorp)} は法人の経費として先に引かれています（どちらの手元にも残りません）</div>`;
+  </div>`;
 }
 
 // v32: 手元に残る合計（法人＋自分）と、役員報酬を出さなかった場合との比較判定。
@@ -11789,39 +11824,65 @@ function openOfficerPaySimulator(back) {
           <button id="op-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
         </div>
       </div>
-      <div id="op-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3"></div>
+      <div id="op-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+        <div id="op-note"></div>
+        <div>
+          <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">${term('fixed_monthly_pay', '月額報酬')}</span><span id="op-monthly-v" class="font-bold text-lg"></span></div>
+          <input id="op-monthly" type="range" min="0" max="1500000" step="50000" value="${monthly}" class="w-full">
+        </div>
+        <div>
+          <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">${term('predetermined_bonus', '賞与')}</span><span id="op-bonus-v" class="font-bold text-lg"></span></div>
+          <input id="op-bonus" type="range" min="0" max="${L.bonusCapOf(monthly)}" step="250000" value="${bonus}" class="w-full">
+          <div id="op-bonus-note" class="text-[10.5px] text-slate-400 mt-0.5"></div>
+        </div>
+        <div id="op-rest" class="space-y-3"></div>
+      </div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
   const body = overlay.querySelector('#op-body');
+  const note = body.querySelector('#op-note');
+  const monthlyEl = body.querySelector('#op-monthly');
+  const bonusEl = body.querySelector('#op-bonus');
+  const monthlyVal = body.querySelector('#op-monthly-v');
+  const bonusVal = body.querySelector('#op-bonus-v');
+  const bonusNote = body.querySelector('#op-bonus-note');
+  const rest = body.querySelector('#op-rest');
 
-  const draw = () => {
+  // v31.1: ウィンドウ外でもスライダーは動かせる（試算だけできる）。無効化するのは確定ボタンだけ。
+  const confirmDisabled = !win.open;
+  const isSettlementMonth = state.corpFiscalMonth != null && L.calMonthOf(state.month) === state.corpFiscalMonth;
+  note.innerHTML = win.open
+    ? `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800 font-bold">⏳ 今月中に確定してください。確定するまで翌月へ進めません</div>`
+    : isSettlementMonth
+    ? `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800">📊 決算が確定しました。確定できるのは来月（期首月）です。ここでは試算だけできます</div>`
+    : `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800">⚠️ 今は改定できません（${
+        win.reason === 'retired' ? '退任済み' : win.reason === 'not_incorporated' ? '未法人化' : `次の改定は ${L.fmtYM(win.nextOpenMonth)}`
+      }）。ここでは試算だけできます</div>`;
+
+  // v36: スライダー本体はDOMに置いたまま、値と上限だけ追従させる。
+  // ここで input.value を毎回代入し直すと、指でドラッグ中のスライダーを触ることになるので、
+  // 値が実際に変わったときだけ代入する。
+  const syncControls = () => {
     const cap = L.bonusCapOf(monthly);
     if (bonus > cap) bonus = cap;   // 月額を下げて賞与が上限を超えたら自動でクランプする
+    if (monthlyEl.value !== String(monthly)) monthlyEl.value = String(monthly);
+    bonusEl.max = String(cap);
+    bonusEl.disabled = (monthly === 0);
+    if (bonusEl.value !== String(bonus)) bonusEl.value = String(bonus);
+    monthlyVal.textContent = L.yen(monthly);
+    bonusVal.textContent = L.yen(bonus);
+    bonusNote.textContent = monthly === 0
+      ? '月額が0円のあいだは賞与を出せません'
+      : `上限 ${L.yen(cap)}（月額の12ヶ月分）`;
+  };
+
+  const draw = () => {
+    syncControls();
     const est = L.officerPayEstimate(state, { monthly, bonus });
-    // v31.1: ウィンドウ外でもスライダーは動かせる（試算だけできる）。無効化するのは確定ボタンだけ。
-    const confirmDisabled = !win.open;
     const bonusDisabled = monthly === 0;
-    const isSettlementMonth = state.corpFiscalMonth != null && L.calMonthOf(state.month) === state.corpFiscalMonth;
-    const windowNote = win.open
-      ? `<div class="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-800 font-bold">⏳ 今月中に確定してください。確定するまで翌月へ進めません</div>`
-      : isSettlementMonth
-      ? `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800">📊 決算が確定しました。確定できるのは来月（期首月）です。ここでは試算だけできます</div>`
-      : `<div class="text-xs bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800">⚠️ 今は改定できません（${
-          win.reason === 'retired' ? '退任済み' : win.reason === 'not_incorporated' ? '未法人化' : `次の改定は ${L.fmtYM(win.nextOpenMonth)}`
-        }）。ここでは試算だけできます</div>`;
-    body.innerHTML = `
-      ${windowNote}
-      <div>
-        <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">${term('fixed_monthly_pay', '月額報酬')}</span><span class="font-bold text-lg">${L.yen(monthly)}</span></div>
-        <input id="op-monthly" type="range" min="0" max="1500000" step="50000" value="${monthly}" class="w-full">
-      </div>
-      <div>
-        <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">${term('predetermined_bonus', '賞与')}</span><span class="font-bold text-lg">${L.yen(bonus)}</span></div>
-        <input id="op-bonus" type="range" min="0" max="${cap}" step="250000" value="${bonus}" class="w-full" ${bonusDisabled ? 'disabled' : ''}>
-        ${monthly === 0 ? `<div class="text-[10.5px] text-slate-400 mt-0.5">月額が0円のあいだは賞与を出せません</div>` : `<div class="text-[10.5px] text-slate-400 mt-0.5">上限 ${L.yen(cap)}（月額の12ヶ月分）</div>`}
-      </div>
+    rest.innerHTML = `
       <div class="${bonus > 0 ? '' : 'opacity-40'}">
         <label class="text-sm font-bold">賞与の支給月</label>
         <select id="op-bonus-month" class="w-full border rounded p-2 text-sm mt-1" ${bonusDisabled || bonus === 0 ? 'disabled' : ''}>
@@ -11844,20 +11905,18 @@ function openOfficerPaySimulator(back) {
         <div class="text-[10.5px] font-normal opacity-80 mt-0.5">据え置きでもOK・今期は変更できません</div>
       </button>
     `;
-    body.querySelector('#op-monthly')?.addEventListener('input', (e) => { monthly = Number(e.target.value); draw(); });
-    body.querySelector('#op-bonus')?.addEventListener('input', (e) => { bonus = Number(e.target.value); draw(); });
-    body.querySelector('#op-bonus-month')?.addEventListener('change', (e) => { bonusMonth = Number(e.target.value); draw(); });
-    body.querySelector('#op-reco-btn')?.addEventListener('click', () => {
+    rest.querySelector('#op-bonus-month')?.addEventListener('change', (e) => { bonusMonth = Number(e.target.value); draw(); });
+    rest.querySelector('#op-reco-btn')?.addEventListener('click', () => {
       recoOpen = !recoOpen;
       if (recoOpen && !reco) reco = L.officerPayRecommend(state);
       draw();
     });
-    body.querySelectorAll('.op-reco-apply').forEach(b => b.addEventListener('click', () => {
+    rest.querySelectorAll('.op-reco-apply').forEach(b => b.addEventListener('click', () => {
       monthly = Number(b.dataset.monthly);
       bonus = Number(b.dataset.bonus);
       draw();
     }));
-    body.querySelector('#op-confirm')?.addEventListener('click', () => {
+    rest.querySelector('#op-confirm')?.addEventListener('click', () => {
       const r = L.setOfficerPay(state, { monthly, bonus, bonusMonth: bonus > 0 ? bonusMonth : null });
       if (!r.done) return;
       state = r.state;
@@ -11868,6 +11927,8 @@ function openOfficerPaySimulator(back) {
       save(); render(); close(); back?.();
     });
   };
+  monthlyEl.addEventListener('input', (e) => { monthly = Number(e.target.value); draw(); });
+  bonusEl.addEventListener('input', (e) => { bonus = Number(e.target.value); draw(); });
   draw();
   overlay.querySelector('#op-close').addEventListener('click', dismiss(close));
   overlay.querySelector('#op-back').addEventListener('click', () => {
@@ -11905,14 +11966,29 @@ function openOfficerRetirementModal(back) {
           <button id="or-close" class="text-slate-400 text-xl leading-none shrink-0">✕</button>
         </div>
       </div>
-      <div id="or-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3"></div>
+      <div id="or-body" class="p-4 overflow-y-auto min-h-0 flex-1 space-y-3">
+        <table class="w-full text-sm">
+          <tr><td>勤続年数</td><td class="text-right font-bold">${years}年</td></tr>
+          <tr><td>在任中の平均月額報酬</td><td class="text-right">${L.yen(avgMonthly)}</td></tr>
+          <tr class="border-t"><td>${term('retirement_allowance', '器の上限')}（${term('merit_multiplier', '功績倍率')}3.0）</td><td class="text-right font-bold">${L.yen(allowance)}</td></tr>
+        </table>
+        <div>
+          <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">支給額</span><span id="or-amount-v" class="font-bold text-lg"></span></div>
+          <input id="or-amount" type="range" min="0" max="${maxAmount}" step="100000" value="${amount}" class="w-full" ${maxAmount === 0 ? 'disabled' : ''}>
+        </div>
+        <div id="or-rest" class="space-y-3"></div>
+      </div>
     </div>
   </div>`);
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
   const body = overlay.querySelector('#or-body');
+  const amountEl = body.querySelector('#or-amount');
+  const amountVal = body.querySelector('#or-amount-v');
+  const rest = body.querySelector('#or-rest');
 
   const draw = () => {
+    amountVal.textContent = L.yen(amount);
     const allowed = Math.min(amount, allowance);
     const disallowed = amount - allowed;
     const base = Math.max(0, amount - deduction);
@@ -11924,16 +12000,7 @@ function openOfficerRetirementModal(back) {
     const netSaving = corpTaxSaved - tax;
     const insufficientCash = amount > state.cash;
 
-    body.innerHTML = `
-      <table class="w-full text-sm">
-        <tr><td>勤続年数</td><td class="text-right font-bold">${years}年</td></tr>
-        <tr><td>在任中の平均月額報酬</td><td class="text-right">${L.yen(avgMonthly)}</td></tr>
-        <tr class="border-t"><td>${term('retirement_allowance', '器の上限')}（${term('merit_multiplier', '功績倍率')}3.0）</td><td class="text-right font-bold">${L.yen(allowance)}</td></tr>
-      </table>
-      <div>
-        <div class="flex justify-between items-baseline text-sm mb-1"><span class="font-bold">支給額</span><span class="font-bold text-lg">${L.yen(amount)}</span></div>
-        <input id="or-amount" type="range" min="0" max="${maxAmount}" step="100000" value="${amount}" class="w-full" ${maxAmount === 0 ? 'disabled' : ''}>
-      </div>
+    rest.innerHTML = `
       <div class="text-xs bg-slate-50 rounded-lg p-2.5 space-y-1">
         <div class="flex justify-between"><span>損金算入額</span><span>${L.yen(allowed)}</span></div>
         ${disallowed > 0 ? `<div class="flex justify-between text-red-600 font-bold"><span>損金不算入額（器の超過分）</span><span>${L.yen(disallowed)}</span></div>` : ''}
@@ -11954,8 +12021,7 @@ function openOfficerRetirementModal(back) {
       ${insufficientCash ? `<div class="text-[11px] text-red-600 font-bold">⚠️ 現金が足りません</div>` : ''}
       <button id="or-confirm" class="w-full bg-red-600 text-white rounded py-2 text-sm font-bold ${(amount <= 0 || insufficientCash) ? 'opacity-40' : ''}" ${(amount <= 0 || insufficientCash) ? 'disabled' : ''}>支給して退任する（取り消せません）</button>
     `;
-    body.querySelector('#or-amount')?.addEventListener('input', (e) => { amount = Number(e.target.value); draw(); });
-    body.querySelector('#or-confirm')?.addEventListener('click', () => {
+    rest.querySelector('#or-confirm')?.addEventListener('click', () => {
       if (!confirm(`役員退職金 ${L.yen(amount)} を支給して退任します。以後、役員報酬・賞与は一切出せなくなります。よろしいですか？`)) return;
       const r = L.payRetirement(state, amount);
       if (!r.done) return;
@@ -11964,6 +12030,7 @@ function openOfficerRetirementModal(back) {
       save(); render(); close(); back?.();
     });
   };
+  amountEl.addEventListener('input', (e) => { amount = Number(e.target.value); draw(); });
   draw();
   overlay.querySelector('#or-close').addEventListener('click', dismiss(close));
   overlay.querySelector('#or-back').addEventListener('click', () => {
@@ -17339,7 +17406,7 @@ if (btnTerms) {
 }
   </script>
 <!-- tw-warmup:start -->
-<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-emerald-500 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-8 h-full hidden hover:bg-amber-600 hover:bg-emerald-50 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null oc-pick of-act op-reco-apply opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
+<div id="tw-warmup" aria-hidden="true" style="display:none" class="-bottom-2 -left-1 -mr-1 -mt-1.5 -right-1 -right-2 -top-1 -top-2 -top-3 -top-4 -translate-x-1/2 absolute acq-detail acq-toggle active active:bg-slate-100 active:scale-[0.98] ad-pick align-middle alloc-chip animate-pulse aspect-square badge-toast bank-detail-toggle bg-amber-100 bg-amber-50 bg-amber-500 bg-amber-600 bg-black/40 bg-black/50 bg-black/60 bg-canvas bg-emerald bg-emerald-100 bg-emerald-400/70 bg-emerald-50 bg-emerald-500 bg-emerald-600 bg-indigo-50 bg-navy bg-navy/95 bg-red-100 bg-red-50 bg-red-500 bg-red-600 bg-rose-100 bg-sky-50 bg-slate-100 bg-slate-200 bg-slate-300 bg-slate-50 bg-slate-500 bg-slate-800 bg-white bg-white/25 bg-white/70 bg-white/95 bgm-pick block border border-2 border-amber-200 border-amber-300 border-amber-400 border-b border-collapse border-emerald-200 border-emerald-500 border-l border-navy border-red-200 border-red-300 border-red-600 border-slate-200 border-slate-300 border-t border-t-2 border-white/20 bottom-0 bottom-1 col-span-2 corp cursor-pointer db-dismiss decoration-slate-400 divide-slate-200 divide-y diy-hit diy-hit-n diy-num diy-spot diy-tool dt-automanage dt-loan-schedule dt-map-jump dt-repair dt-sell dt-tab dt-to-corp dt-valueup exp-float fav-toggle fill-open finance-closing-check first:border-0 fixed flex flex-1 flex-col flex-wrap font-black font-bold font-mono font-normal font-semibold gap-0.5 gap-1 gap-1.5 gap-2 gap-2.5 gap-3 gap-4 gap-x-2 gap-y-0.5 grace-cancel grace-open grace-pick grid grid-cols-1 grid-cols-2 grid-cols-3 h-1.5 h-2 h-28 h-32 h-4 h-44 h-5 h-52 h-6 h-7 h-8 h-full hidden hover:bg-amber-600 hover:bg-emerald-50 hover:bg-emerald-700 hover:bg-navy-dark hover:bg-red-50 hover:bg-red-700 hover:bg-slate-100 hover:bg-slate-200 hover:bg-slate-50 hover:opacity-70 hud-accent hud-bad hud-divide hud-money hud-panel hud-sub hud-tile hud-track inline-block inline-flex inset-0 inset-y-0 italic items-baseline items-center items-end items-start items-stretch justify-between justify-center justify-end k kpi-advice-toggle kpi-btn kpi-check kpi-prop kpi-sell kpi-yen last:border-0 leading-none leading-relaxed leading-snug leading-tight left-1 left-1/2 left-3 line-clamp-2 line-through listing-buy listing-detail listing-locate ls-tab max max-h-72 max-h-80 max-h-[85vh] max-h-[90vh] max-h-[94vh] max-h-full max-w-[480px] max-w-[85%] max-w-lg max-w-md max-w-sm max-w-xs mb-0.5 mb-1 mb-1.5 mb-2 mb-3 md:text-5xl md:text-base md:w-52 mh-loan-row mh-tab min-h-0 min-w-0 min-w-[76px] ml-1 ml-1.5 modal-below-header modal-card mr-1 mr-2 ms-kpi mt-0.5 mt-1 mt-1.5 mt-2 mt-3 mt-4 mt-6 mt-auto mx-auto noi-koto-toggle notif-advice-toggle notif-dismiss notif-mode-btn notif-row null oc-pick of-act op-reco-apply opacity-80 opacity-90 overflow-hidden overflow-x-auto overflow-y-auto p-0 p-1 p-1.5 p-2 p-2.5 p-3 p-4 p-5 p-6 passes pay-bank pb-1 pb-1.5 pb-2 pct pl-1 pl-2 pl-3 pl-4 pl-[9px] pl-toggle-summary pointer-events-auto pointer-events-none pt-0 pt-0.5 pt-1 pt-1.5 pt-2 pt-3 pt-4 px-0.5 px-1 px-1.5 px-2 px-2.5 px-3 px-4 px-8 py-0.5 py-1 py-1.5 py-2 py-2.5 py-3 py-4 py-6 reform-check relative right-0 right-1 risk rounded rounded-2xl rounded-full rounded-lg rounded-sm rounded-t-lg rounded-xl rp-btn score sel-age sel-area sel-genre select-none shadow shadow-2xl shadow-lg shadow-md shadow-xl shrink-0 sl-preset sld-btn sld-row sm:h-40 sm:text-3xl sm:w-40 sold-row space-x-1 space-y-0.5 space-y-1 space-y-1.5 space-y-2 space-y-3 space-y-4 sr-empty sr-found sr-mundane sr-rare ssc-detail sticky tabular-nums term term-pop text-2xl text-3xl text-4xl text-5xl text-6xl text-7xl text-[10.5px] text-[10px] text-[11.5px] text-[11px] text-[9px] text-amber-200 text-amber-500 text-amber-600 text-amber-700 text-amber-800 text-base text-center text-emerald text-emerald-600 text-emerald-700 text-emerald-800 text-emerald-900 text-indigo-600 text-ink text-left text-lg text-navy text-red-400 text-red-600 text-red-700 text-red-800 text-right text-rose-600 text-rose-700 text-sky-800 text-slate-400 text-slate-500 text-slate-600 text-slate-700 text-slate-800 text-sm text-white text-white/45 text-white/70 text-white/80 text-white/90 text-xl text-xs theme theme-pick toast-below-header toast-close top-0 top-1 top-4 total touch-none tp-calc tp-foot tp-hint tp-scope tp-yomi tracking-[0.3em] tracking-normal tracking-widest transform transition-all transition-colors transition-transform trend-row-toggle truncate ttl-bg-photo ttl-ic ttl-ic-circle ttl-ic-label ttl-ic-row ttl-logo-wrap ttl-primary ttl-primary-caption tut-arrow tut-back tut-finish tut-nextstep tut-skip underline w-1 w-1.5 w-11 w-12 w-16 w-20 w-24 w-28 w-3 w-32 w-4 w-44 w-5 w-52 w-72 w-8 w-9 w-[92vw] w-[94vw] w-full w-px whitespace-nowrap wk-lender wk-opt wz-attr wz-diff wz-seedp z-10 z-20 z-30 z-40 z-50 z-[35] z-[55] z-[60] z-[65] z-[68] z-[70] z-[80] z-[90]"></div>
 <!-- tw-warmup:end -->
 </body>
 </html>
