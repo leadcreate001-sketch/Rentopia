@@ -437,7 +437,7 @@ img, video { max-width: 100%; height: auto; }
 .text-slate-700 { --tw-text-opacity: 1; color: rgb(51 65 85 / var(--tw-text-opacity, 1)); }
 .text-slate-800 { --tw-text-opacity: 1; color: rgb(30 41 59 / var(--tw-text-opacity, 1)); }
 .text-white { --tw-text-opacity: 1; color: rgb(255 255 255 / var(--tw-text-opacity, 1)); }
-.text-white\/45 { color: rgba(255, 255, 255, 0.45); }
+.text-white\/60 { color: rgba(255, 255, 255, 0.6); }
 .text-white\/70 { color: rgba(255, 255, 255, 0.7); }
 .text-white\/80 { color: rgba(255, 255, 255, 0.8); }
 .text-white\/90 { color: rgba(255, 255, 255, 0.9); }
@@ -826,6 +826,18 @@ img, video { max-width: 100%; height: auto; }
      文字だけダーク用に明るくなるためコントラスト比1.16＝判読不能だった。 */
   html[data-theme="dark"] .bg-orange-50   { background-color: rgba(251,146,60,0.12); }
   html[data-theme="dark"] .bg-orange-100  { background-color: rgba(251,146,60,0.18); }
+  /* v49: 不透明度つきの背景（bg-white/70 等）がダークの読み替えから丸ごと漏れていた。
+     暗い地に白を70%重ねると rgb(192,191,193) の明るい面になり、文字だけダーク用に明るく
+     なるためコントラスト1.49＝判読不能だった（振り返り診断の助言ボックスで実測）。
+     クラス名の / はセレクタでエスケープが要る。 */
+  html[data-theme="dark"] .bg-white\/70 { background-color: rgba(255,255,255,0.08); }
+  html[data-theme="dark"] .bg-white\/95 { background-color: rgba(255,255,255,0.92); }
+  /* v49: 不透明度つきの背景（bg-white/70 等）が読み替えから丸ごと漏れていた。
+     暗い地に白を70%重ねると rgb(192,191,193) の明るい面になり、文字だけダーク用に
+     明るくなるためコントラスト1.49＝判読不能だった（振り返り診断の助言ボックスで実測）。
+     クラス名に / を含むためセレクタでは / とエスケープが要る。 */
+  html[data-theme="dark"] .bg-white/70 { background-color: rgba(255,255,255,0.08); }
+  html[data-theme="dark"] .bg-white/95 { background-color: rgba(255,255,255,0.92); }
   html[data-theme="dark"] .bg-sky-50      { background-color: rgba(56,189,248,0.12); }
   html[data-theme="dark"] .bg-indigo-50   { background-color: rgba(165,180,252,0.14); }
 
@@ -1107,7 +1119,7 @@ const AI_RUNS={"beginner|low|short":{"setup":{"difficulty":"beginner","seedCash"
       ${iconBtn("ttl-ic-achievements","trophy","\u5B9F\u7E3E")}
       ${iconBtn("ttl-ic-settings","gear","\u8A2D\u5B9A")}
     </div>
-    <div class="absolute left-1/2 text-white/45" style="bottom:8px; font-size:10px; transform:translateX(-50%);">\xA9 Rentopia</div>
+    <div class="absolute left-1/2 text-white/60" style="bottom:8px; font-size:10px; transform:translateX(-50%);">\xA9 Rentopia</div>
   </div>`);m.appendChild(box);box.querySelector("#ttl-primary").addEventListener("click",()=>{if(hasSave)ttlContinueGame();else showSetup()});box.querySelector("#ttl-ic-new").addEventListener("click",()=>ttlStartFresh(hasSave));box.querySelector("#ttl-ic-continue").addEventListener("click",()=>{if(hasSave)ttlContinueGame();else ttlLightToast("\u30BB\u30FC\u30D6\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093")});box.querySelector("#ttl-ic-achievements").addEventListener("click",()=>openAchievementsModal());box.querySelector("#ttl-ic-settings").addEventListener("click",()=>openSettingsModal())}const BADGE_ALL_KEY="lm_badges_all";function loadBadgesAll(){try{const obj=JSON.parse(localStorage.getItem(BADGE_ALL_KEY)||"{}");return obj&&typeof obj==="object"?obj:{}}catch(e){return{}}}function saveBadgesAll(all){localStorage.setItem(BADGE_ALL_KEY,JSON.stringify(all))}function todayStr(){const d=new Date;const pad=n=>String(n).padStart(2,"0");return`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`}function recordBadgesAll(ids,month){if(!ids||!ids.length)return;const all=loadBadgesAll();let changed=false;ids.forEach(id=>{if(!all[id]){all[id]={date:todayStr(),month:month??null};changed=true}});if(changed)saveBadgesAll(all)}function badgeEntry(v){if(!v)return null;return typeof v==="string"?{date:v,month:null}:{date:v.date,month:v.month??null}}function migrateBadgesAllFromSave(s){if(s&&Array.isArray(s.badges)&&s.badges.length)recordBadgesAll(s.badges,s.month)}const BADGE_TIER={first_buy:"bronze",first_loan:"bronze",first_full:"bronze",first_sale:"bronze",five_properties:"silver",first_profit:"silver",debt_free:"silver",junk_flip:"gold",ad_free:"gold",appeal_master:"gold",goal_clear:"platinum",skill_master:"platinum"};const BADGE_TIER_STYLE={bronze:{shape:"scallop",from:"#e0a878",to:"#a1542a",ring:"#7c3f1d",label:"\u30D6\u30ED\u30F3\u30BA"},silver:{shape:"hex",from:"#e2e8f0",to:"#7c8ba1",ring:"#5b6878",label:"\u30B7\u30EB\u30D0\u30FC"},gold:{shape:"penta",from:"#fde68a",to:"#b45309",ring:"#8a4708",label:"\u30B4\u30FC\u30EB\u30C9"},platinum:{shape:"rosette",from:"#c7d2fe",to:"#4338ca",ring:"#312e81",label:"\u30D7\u30E9\u30C1\u30CA"}};function lobedPath(cx2,cy2,r,lobes,bulge){let d="";for(let i=0;i<lobes;i++){const a0=i/lobes*Math.PI*2-Math.PI/2;const a1=(i+1)/lobes*Math.PI*2-Math.PI/2;const am=(a0+a1)/2;const x0=cx2+Math.cos(a0)*r,y0=cy2+Math.sin(a0)*r;const x1=cx2+Math.cos(a1)*r,y1=cy2+Math.sin(a1)*r;const xm=cx2+Math.cos(am)*r*bulge,ym=cy2+Math.sin(am)*r*bulge;if(i===0)d+=`M${x0.toFixed(1)},${y0.toFixed(1)}`;d+=` Q${xm.toFixed(1)},${ym.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}`}return d+" Z"}function polyPath(cx2,cy2,r,n){const pts=[];for(let i=0;i<n;i++){const a=i/n*Math.PI*2-Math.PI/2;pts.push(`${(cx2+Math.cos(a)*r).toFixed(1)},${(cy2+Math.sin(a)*r).toFixed(1)}`)}return`M${pts.join(" L")} Z`}function tierShapePath(shape){if(shape==="scallop")return lobedPath(50,48,40,20,1.06);if(shape==="hex")return polyPath(50,48,42,6);if(shape==="penta")return polyPath(50,48,44,5);return lobedPath(50,48,36,12,1.22)}function badgeEmblemSvg(b,tier,unlocked){const st2=BADGE_TIER_STYLE[tier]||BADGE_TIER_STYLE.bronze;const path=tierShapePath(st2.shape);const ribbon=tier==="platinum"?`<path d="M40,78 L46,78 L43,96 Z" fill="#b91c1c"/><path d="M54,78 L60,78 L57,96 Z" fill="#b91c1c"/>`:"";return`<svg viewBox="0 0 100 100" class="w-full h-full" style="${unlocked?"":"filter:grayscale(1);opacity:.35"}">
     <path d="${path}" fill="none" stroke="${st2.ring}" stroke-width="5"/>
     <path d="${path}" fill="url(#badge-grad-${tier})"/>
