@@ -528,6 +528,15 @@ img, video { max-width: 100%; height: auto; }
   * { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-select: text; }
 
+  /* v52: iOSで短い間隔で2回タップするとダブルタップズームが発動し、連打が必要なボタン
+     （「働く」「情報を集める」）やモーダルの連続操作でページが勝手に拡大してしまう。
+     touch-action: manipulation は「ダブルタップズームだけ」を無効化し、スクロール（パン）と
+     ピンチズームは残すので拡大手段は失われない。iOS Safari は viewport meta の
+     user-scalable=no / maximum-scale=1 を無視するため、そちらでは直らない。
+     セレクタを * にしているのは詳細度0で、既存の .touch-none（地図キャンバス:none）／
+     .modal-card（pan-y）／.sld-btn（manipulation）を一切上書きしないため。 */
+  * { touch-action: manipulation; }
+
   /* v51: 結果カードの画像だけは長押しの保存メニューを出せるようにコールアウトを戻す。
      iOSは <a download> でカメラロールに入らないため、長押し保存が最後の逃げ道になる。 */
   #sp-img { -webkit-touch-callout: default; -webkit-user-select: auto; user-select: auto; }
